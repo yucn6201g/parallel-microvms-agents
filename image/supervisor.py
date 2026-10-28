@@ -73,6 +73,27 @@ def start_bootstrap():
     log("bootstrap started")
 
 
+VALIDATE_COMMANDS = (["claude", "--version"], ["codex", "--version"], ["tmux", "-V"], ["git", "--version"])
+validation = {"thread": None, "result": None}
+validation_lock = threading.Lock()
+
+
+def start_validation():
+    """検証を一度だけ裏で実行する。実行中は None、完了後は成否を返す。"""
+    with validation_lock:
+        if validation["thread"] is None:
+            def worker():
+                ok = True
+                for cmd in VALIDATE_COMMANDS:
+                    rc, out = run(cmd, timeout=120)
+                    log(f"validate {' '.join(cmd)}: rc={rc} {out.strip()[:200]}")
+                    ok = ok and rc == 0
+                validation["result"] = ok
+            validation["thread"] = threading.Thread(target=worker, daemon=True)
+            validation["thread"].start()
+        return validation["result"]
+
+
 def snapshot(reason, timeout):
     """ワークスペースを S3 に保存する。同時実行はしない。"""
     if not snapshot_lock.acquire(timeout=timeout):
@@ -153,11 +174,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def reply(self, code, body=None):
         data = json.dumps(body if body is not None else {}, ensure_ascii=False).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            log(f"client disconnected before response ({self.path})")
 
     def body(self):
         length = int(self.headers.get("Content-Length") or 0)
@@ -176,9 +200,12 @@ class HookHandler(Handler):
         if hook in ("ready", "resume", "suspend"):
             return self.reply(200)
         if hook == "validate":
-            # スナップショットからの起動を検証しつつ、実行時に読むページをプリフェッチ対象にする
-            ok = all(run([c, "--version"], timeout=20)[0] == 0 for c in ("claude", "codex", "tmux"))
-            return self.reply(200 if ok else 500)
+            # スナップショットからの起動を検証しつつ、実行時に読むページをプリフェッチ対象にする。
+            # 時間がかかるので裏で実行し、終わるまでは 503 (まだ準備中) を即座に返す
+            result = start_validation()
+            if result is None:
+                return self.reply(503)
+            return self.reply(200 if result else 500)
         if hook == "run":
             try:
                 session = json.loads(payload or b"{}")
