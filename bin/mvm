@@ -1,0 +1,818 @@
+#!/usr/bin/env bash
+# mvm - AWS Lambda MicroVMs 上で Claude Code / Codex を並列実行するためのローカル操作 CLI
+#
+# 手元 PC で動くのはこのスクリプト (AWS CLI / curl / websocat / ssh) だけで、
+# エージェント本体・ビルド・テストはすべて MicroVM 側で実行される。
+# macOS 標準の bash 3.2 でも動くように書いている (連想配列や mapfile は使わない)。
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SELF="$ROOT_DIR/bin/mvm"
+CONFIG_FILE="${PMVA_CONFIG:-$ROOT_DIR/config.env}"
+STATE_DIR="${PMVA_STATE_DIR:-$ROOT_DIR/.state}"
+
+API_PORT=8080
+SSH_BRIDGE_PORT=7681
+SHELL_PORT=8022
+HOOKS_JSON='{"port":9000,"microvmImageHooks":{"ready":"ENABLED","readyTimeoutInSeconds":120,"validate":"ENABLED","validateTimeoutInSeconds":60},"microvmHooks":{"run":"ENABLED","runTimeoutInSeconds":10,"resume":"ENABLED","resumeTimeoutInSeconds":5,"suspend":"ENABLED","suspendTimeoutInSeconds":10,"terminate":"ENABLED","terminateTimeoutInSeconds":60}}'
+
+die() { echo "error: $*" >&2; exit 1; }
+log() { echo "==> $*" >&2; }
+need() { command -v "$1" >/dev/null 2>&1 || die "$1 が見つかりません (${2:-インストールしてください})"; }
+
+usage() {
+  cat <<'EOF'
+使い方: mvm <command> [args]
+
+セットアップ
+  doctor                         前提ツール・認証・リージョン対応を確認
+  infra deploy | outputs | delete
+                                 CloudFormation で S3 / IAM ロール / ログを作成
+  secret set <kind> [--name N] [--file F]
+                                 認証情報を Secrets Manager に登録 (値は標準入力かファイルから)
+                                 kind: anthropic-api-key | claude-oauth-token | anthropic-gateway |
+                                       openai-api-key | codex-auth-json | github-token
+  secret ls
+  image build | status | base    エージェント実行イメージをビルド / 状態確認 / ベースイメージ一覧
+
+起動・停止
+  up <name> [options]            MicroVM を 1 台起動してエージェントを開始
+      --agent claude|codex|both|none
+      --claude-auth api-key|oauth-token|bedrock|gateway|interactive|none   --claude-secret <id>
+      --codex-auth api-key|chatgpt|interactive|none                        --codex-secret <id>
+      --github-secret <id> | --no-github
+      --repo <git url> [--branch <b>] [--base-branch <b>]
+      --prompt <text>            起動時にエージェントへ渡す最初の指示
+      --restore latest|<s3 uri>  ワークスペーススナップショットから復元
+      --claude-args <args> --codex-args <args> --model <id> --bedrock-region <r>
+      --idle <seconds|off> --max-duration <seconds>
+  fleet <count> [--prefix agent] [--prompts-file F] [up options]
+                                 <prefix>-01..NN をまとめて起動 (MAX_AGENTS まで)
+  ls [--all]                     セッション一覧
+  stop <name> [--no-save] | stop-all [--no-save]
+  suspend <name> | resume <name>
+  save <name>                    ワークスペースを S3 に保存
+  renew <name>                   保存 → 終了 → 同じ設定で再起動して復元 (8 時間制限の延長用)
+
+操作・確認
+  peek <name> [lines]            エージェント画面の末尾を表示 (接続せずに確認)
+  send <name> [--window W] [--no-enter] <text...>
+                                 エージェントに指示を送る (tmux に入力)
+  watch [seconds]                全セッションの状態を定期表示 (表示中は自動サスペンドされない)
+  ssh <name> [-- command]        SSH over WebSocket で接続 (既定で tmux にアタッチ)
+  ssh-config                     ~/.ssh/config 用の設定を出力 (VS Code Remote-SSH 等)
+  shell <name>                   AWS 標準のシェル接続 (SHELL_INGRESS)
+  token <name> [port]            エンドポイントと認証トークンを表示
+  logs [--follow]                CloudWatch Logs を表示
+  cost [options]                 コスト試算 (scripts/estimate_cost.py)
+EOF
+}
+
+# ---------------------------------------------------------------- 設定 / 共通
+
+load_config() {
+  [ -f "$CONFIG_FILE" ] || die "$CONFIG_FILE がありません。cp config.example.env config.env で作成してください"
+  set -a
+  # shellcheck disable=SC1090
+  . "$CONFIG_FILE"
+  set +a
+  : "${AWS_REGION:?config.env に AWS_REGION を設定してください}"
+  : "${PMVA_PREFIX:=pmva}" "${STACK_NAME:=pmva}" "${IMAGE_NAME:=pmva-agent}" "${BASE_IMAGE_ARN:=}"
+  : "${MEMORY_MIB:=4096}" "${MAX_AGENTS:=10}" "${MAX_DURATION_SECONDS:=28800}"
+  : "${IDLE_MAX_SECONDS:=1800}" "${IDLE_SUSPENDED_SECONDS:=21600}" "${IDLE_AUTO_RESUME:=true}"
+  : "${INGRESS_CONNECTORS:=HTTP_INGRESS SHELL_INGRESS}" "${SNAPSHOT_INTERVAL_SECONDS:=1800}"
+  : "${DEFAULT_AGENT:=claude}" "${DEFAULT_CLAUDE_AUTH:=oauth-token}" "${DEFAULT_CODEX_AUTH:=api-key}"
+  : "${DEFAULT_CLAUDE_ARGS:=}" "${DEFAULT_CODEX_ARGS:=}" "${BEDROCK_REGION:=$AWS_REGION}" "${CLAUDE_MODEL:=}"
+  : "${USE_GITHUB_TOKEN:=true}" "${GIT_USER_NAME:=}" "${GIT_USER_EMAIL:=}" "${SSH_PUBLIC_KEY_FILE:=}"
+  [ -n "$BASE_IMAGE_ARN" ] || BASE_IMAGE_ARN="arn:aws:lambda:$AWS_REGION:aws:microvm-image:al2023-1"
+  export AWS_REGION AWS_DEFAULT_REGION="$AWS_REGION"
+  mkdir -p "$STATE_DIR/sessions" "$STATE_DIR/tokens"
+  chmod 700 "$STATE_DIR" "$STATE_DIR/tokens"
+}
+
+lmv() { aws lambda-microvms "$@"; }
+
+account_id() {
+  local f="$STATE_DIR/account-id"
+  [ -s "$f" ] || aws sts get-caller-identity --query Account --output text > "$f"
+  cat "$f"
+}
+
+stack_output() {
+  local key="$1" cache="$STATE_DIR/stack-outputs.json" v
+  if [ ! -s "$cache" ]; then
+    aws cloudformation describe-stacks --stack-name "$STACK_NAME" --query 'Stacks[0].Outputs' --output json > "$cache" 2>/dev/null \
+      || { rm -f "$cache"; die "スタック $STACK_NAME が見つかりません。先に mvm infra deploy を実行してください"; }
+  fi
+  v="$(jq -r --arg k "$key" '.[] | select(.OutputKey == $k) | .OutputValue' "$cache")"
+  [ -n "$v" ] || die "スタック出力 $key がありません"
+  echo "$v"
+}
+
+valid_name() {
+  printf '%s' "$1" | grep -Eq '^[a-z0-9][a-z0-9-]{0,30}$' || die "名前は英小文字・数字・ハイフン (31 文字以内) にしてください: $1"
+}
+
+one_of() {
+  local v="$1" what="$2"; shift 2
+  local x
+  for x in "$@"; do [ "$v" = "$x" ] && return 0; done
+  die "$what は $* のいずれかを指定してください: $v"
+}
+
+session_file() { echo "$STATE_DIR/sessions/$1.json"; }
+
+session_field() {
+  local f
+  f="$(session_file "$1")"
+  [ -f "$f" ] || die "セッション $1 がありません (mvm ls で確認)"
+  jq -r "$2 // empty" "$f"
+}
+
+set_session_field() {
+  local f tmp
+  f="$(session_file "$1")"; tmp="$f.tmp"
+  jq "$2" "$f" > "$tmp" && mv "$tmp" "$f"
+}
+
+session_names() {
+  local f
+  for f in "$STATE_DIR"/sessions/*.json; do
+    [ -e "$f" ] || continue
+    basename "$f" .json
+  done
+}
+
+# MicroVM の状態。存在しなければ GONE。終了していればローカル状態にも反映する
+vm_state() {
+  local name="$1" id state
+  id="$(session_field "$name" .microvmId)"
+  state="$(lmv get-microvm --microvm-identifier "$id" --query state --output text 2>/dev/null || echo GONE)"
+  case "$state" in
+    TERMINATED|GONE) set_session_field "$name" '.terminated = true' ;;
+  esac
+  echo "$state"
+}
+
+is_active() {
+  local name="$1"
+  [ -f "$(session_file "$name")" ] || return 1
+  [ "$(session_field "$name" .terminated)" = "true" ] && return 1
+  case "$(vm_state "$name")" in
+    TERMINATED|TERMINATING|GONE) return 1 ;;
+  esac
+  return 0
+}
+
+active_count() {
+  local n=0 name
+  for name in $(session_names); do
+    if is_active "$name"; then n=$((n + 1)); fi
+  done
+  echo "$n"
+}
+
+# アプリ用トークン (最大 60 分) をキャッシュして使い回す
+auth_token() {
+  local name="$1" port="$2" f now exp tok id
+  f="$STATE_DIR/tokens/$name.$port"
+  now="$(date +%s)"
+  if [ -f "$f" ]; then
+    read -r exp tok < "$f" || true
+    if [ -n "${tok:-}" ] && [ "${exp:-0}" -gt $((now + 120)) ]; then echo "$tok"; return; fi
+  fi
+  id="$(session_field "$name" .microvmId)"
+  tok="$(lmv create-microvm-auth-token --microvm-identifier "$id" --expiration-in-minutes 60 \
+    --allowed-ports "[{\"port\":$port}]" --query 'authToken."X-aws-proxy-auth"' --output text)"
+  (umask 077; echo "$((now + 3600)) $tok" > "$f")
+  echo "$tok"
+}
+
+# MicroVM 内の状態/操作 API (:8080) を呼ぶ。トークンはプロセス一覧に出ないようヘッダファイルで渡す
+vm_api() {
+  local name="$1" method="$2" path="$3" data="${4:-}" host tok
+  host="$(session_field "$name" .endpoint)"
+  tok="$(auth_token "$name" "$API_PORT")"
+  if [ -n "$data" ]; then
+    curl -sS --fail-with-body --max-time "${CURL_MAX_TIME:-30}" -X "$method" "https://$host$path" \
+      -H @<(printf 'X-aws-proxy-auth: %s\nX-aws-proxy-port: %s\n' "$tok" "$API_PORT") \
+      -H 'Content-Type: application/json' --data-binary "$data"
+  else
+    curl -sS --fail-with-body --max-time "${CURL_MAX_TIME:-30}" -X "$method" "https://$host$path" \
+      -H @<(printf 'X-aws-proxy-auth: %s\nX-aws-proxy-port: %s\n' "$tok" "$API_PORT")
+  fi
+}
+
+find_image_arn() {
+  local arn
+  arn="$(lmv list-microvm-images --name-filter "$IMAGE_NAME" \
+    --query "items[?name=='$IMAGE_NAME'].imageArn | [0]" --output text 2>/dev/null || true)"
+  [ "$arn" = "None" ] && arn=""
+  echo "$arn"
+}
+
+# ---------------------------------------------------------------- doctor / infra / secret
+
+cmd_doctor() {
+  local ok=1 c v
+  for c in aws jq curl zip ssh websocat python3; do
+    if command -v "$c" >/dev/null 2>&1; then echo "  ok   $c"; else echo "  NG   $c"; ok=0; fi
+  done
+  v="$(aws --version 2>&1 || true)"
+  echo "  aws: $v"
+  if ! lmv help >/dev/null 2>&1; then
+    echo "  NG   AWS CLI が lambda-microvms に未対応です。AWS CLI v2 を最新版に更新してください"; ok=0
+  fi
+  if aws sts get-caller-identity --query Arn --output text >/dev/null 2>&1; then
+    echo "  ok   AWS 認証: $(aws sts get-caller-identity --query Arn --output text)"
+  else
+    echo "  NG   AWS 認証情報がありません (aws configure / aws sso login)"; ok=0
+  fi
+  if lmv list-managed-microvm-images --query 'items[].imageArn' --output text >/dev/null 2>&1; then
+    echo "  ok   $AWS_REGION で Lambda MicroVMs が利用可能:"
+    lmv list-managed-microvm-images --query 'items[].imageArn' --output text | tr '\t' '\n' | sed 's/^/         /'
+  else
+    echo "  NG   $AWS_REGION で list-managed-microvm-images に失敗 (リージョン非対応か権限不足)"; ok=0
+  fi
+  if [ -n "$SSH_PUBLIC_KEY_FILE" ] && [ -f "$SSH_PUBLIC_KEY_FILE" ]; then
+    echo "  ok   SSH 公開鍵: $SSH_PUBLIC_KEY_FILE"
+  else
+    echo "  --   SSH 公開鍵なし (mvm ssh は使えません。mvm shell かコンソールの Connect を使用)"
+  fi
+  [ "$ok" = 1 ] && echo "準備 OK" || { echo "上記の NG を解消してください"; return 1; }
+}
+
+cmd_infra() {
+  local sub="${1:-}"
+  case "$sub" in
+    deploy)
+      aws cloudformation deploy \
+        --template-file "$ROOT_DIR/infra/cloudformation.yaml" \
+        --stack-name "$STACK_NAME" \
+        --parameter-overrides "Prefix=$PMVA_PREFIX" "EnableBedrock=${ENABLE_BEDROCK:-true}" \
+        --capabilities CAPABILITY_NAMED_IAM \
+        --no-fail-on-empty-changeset
+      rm -f "$STATE_DIR/stack-outputs.json"
+      cmd_infra outputs
+      log "ローカルで mvm を使う IAM ユーザー/ロールに OperatorPolicyArn のポリシーをアタッチしてください"
+      ;;
+    outputs)
+      rm -f "$STATE_DIR/stack-outputs.json"
+      stack_output ArtifactBucketName >/dev/null
+      jq -r '.[] | "\(.OutputKey)\t\(.OutputValue)"' "$STATE_DIR/stack-outputs.json"
+      ;;
+    delete)
+      local bucket ans
+      bucket="$(stack_output ArtifactBucketName)"
+      printf 'スタック %s と S3 バケット %s の中身を削除します。よろしいですか? [y/N] ' "$STACK_NAME" "$bucket"
+      read -r ans
+      [ "$ans" = "y" ] || die "中止しました"
+      aws s3 rm "s3://$bucket" --recursive --only-show-errors
+      aws cloudformation delete-stack --stack-name "$STACK_NAME"
+      aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"
+      rm -f "$STATE_DIR/stack-outputs.json"
+      log "削除しました (Secrets Manager のシークレットとイメージは残っています)"
+      ;;
+    *) die "使い方: mvm infra deploy|outputs|delete" ;;
+  esac
+}
+
+cmd_secret() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    set)
+      local kind="${1:-}" name="" file="" tmp
+      [ -n "$kind" ] || die "使い方: mvm secret set <kind> [--name N] [--file F]"
+      shift
+      one_of "$kind" kind anthropic-api-key claude-oauth-token anthropic-gateway openai-api-key codex-auth-json github-token
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --name) name="$2"; shift 2 ;;
+          --file) file="$2"; shift 2 ;;
+          *) die "不明なオプション: $1" ;;
+        esac
+      done
+      [ -n "$name" ] || name="$PMVA_PREFIX/$kind"
+      case "$name" in "$PMVA_PREFIX"/*) ;; *) die "シークレット名は $PMVA_PREFIX/ で始めてください (実行ロールが読めるのはその配下のみ)" ;; esac
+      local val
+      if [ -n "$file" ]; then
+        val="$(cat "$file")"
+      elif [ -t 0 ]; then
+        printf '%s の値を入力 (表示されません): ' "$kind" >&2
+        read -rs val; echo >&2
+      else
+        val="$(cat)"
+      fi
+      [ -n "$val" ] || die "値が空です"
+      # 値をコマンドライン引数に載せない (プロセス一覧に出さない) ため一時ファイル経由で渡す
+      tmp="$(umask 077; mktemp "$STATE_DIR/secret.XXXXXX")"
+      # shellcheck disable=SC2064  # tmp はローカル変数なので今の値で展開しておく
+      trap "rm -f '$tmp'" EXIT
+      printf '%s' "$val" > "$tmp"
+      unset val
+      case "$kind" in
+        anthropic-gateway) jq -e '.baseUrl and .authToken' "$tmp" >/dev/null || die '{"baseUrl":"...","authToken":"..."} 形式の JSON を渡してください' ;;
+        codex-auth-json) jq -e . "$tmp" >/dev/null || die "ChatGPT ログイン済みの \$HOME/.codex/auth.json の内容 (JSON) を渡してください" ;;
+      esac
+      if aws secretsmanager describe-secret --secret-id "$name" >/dev/null 2>&1; then
+        aws secretsmanager put-secret-value --secret-id "$name" --secret-string "file://$tmp" --query Name --output text >/dev/null
+        log "更新しました: $name"
+      else
+        aws secretsmanager create-secret --name "$name" --secret-string "file://$tmp" \
+          --tags "Key=pmva-kind,Value=$kind" --query Name --output text >/dev/null
+        log "作成しました: $name"
+      fi
+      ;;
+    ls)
+      aws secretsmanager list-secrets --filters "Key=name,Values=$PMVA_PREFIX/" \
+        --query 'SecretList[].[Name,LastChangedDate]' --output text
+      ;;
+    *) die "使い方: mvm secret set|ls" ;;
+  esac
+}
+
+# ---------------------------------------------------------------- image
+
+cmd_image() {
+  local sub="${1:-}"
+  case "$sub" in
+    build) image_build ;;
+    status)
+      local arn
+      arn="$(find_image_arn)"
+      [ -n "$arn" ] || die "イメージ $IMAGE_NAME はまだありません (mvm image build)"
+      lmv get-microvm-image --image-identifier "$arn" \
+        --query '{state:state,latestActive:latestActiveImageVersion,latestFailed:latestFailedImageVersion,updatedAt:updatedAt}' --output table
+      lmv list-microvm-image-versions --image-identifier "$arn" --output table
+      ;;
+    base) lmv list-managed-microvm-images --output table ;;
+    *) die "使い方: mvm image build|status|base" ;;
+  esac
+}
+
+image_build() {
+  need zip
+  local bucket build_role log_group zipf key arn resp ver state reason waited=0
+  bucket="$(stack_output ArtifactBucketName)"
+  build_role="$(stack_output BuildRoleArn)"
+  log_group="$(stack_output LogGroupName)"
+  zipf="$STATE_DIR/image-artifact.zip"
+  rm -f "$zipf"
+  (cd "$ROOT_DIR/image" && zip -qr -X "$zipf" .)
+  key="images/$IMAGE_NAME/$(date -u +%Y%m%dT%H%M%SZ).zip"
+  log "資材をアップロード: s3://$bucket/$key"
+  aws s3 cp --only-show-errors "$zipf" "s3://$bucket/$key"
+
+  local common
+  common=(
+    --base-image-arn "$BASE_IMAGE_ARN"
+    --build-role-arn "$build_role"
+    --code-artifact "{\"uri\":\"s3://$bucket/$key\"}"
+    --cpu-configurations '[{"architecture":"ARM_64"}]'
+    --resources "[{\"minimumMemoryInMiB\":$MEMORY_MIB}]"
+    --hooks "$HOOKS_JSON"
+    --logging "{\"cloudWatch\":{\"logGroup\":\"$log_group\"}}"
+  )
+  arn="$(find_image_arn)"
+  if [ -n "$arn" ]; then
+    log "新しいバージョンをビルド: $arn"
+    resp="$(lmv update-microvm-image --image-identifier "$arn" "${common[@]}" --output json)"
+  else
+    log "イメージを作成: $IMAGE_NAME"
+    resp="$(lmv create-microvm-image --name "$IMAGE_NAME" \
+      --description "Claude Code / Codex agent runtime (parallel-microvms-agents)" "${common[@]}" --output json)"
+  fi
+  arn="$(jq -r .imageArn <<<"$resp")"
+  ver="$(jq -r .imageVersion <<<"$resp")"
+  log "ビルド中: $arn バージョン $ver (数分〜十数分かかります)"
+  while :; do
+    read -r state reason < <(lmv get-microvm-image-version --image-identifier "$arn" --image-version "$ver" \
+      --query '[state, stateReason]' --output text) || true
+    case "$state" in
+      SUCCESSFUL) log "ビルド成功: バージョン $ver"; break ;;
+      FAILED)
+        lmv list-microvm-image-builds --image-identifier "$arn" --image-version "$ver" \
+          --query 'items[].[architecture,buildState,stateReason]' --output table || true
+        die "ビルド失敗: $reason (ログ: $log_group)"
+        ;;
+    esac
+    [ "$waited" -lt 3600 ] || die "ビルドが 60 分以内に完了しませんでした"
+    sleep 15; waited=$((waited + 15))
+    printf '.' >&2
+  done
+  echo >&2
+}
+
+# ---------------------------------------------------------------- up / fleet
+
+cmd_up() {
+  [ $# -ge 1 ] || die "使い方: mvm up <name> [options]"
+  local name="$1"; shift
+  valid_name "$name"
+  local agent="$DEFAULT_AGENT" claude_auth="" codex_auth="" claude_secret="" codex_secret=""
+  local github_secret="" no_github=false repo="" branch="" base_branch="" prompt="" restore=""
+  local claude_args="$DEFAULT_CLAUDE_ARGS" codex_args="$DEFAULT_CODEX_ARGS" model="$CLAUDE_MODEL"
+  local bedrock_region="$BEDROCK_REGION" idle="$IDLE_MAX_SECONDS" max_duration="$MAX_DURATION_SECONDS"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --agent) agent="$2"; shift 2 ;;
+      --claude-auth) claude_auth="$2"; shift 2 ;;
+      --codex-auth) codex_auth="$2"; shift 2 ;;
+      --claude-secret) claude_secret="$2"; shift 2 ;;
+      --codex-secret) codex_secret="$2"; shift 2 ;;
+      --github-secret) github_secret="$2"; shift 2 ;;
+      --no-github) no_github=true; shift ;;
+      --repo) repo="$2"; shift 2 ;;
+      --branch) branch="$2"; shift 2 ;;
+      --base-branch) base_branch="$2"; shift 2 ;;
+      --prompt) prompt="$2"; shift 2 ;;
+      --restore) restore="$2"; shift 2 ;;
+      --claude-args) claude_args="$2"; shift 2 ;;
+      --codex-args) codex_args="$2"; shift 2 ;;
+      --model) model="$2"; shift 2 ;;
+      --bedrock-region) bedrock_region="$2"; shift 2 ;;
+      --idle) idle="$2"; shift 2 ;;
+      --max-duration) max_duration="$2"; shift 2 ;;
+      *) die "不明なオプション: $1" ;;
+    esac
+  done
+  one_of "$agent" --agent claude codex both none
+
+  # 使わないエージェントの認証は (明示されない限り) 行わない
+  if [ -z "$claude_auth" ]; then
+    case "$agent" in claude|both) claude_auth="$DEFAULT_CLAUDE_AUTH" ;; *) claude_auth=none ;; esac
+  fi
+  if [ -z "$codex_auth" ]; then
+    case "$agent" in codex|both) codex_auth="$DEFAULT_CODEX_AUTH" ;; *) codex_auth=none ;; esac
+  fi
+  one_of "$claude_auth" --claude-auth api-key oauth-token bedrock gateway interactive none
+  one_of "$codex_auth" --codex-auth api-key chatgpt interactive none
+
+  if [ -z "$claude_secret" ]; then
+    case "$claude_auth" in
+      api-key) claude_secret="$PMVA_PREFIX/anthropic-api-key" ;;
+      oauth-token) claude_secret="$PMVA_PREFIX/claude-oauth-token" ;;
+      gateway) claude_secret="$PMVA_PREFIX/anthropic-gateway" ;;
+    esac
+  fi
+  if [ -z "$codex_secret" ]; then
+    case "$codex_auth" in
+      api-key) codex_secret="$PMVA_PREFIX/openai-api-key" ;;
+      chatgpt) codex_secret="$PMVA_PREFIX/codex-auth-json" ;;
+    esac
+  fi
+  if [ "$no_github" = true ]; then
+    github_secret=""
+  elif [ -z "$github_secret" ] && [ "$USE_GITHUB_TOKEN" = true ]; then
+    github_secret="$PMVA_PREFIX/github-token"
+  fi
+  if [ -n "$repo" ] && [ -z "$branch" ]; then branch="pmva/$name"; fi
+
+  local bucket ssh_key=""
+  bucket="$(stack_output ArtifactBucketName)"
+  if [ "$restore" = "latest" ]; then restore="s3://$bucket/workspaces/$name/latest.tar.gz"; fi
+  if [ -n "$SSH_PUBLIC_KEY_FILE" ] && [ -f "$SSH_PUBLIC_KEY_FILE" ]; then ssh_key="$(head -n1 "$SSH_PUBLIC_KEY_FILE")"; fi
+
+  local payload
+  payload="$(jq -nc \
+    --arg name "$name" --arg agent "$agent" --arg region "$AWS_REGION" \
+    --arg claudeAuth "$claude_auth" --arg claudeSecret "$claude_secret" --arg claudeArgs "$claude_args" \
+    --arg claudeModel "$model" --arg bedrockRegion "$bedrock_region" \
+    --arg codexAuth "$codex_auth" --arg codexSecret "$codex_secret" --arg codexArgs "$codex_args" \
+    --arg githubSecret "$github_secret" --arg gitUserName "$GIT_USER_NAME" --arg gitUserEmail "$GIT_USER_EMAIL" \
+    --arg repo "$repo" --arg branch "$branch" --arg baseBranch "$base_branch" \
+    --arg prompt "$prompt" --arg restore "$restore" \
+    --arg snapshotBucket "$bucket" --argjson snapshotIntervalSeconds "$SNAPSHOT_INTERVAL_SECONDS" \
+    --arg sshPublicKey "$ssh_key" \
+    '{name:$name, agent:$agent, region:$region,
+      claudeAuth:$claudeAuth, claudeSecret:$claudeSecret, claudeArgs:$claudeArgs,
+      claudeModel:$claudeModel, bedrockRegion:$bedrockRegion,
+      codexAuth:$codexAuth, codexSecret:$codexSecret, codexArgs:$codexArgs,
+      githubSecret:$githubSecret, gitUserName:$gitUserName, gitUserEmail:$gitUserEmail,
+      repo:$repo, branch:$branch, baseBranch:$baseBranch, prompt:$prompt, restore:$restore,
+      snapshotBucket:$snapshotBucket, snapshotIntervalSeconds:$snapshotIntervalSeconds,
+      sshPublicKey:$sshPublicKey}
+     | with_entries(select(.value != ""))')"
+
+  launch "$name" "$payload" "$idle" "$max_duration"
+}
+
+launch() {
+  local name="$1" payload="$2" idle="$3" max_duration="$4"
+  [ "$(printf '%s' "$payload" | wc -c)" -le 4096 ] \
+    || die "runHookPayload が 4096 バイトを超えています。長い指示は起動後に mvm send で送ってください"
+  if is_active "$name"; then die "セッション $name は既に起動しています"; fi
+  local active
+  active="$(active_count)"
+  [ "$active" -lt "$MAX_AGENTS" ] || die "起動中のセッションが上限 ($MAX_AGENTS) に達しています"
+
+  local arn ver exec_role log_group connectors="" c resp args
+  arn="$(find_image_arn)"
+  [ -n "$arn" ] || die "イメージ $IMAGE_NAME がありません。先に mvm image build を実行してください"
+  ver="$(lmv get-microvm-image --image-identifier "$arn" --query latestActiveImageVersion --output text)"
+  [ -n "$ver" ] && [ "$ver" != "None" ] || die "利用可能なイメージバージョンがありません (mvm image status)"
+  exec_role="$(stack_output ExecutionRoleArn)"
+  log_group="$(stack_output LogGroupName)"
+  for c in $INGRESS_CONNECTORS; do
+    connectors="${connectors:+$connectors,}\"arn:aws:lambda:$AWS_REGION:aws:network-connector:aws-network-connector:$c\""
+  done
+
+  args=(
+    --image-identifier "$arn"
+    --image-version "$ver"
+    --execution-role-arn "$exec_role"
+    --run-hook-payload "$payload"
+    --maximum-duration-in-seconds "$max_duration"
+    --logging "{\"cloudWatch\":{\"logGroup\":\"$log_group\"}}"
+    --client-token "pmva-$name-$(date +%s)"
+  )
+  [ -z "$connectors" ] || args+=(--ingress-network-connectors "[$connectors]")
+  if [ "$idle" != "off" ] && [ "$idle" != "0" ]; then
+    args+=(--idle-policy "{\"maxIdleDurationSeconds\":$idle,\"suspendedDurationSeconds\":$IDLE_SUSPENDED_SECONDS,\"autoResumeEnabled\":$IDLE_AUTO_RESUME}")
+  fi
+
+  log "起動: $name (image $ver, ${MEMORY_MIB}MiB, idle=$idle, max=${max_duration}s)"
+  resp="$(lmv run-microvm "${args[@]}" --output json)"
+  jq -n --arg name "$name" --argjson resp "$resp" --argjson payload "$payload" \
+    --arg idle "$idle" --arg maxDuration "$max_duration" \
+    '{name:$name, microvmId:$resp.microvmId,
+      endpoint:($resp.endpoint | sub("^https?://"; "") | sub("/+$"; "")),
+      imageVersion:$resp.imageVersion, startedAt:$resp.startedAt,
+      idle:$idle, maxDuration:$maxDuration, payload:$payload, terminated:false}' \
+    > "$(session_file "$name")"
+  rm -f "$STATE_DIR/tokens/$name".*
+  log "起動しました: $name ($(jq -r .microvmId <<<"$resp"))"
+  log "  様子を見る: mvm peek $name   接続: mvm ssh $name (または mvm shell $name)"
+}
+
+cmd_fleet() {
+  [ $# -ge 1 ] || die "使い方: mvm fleet <count> [--prefix agent] [--prompts-file F] [up options]"
+  local count="$1"; shift
+  local prefix="agent" prompts_file="" pass=() i name line
+  printf '%s' "$count" | grep -Eq '^[0-9]+$' || die "count は数値で指定してください"
+  [ "$count" -le "$MAX_AGENTS" ] || die "count は MAX_AGENTS ($MAX_AGENTS) 以下にしてください"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --prefix) prefix="$2"; shift 2 ;;
+      --prompts-file) prompts_file="$2"; shift 2 ;;
+      *) pass+=("$1"); shift ;;
+    esac
+  done
+  [ -z "$prompts_file" ] || [ -f "$prompts_file" ] || die "$prompts_file がありません"
+  i=1
+  while [ "$i" -le "$count" ]; do
+    name="$(printf '%s-%02d' "$prefix" "$i")"
+    line=""
+    [ -z "$prompts_file" ] || line="$(sed -n "${i}p" "$prompts_file")"
+    if is_active "$name"; then
+      log "$name は起動済みのためスキップ"
+    elif [ -n "$line" ]; then
+      ( cmd_up "$name" ${pass[@]+"${pass[@]}"} --prompt "$line" ) || log "$name の起動に失敗しました"
+    else
+      ( cmd_up "$name" ${pass[@]+"${pass[@]}"} ) || log "$name の起動に失敗しました"
+    fi
+    i=$((i + 1))
+  done
+}
+
+# ---------------------------------------------------------------- 一覧 / 停止
+
+cmd_ls() {
+  local all=false name state
+  [ "${1:-}" = "--all" ] && all=true
+  printf '%-16s %-11s %-7s %-22s %-22s %s\n' NAME STATE AGENT AUTH STARTED MICROVM
+  for name in $(session_names); do
+    if [ "$all" = false ] && [ "$(session_field "$name" .terminated)" = "true" ]; then continue; fi
+    state="$(vm_state "$name")"
+    if [ "$all" = false ] && { [ "$state" = TERMINATED ] || [ "$state" = GONE ]; }; then continue; fi
+    printf '%-16s %-11s %-7s %-22s %-22s %s\n' "$name" "$state" \
+      "$(session_field "$name" .payload.agent)" \
+      "$(session_field "$name" '(.payload.claudeAuth // "-") + "/" + (.payload.codexAuth // "-")')" \
+      "$(session_field "$name" .startedAt)" "$(session_field "$name" .microvmId)"
+  done
+}
+
+cmd_save() {
+  local name="$1"
+  log "保存中: $name"
+  CURL_MAX_TIME=900 vm_api "$name" POST /snapshot '{}' | jq -r '.output // .error'
+}
+
+cmd_stop() {
+  local name="${1:-}" save=true state
+  [ -n "$name" ] || die "使い方: mvm stop <name> [--no-save]"
+  [ "${2:-}" = "--no-save" ] && save=false
+  state="$(vm_state "$name")"
+  case "$state" in TERMINATED|GONE) log "$name は既に終了しています"; return 0 ;; esac
+  if [ "$save" = true ] && [ "$state" = RUNNING ]; then
+    cmd_save "$name" || log "保存に失敗しました (terminate フックでもう一度試みます)"
+  fi
+  lmv terminate-microvm --microvm-identifier "$(session_field "$name" .microvmId)" >/dev/null
+  set_session_field "$name" '.terminated = true'
+  rm -f "$STATE_DIR/tokens/$name".*
+  log "終了しました: $name"
+}
+
+cmd_stop_all() {
+  local name
+  for name in $(session_names); do
+    [ "$(session_field "$name" .terminated)" = "true" ] && continue
+    cmd_stop "$name" "${1:-}" || true
+  done
+}
+
+cmd_renew() {
+  local name="${1:-}" payload bucket idle max_duration
+  [ -n "$name" ] || die "使い方: mvm renew <name>"
+  bucket="$(stack_output ArtifactBucketName)"
+  payload="$(session_field "$name" .payload | jq -c --arg r "s3://$bucket/workspaces/$name/latest.tar.gz" '.restore = $r | del(.prompt)')"
+  idle="$(session_field "$name" .idle)"
+  max_duration="$(session_field "$name" .maxDuration)"
+  cmd_stop "$name"
+  launch "$name" "$payload" "${idle:-$IDLE_MAX_SECONDS}" "${max_duration:-$MAX_DURATION_SECONDS}"
+}
+
+# ---------------------------------------------------------------- 確認 / 操作
+
+print_status() {
+  jq -r '"[\(.name)] agent=\(.agent) bootstrap=\(.bootstrap) lastSnapshot=\(.lastSnapshot // "-")",
+         (.windows[] | select(.name != "shell") | "--- \(.name) (\(.command)) ---", (.screen // ""))'
+}
+
+cmd_peek() {
+  local name="${1:-}" lines="${2:-30}"
+  [ -n "$name" ] || die "使い方: mvm peek <name> [lines]"
+  vm_api "$name" GET "/status?lines=$lines" | print_status
+}
+
+cmd_send() {
+  local name="${1:-}" window="" enter=true text body
+  [ -n "$name" ] || die "使い方: mvm send <name> [--window W] [--no-enter] <text...>"
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --window) window="$2"; shift 2 ;;
+      --no-enter) enter=false; shift ;;
+      --) shift; break ;;
+      *) break ;;
+    esac
+  done
+  text="$*"
+  if [ -z "$window" ]; then
+    case "$(session_field "$name" .payload.agent)" in codex) window=codex ;; *) window=claude ;; esac
+  fi
+  body="$(jq -nc --arg w "$window" --arg t "$text" --argjson e "$enter" '{window:$w, text:$t, enter:$e}')"
+  vm_api "$name" POST /send "$body" | jq -r 'if .ok then "送信しました" else "失敗: \(.error)" end'
+}
+
+cmd_watch() {
+  local interval="${1:-60}" name state out
+  while :; do
+    out="$(
+      date '+%Y-%m-%d %H:%M:%S'
+      for name in $(session_names); do
+        [ "$(session_field "$name" .terminated)" = "true" ] && continue
+        state="$(vm_state "$name")"
+        echo
+        if [ "$state" = RUNNING ]; then
+          vm_api "$name" GET "/status?lines=6" 2>/dev/null | print_status || echo "[$name] RUNNING (状態 API 応答なし)"
+        else
+          echo "[$name] $state"
+        fi
+      done
+    )"
+    clear
+    echo "$out"
+    echo
+    echo "(${interval} 秒ごとに更新 / Ctrl-C で終了。表示中のセッションは自動サスペンドされません)"
+    sleep "$interval"
+  done
+}
+
+cmd_shell() {
+  local name="${1:-}" id host tok saved
+  [ -n "$name" ] || die "使い方: mvm shell <name>"
+  need websocat "https://github.com/vi/websocat"
+  id="$(session_field "$name" .microvmId)"
+  host="$(session_field "$name" .endpoint)"
+  tok="$(lmv create-microvm-shell-auth-token --microvm-identifier "$id" --expiration-in-minutes 15 \
+    --query 'authToken."X-aws-proxy-auth"' --output text)"
+  log "接続します。入ったら agent-attach でエージェントの tmux に接続できます"
+  saved="$(stty -g 2>/dev/null || true)"
+  [ -z "$saved" ] || stty raw -echo
+  websocat --binary -H "Sec-WebSocket-Protocol: lambda-microvms.authentication.$tok, lambda-microvms, lambda-microvms.port.$SHELL_PORT" \
+    "wss://$host/shell" || true
+  [ -z "$saved" ] || stty "$saved"
+}
+
+ssh_opts() {
+  local name="$1"
+  printf '%s\n' \
+    -o "ProxyCommand='$SELF' _ssh-proxy $name" \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+    -o ServerAliveInterval=30 -o ServerAliveCountMax=4
+}
+
+cmd_ssh() {
+  local name="${1:-}" opts=() o
+  [ -n "$name" ] || die "使い方: mvm ssh <name> [-- command]"
+  shift
+  [ "${1:-}" = "--" ] && shift
+  need websocat "https://github.com/vi/websocat"
+  [ -n "$(session_field "$name" .payload.sshPublicKey)" ] \
+    || die "$name は SSH 公開鍵なしで起動されています (SSH_PUBLIC_KEY_FILE を設定して mvm renew)"
+  while IFS= read -r o; do opts+=("$o"); done < <(ssh_opts "$name")
+  if [ $# -eq 0 ]; then
+    exec ssh "${opts[@]}" -t "agent@pmva-$name" agent-attach
+  fi
+  exec ssh "${opts[@]}" "agent@pmva-$name" "$@"
+}
+
+# ssh の ProxyCommand から呼ばれる: 標準入出力を MicroVM 内の SSH ブリッジ (WebSocket) につなぐ
+cmd_ssh_proxy() {
+  local name="$1" host tok
+  host="$(session_field "$name" .endpoint)"
+  tok="$(auth_token "$name" "$SSH_BRIDGE_PORT")"
+  exec websocat --binary -E \
+    -H "Sec-WebSocket-Protocol: lambda-microvms.authentication.$tok, lambda-microvms, lambda-microvms.port.$SSH_BRIDGE_PORT" \
+    "wss://$host/"
+}
+
+cmd_ssh_config() {
+  local name
+  echo "# mvm ssh-config で生成 ($(date '+%Y-%m-%d %H:%M'))"
+  for name in $(session_names); do
+    [ "$(session_field "$name" .terminated)" = "true" ] && continue
+    cat <<EOF
+
+Host pmva-$name
+  HostName pmva-$name
+  User agent
+  ProxyCommand '$SELF' _ssh-proxy $name
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
+  LogLevel ERROR
+  ServerAliveInterval 30
+  ServerAliveCountMax 4
+EOF
+  done
+}
+
+cmd_token() {
+  local name="${1:-}" port="${2:-$API_PORT}"
+  [ -n "$name" ] || die "使い方: mvm token <name> [port]"
+  echo "endpoint: https://$(session_field "$name" .endpoint)"
+  echo "port:     $port"
+  echo "token:    $(auth_token "$name" "$port")"
+}
+
+cmd_logs() {
+  local group
+  group="$(stack_output LogGroupName)"
+  if [ "${1:-}" = "--follow" ]; then
+    aws logs tail "$group" --follow --since 10m
+  else
+    aws logs tail "$group" --since 1h
+  fi
+}
+
+# ---------------------------------------------------------------- main
+
+main() {
+  local cmd="${1:-help}"
+  [ $# -gt 0 ] && shift
+  case "$cmd" in
+    help|-h|--help) usage; return ;;
+    cost) exec python3 "$ROOT_DIR/scripts/estimate_cost.py" "$@" ;;
+  esac
+  need aws "AWS CLI v2 https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
+  need jq
+  load_config
+  case "$cmd" in
+    doctor) cmd_doctor ;;
+    infra) cmd_infra "$@" ;;
+    secret) cmd_secret "$@" ;;
+    image) cmd_image "$@" ;;
+    up) cmd_up "$@" ;;
+    fleet) cmd_fleet "$@" ;;
+    ls) cmd_ls "$@" ;;
+    stop) cmd_stop "$@" ;;
+    stop-all) cmd_stop_all "$@" ;;
+    suspend) lmv suspend-microvm --microvm-identifier "$(session_field "${1:?name}" .microvmId)" >/dev/null && log "サスペンドしました: $1" ;;
+    resume) lmv resume-microvm --microvm-identifier "$(session_field "${1:?name}" .microvmId)" >/dev/null && log "レジュームしました: $1" ;;
+    save) cmd_save "${1:?name}" ;;
+    renew) cmd_renew "$@" ;;
+    peek) cmd_peek "$@" ;;
+    send) cmd_send "$@" ;;
+    watch) cmd_watch "$@" ;;
+    shell) cmd_shell "$@" ;;
+    ssh) cmd_ssh "$@" ;;
+    _ssh-proxy) cmd_ssh_proxy "$@" ;;
+    ssh-config) cmd_ssh_config ;;
+    token) cmd_token "$@" ;;
+    logs) cmd_logs "$@" ;;
+    *) usage; die "不明なコマンド: $cmd" ;;
+  esac
+}
+
+main "$@"

@@ -1,0 +1,4 @@
+# parallel-microvms-agents: セッションごとの環境変数 (bootstrap.sh が生成)
+[ -f "$HOME/.pmva/env.sh" ] && . "$HOME/.pmva/env.sh"
+export PATH="$HOME/.local/bin:$PATH"
+alias attach='agent-attach'

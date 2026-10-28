@@ -1,0 +1,7 @@
+# ローカル設定と状態 (セッション情報・認証トークンのキャッシュを含む)
+config.env
+.state/
+
+__pycache__/
+*.pyc
+.DS_Store
