@@ -1058,10 +1058,32 @@ def cmd_token(args):
 
 
 def cmd_logs(args):
+    """CloudWatch Logs を表示する (AWS CLI v1 には logs tail が無いので filter-log-events で実装)。"""
     group = stack_output("LogGroupName")
-    if args.follow:
-        return aws_interactive("logs", "tail", group, "--follow", "--since", "10m")
-    return aws_interactive("logs", "tail", group, "--since", "1h")
+    start = int((time.time() - (600 if args.follow else 3600)) * 1000)
+    seen = set()
+    try:
+        while True:
+            token = None
+            while True:
+                extra = ["--next-token", token] if token else []
+                r = aws("logs", "filter-log-events", "--log-group-name", group,
+                        "--start-time", str(start), *extra, check=False) or {}
+                for e in r.get("events", []):
+                    if e["eventId"] in seen:
+                        continue
+                    seen.add(e["eventId"])
+                    ts = time.strftime("%H:%M:%S", time.localtime(e["timestamp"] / 1000))
+                    print(f"{ts} {e.get('logStreamName', '')} {e['message'].rstrip()}", flush=True)
+                    start = max(start, e["timestamp"])
+                token = r.get("nextToken")
+                if not token:
+                    break
+            if not args.follow:
+                return 0
+            time.sleep(5)
+    except KeyboardInterrupt:
+        return 0
 
 
 # ---------------------------------------------------------------- 引数
