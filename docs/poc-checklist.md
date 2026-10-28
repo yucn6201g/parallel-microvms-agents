@@ -3,6 +3,26 @@
 Lambda MicroVMs は提供開始から日が浅く、この資材は API 仕様 (AWS の API モデルとエージェント向けドキュメント) をもとに作っています。実機で未検証の点を、**1 台で上から順に**確認してから並列化してください。
 結果は下の「結果」欄に記入して、このリポジトリにコミットしておくと後で役立ちます。
 
+## 0. 事前確認済みの項目 (2026-10-28、Claude Code のクラウドセッションで実施)
+
+AWS の認証情報がない状態で、確認できる範囲を先に検証しました。
+
+| 項目 | 結果 |
+|---|---|
+| AWS API (STS / Lambda / CloudFormation / Secrets Manager / Logs, ap-northeast-1) への到達 | OK |
+| AWS CLI が `lambda-microvms` コマンドに対応 (aws-cli 1.46.2 / botocore 1.43.62) | OK。`ListManagedMicrovmImages` まで到達し、認証で拒否された |
+| Dockerfile のダウンロード元: Node.js 22.20.0 (arm64) と SHASUMS、websocat 1.13.0 (aarch64-musl) | OK (存在を確認) |
+| Claude Code 2.1.312: Node 22 以上が必要。linux-arm64 のネイティブ版あり。`setup-token`、`--dangerously-skip-permissions`、`apiKeyHelper`、`CLAUDE_CODE_OAUTH_TOKEN`、`hasCompletedOnboarding`、`hasTrustDialogAccepted` が存在 | OK |
+| Codex 0.165.0: linux-arm64 版あり。`codex login --with-api-key` (標準入力から読む)、`--device-auth`、`--dangerously-bypass-approvals-and-sandbox`、`trust_level` が存在 | OK |
+| ARM64 のイメージを手元でビルド | 未確認。ベースイメージのダウンロードと `cdn.amazonlinux.com` がクラウドセッションのネットワーク制限で拒否された (実際のビルドは AWS 側で行うので影響しない) |
+
+### クラウドセッション (Claude Code on the web) から PoC を実行する場合の準備
+
+1. 環境の設定 (タイトルバーのクラウド環境メニュー → Edit) で環境変数を登録する: `AWS_ACCESS_KEY_ID`、`AWS_SECRET_ACCESS_KEY` (一時認証情報なら `AWS_SESSION_TOKEN` も)
+2. 同じ画面の Network access の Allowed domains に `*.lambda-microvm.ap-northeast-1.on.aws` を追加する。`mvm peek` / `send` / `ssh` が MicroVM のエンドポイントに接続するために必要
+3. 新しいセッションを開始する (環境の設定は新しいセッションから反映される)
+4. AWS CLI は `pip install -U awscli` で入れたものでも `lambda-microvms` に対応している
+
 ## A. 環境
 
 - [ ] `mvm doctor` がすべて OK になる (AWS CLI のバージョン、東京リージョン対応、ベースイメージ ARN)
