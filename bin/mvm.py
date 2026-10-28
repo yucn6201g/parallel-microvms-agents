@@ -983,7 +983,7 @@ def cmd_ssh(args):
     ssh = shutil.which("ssh") or die("ssh が見つかりません (Windows は「オプション機能」で OpenSSH クライアントを追加)")
     if not load_session(args.name)["payload"].get("sshPublicKey"):
         die(f"{args.name} は SSH 公開鍵なしで起動されています (SSH_PUBLIC_KEY_FILE を設定して mvm renew)")
-    command = [c for c in args.command if c != "--"]
+    command = [c for c in args.remote_command if c != "--"]
     host = f"agent@pmva-{args.name}"
     if command:
         return subprocess.call([ssh, *ssh_options(args.name), host, *command])
@@ -1169,7 +1169,7 @@ def build_parser():
     x.set_defaults(func=cmd_watch)
     x = sub.add_parser("ssh", help="SSH over WebSocket で接続 (既定で tmux にアタッチ)")
     x.add_argument("name")
-    x.add_argument("command", nargs=argparse.REMAINDER)
+    x.add_argument("remote_command", nargs=argparse.REMAINDER, metavar="command")
     x.set_defaults(func=cmd_ssh)
     x = sub.add_parser("_ssh-proxy")
     x.add_argument("name")
