@@ -18,34 +18,45 @@ AWS の認証情報がない状態で、確認できる範囲を先に検証し�
 
 ### クラウドセッション (Claude Code on the web) から PoC を実行する場合の準備
 
-1. 環境の設定 (タイトルバーのクラウド環境メニュー → Edit) で環境変数を登録する: `AWS_ACCESS_KEY_ID`、`AWS_SECRET_ACCESS_KEY` (一時認証情報なら `AWS_SESSION_TOKEN` も)
+1. 環境の設定 (タイトルバーのクラウド環境メニュー → Edit) のネットワークシークレットに **AWS SigV4** として `AWS_ACCESS_KEY_ID`、`AWS_SECRET_ACCESS_KEY` を登録する (一時認証情報なら `AWS_SESSION_TOKEN` も)。キーは作業環境に置かれず、プロキシが署名する (今回の PoC はこの方式で実施)
 2. 同じ画面の Network access の Allowed domains に `*.lambda-microvm.ap-northeast-1.on.aws` を追加する。`mvm peek` / `send` / `ssh` が MicroVM のエンドポイントに接続するために必要
 3. 新しいセッションを開始する (環境の設定は新しいセッションから反映される)
 4. AWS CLI は `pip install -U awscli` で入れたものでも `lambda-microvms` に対応している
 
 ## A. 環境
 
-- [ ] `mvm doctor` がすべて OK になる (AWS CLI のバージョン、東京リージョン対応、ベースイメージ ARN)
-- [ ] Service Quotas で、MicroVM の同時実行数とメモリ合計の上限が 10 台分 (4GB × 10 = 40GB) 以上ある。足りなければ引き上げを申請する
-- [ ] `mvm infra deploy` が成功し、操作者に `pmva-operator` ポリシーを付けた
+- [x] `mvm doctor` がすべて OK になる (AWS CLI のバージョン、東京リージョン対応、ベースイメージ ARN)
+  - ベースイメージ ARN は `arn:aws:lambda:ap-northeast-1:aws:microvm-image:al2023-1` (既定値のままで OK)
+- [x] Service Quotas を確認した → **10 台並列には引き上げが必要**
+  - `Max allocated ARM_64 MicroVM memory` (L-CD1C0CC4) が **8GB**。4GB の VM は同時に 2 台まで。10 台 × 4GB なら 40GB 以上に引き上げを申請する
+  - `Rate of RunMicrovm API requests` (L-535CA9B6) が **1 回/秒** (バースト 1)。`mvm fleet` は 1 台ずつ順に起動し、1 台あたり約 4 秒かかるので通常は当たらない
+  - `Max Execution Duration of a MicroVM` は 8 時間、イメージ数 100、イメージあたりのバージョン数 50
+- [x] `mvm infra deploy` が成功した (操作者は管理者ユーザーだったので `pmva-operator` のアタッチは未確認)
 
 ## B. イメージビルド
 
-- [ ] `mvm image build` が SUCCESSFUL になる
-  - ベースイメージ `al2023-minimal` に `dnf` があるか (無ければ `microdnf` を使う作りになっている)
-  - ビルド中に nodejs.org、npm、github.com (websocat、gh) からダウンロードできるか
-- [ ] スナップショットのサイズを記録する (`aws lambda-microvms get-microvm-image-build`)。起動・再開時間の目安になる
+- [x] `mvm image build` が SUCCESSFUL になる (4 回失敗して修正した上で、v5 で成功)
+  - ベースイメージ `al2023-minimal` で `dnf` は使えた
+  - nodejs.org、npm、github.com からダウンロードできた
+  - 修正 1: gh の rpm リポジトリが GPG 検証に失敗 → リリースの tar.gz を checksum 付きで入れる方式に変更
+  - 修正 2: validate フックで `tmux --version` (誤り。正しくは `-V`) を待って接続が切れた → 検証を裏で実行し、終わるまで 503 を返す方式に変更
+  - 修正 3: `/run` フックの本文は `{"microvmId": "...", "runHookPayload": "<文字列>"}` で届く (ペイロードそのものではない) → 中身を取り出すように修正
+- [x] スナップショットのサイズを記録した: メモリ約 713MB、イメージ本体約 2.8GB、追加ディスク約 25MB。Graviton 3 と 4 向けの 2 ビルドが作られる
 
 ## C. 起動と接続
 
-- [ ] `mvm up test-01 --agent none` で起動し、`mvm peek test-01` で `bootstrap=ready` になる
-- [ ] `INGRESS_CONNECTORS` の `HTTP_INGRESS` の ARN が正しい。`SHELL_INGRESS` と併用しても 8080 にアクセスできる
-  - 失敗する場合は `INGRESS_CONNECTORS="SHELL_INGRESS"` も試す
-- [ ] AWS コンソールの MicroVM 詳細画面の Connect でシェルに入れる。入ったときのユーザー (`id`) を記録する
-- [ ] `mvm shell test-01` で操作できる。raw モードの表示崩れや、ウィンドウサイズ変更の反映を確認する
-- [ ] `mvm ssh test-01` で tmux にアタッチできる (SSH over WebSocket)
-- [ ] トークンの有効期限 (60 分) を過ぎても、確立済みの SSH 接続が維持されるか
-- [ ] VS Code Remote-SSH で接続できる (`mvm ssh-config --install`)
+- [x] `mvm up test-01 --agent none` で起動し、`mvm peek test-01` で `bootstrap=ready` になる (`run-microvm` が約 4 秒、ready まで 9〜10 秒)
+- [x] `INGRESS_CONNECTORS` の `HTTP_INGRESS` の ARN は正しい。`SHELL_INGRESS` と併用して 8080 (peek / send) にアクセスできた
+- [ ] AWS コンソールの Connect (未確認: クラウドセッションからはコンソールを操作できない)
+- [x] `mvm shell test-01` で操作できる。入ったときのユーザーは **root**。接続直後に `{"type":"session_init",...}` という制御メッセージが届く (mvm 側で非表示にした)
+  - 端末を割り当てない (標準入力をパイプにした) 状態でのみ確認。raw モードやウィンドウサイズ変更は C2 で手元 PC から確認する
+- [x] `mvm ssh test-01` で tmux にアタッチ / デタッチできる (擬似端末を割り当てて確認)
+  - 修正 4: `mvm ssh <name>` (コマンドなし) でヘルプが出る不具合 → 修正
+  - 修正 5: SSH 経由では tmux が日本語を `_` に置き換えた (ロケールが引き継がれない) → `tmux -u` と `LANG=C.UTF-8` で修正し、v5 で日本語の表示を確認
+  - 5MB の転送でハッシュが一致 (約 3.8 秒)
+  - VM 内から見えるリソースは 8 vCPU / 16GB / ディスク 16GB (4GB ベースラインの 4 倍までバースト)
+- [ ] トークンの有効期限 (60 分) を過ぎても確立済みの SSH 接続が維持されるか (未確認: 60 分以上の接続が必要)
+- [ ] VS Code Remote-SSH (未確認: C2 で手元 PC から確認する)
 
 ## C2. 手元 PC の OS ごとの確認
 
@@ -63,24 +74,27 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 
 ## D. エージェントと認証
 
-使う予定の方式をすべて確認します。
+今回の PoC では Bedrock と `--agent none` のみ確認しました。
 
-- [ ] Claude Code: `oauth-token` / `api-key` / `bedrock` / `gateway` / `interactive`
-- [ ] Codex: `api-key` / `chatgpt` / `interactive` (`codex login --device-auth`)
-- [ ] 起動直後にオンボーディングや「このフォルダを信頼しますか？」の確認で止まらない
-- [ ] `mvm up ... --prompt "..."` の初期指示が実行される
-- [ ] `mvm send` で送った指示がエージェントに届く (Enter が送信として扱われる)
-- [ ] `sudo dnf install -y <pkg>` が VM 内で使える (制限された Linux capabilities の下で sudo が動くか)
-- [ ] GitHub への clone / push、`gh pr create` ができる
+- [x] Claude Code: `bedrock` → VM から Bedrock まで届くことを確認。ただし、このアカウントでは Bedrock の Anthropic モデル利用が有効になっていないため `API Error: 400 Access to Anthropic models is not allowed for this account.` で止まる (手元から直接呼んでも同じエラー)。Bedrock コンソールでモデルの利用申請をすれば使える見込み
+  - 推論プロファイルは `jp.anthropic.claude-haiku-5-5` で確認 (Claude Code の表示は「Haiku 5.5 · Amazon Bedrock」)
+- [ ] Claude Code の `oauth-token` / `api-key` / `gateway` / `interactive` (未確認)
+- [ ] Codex の `api-key` / `chatgpt` / `interactive` (未確認)
+- [x] 起動直後にオンボーディングや「このフォルダを信頼しますか？」の確認で止まらない
+- [x] `mvm up ... --prompt "..."` の初期指示が入力・実行される
+- [x] `mvm send` で送った指示 (日本語を含む) がエージェントに届き、Enter で送信される
+- [x] `sudo` は**使えない**: コンテナに no_new_privs が付いている (`sudo: The "no new privileges" flag is set`)。イメージから sudo を外し、root が必要な作業は `mvm shell` (root) で行う方針にした
+- [ ] GitHub への clone / push、`gh pr create` (未確認: GitHub トークンを登録していない)
 
 ## E. ライフサイクル
 
-- [ ] 何も接続しない状態で `IDLE_MAX_SECONDS` 後にサスペンドされる
-- [ ] `mvm ssh` で接続中は (ServerAlive の通信があるので) サスペンドされない
-- [ ] サスペンド → 自動レジューム後に tmux とエージェントのプロセスが残っており、作業を続けられる (API への再接続)
-- [ ] `mvm save` で S3 に保存され、`mvm renew` で別の VM に復元される
-- [ ] terminate フック (60 秒以内) で保存が完了するか (ワークスペースの大きさ次第)
-- [ ] `--idle off` で 8 時間後に終了する
+- [x] 何も接続しない状態で `IDLE_MAX_SECONDS` 後にサスペンドされる (120 秒の設定で、最後の通信から約 132 秒で SUSPENDED)
+- [x] `mvm ssh` で接続中はサスペンドされない (120 秒の設定で 3.5 分間接続し続け、ずっと RUNNING)
+- [x] サスペンド → 自動レジュームで、tmux・バックグラウンドのプロセス・`/tmp` のファイルが残っていた。`peek` 1 回でレジュームし、応答まで 1.4 秒
+  - エージェントが API を呼んでいる最中のサスペンドからの再接続は未確認 (Bedrock が使えなかったため)
+- [x] `mvm save` で S3 に保存 (12.8 秒) され、`mvm renew` で別の VM に復元された (保存 → 終了 → 起動 → 復元まで 19 秒。git の履歴も復元)
+- [x] terminate フックで保存される (`--no-save` で止めた VM の保存ファイルが `workspace-history/` に残っていた)
+- [ ] `--idle off` で 8 時間後に終了する (未確認: 8 時間かかる)
 
 ## F. 並列化
 
@@ -92,11 +106,14 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 
 | 項目 | 結果 / メモ |
 |---|---|
-| 実行日 / AWS CLI バージョン | |
-| 手元 PC の OS / Python バージョン | |
-| ベースイメージ ARN | |
-| スナップショットサイズ (メモリ / ディスク) | |
-| 起動時間 (run → ready) | |
-| シェル接続時のユーザー | |
-| SSH 接続 | |
-| 1 日あたりの実費 | |
+| 実行日 / AWS CLI バージョン | 2026-10-28 / aws-cli 1.46.2 (botocore 1.43.62)。Claude Code のクラウドセッション (Linux) から実行 |
+| 手元 PC の OS / Python バージョン | Linux (クラウドセッション) / Python 3.13。Windows / macOS は未確認 (C2) |
+| ベースイメージ ARN | `arn:aws:lambda:ap-northeast-1:aws:microvm-image:al2023-1` |
+| スナップショットサイズ (メモリ / ディスク) | 約 713MB / 約 25MB (イメージ本体約 2.8GB) |
+| 起動時間 (run → ready) | run-microvm 約 4 秒、bootstrap ready まで 9〜10 秒。サスペンドからの自動レジュームは 1.4 秒 |
+| シェル接続時のユーザー | root (SSH は agent) |
+| SSH 接続 | OK (tmux アタッチ / デタッチ、日本語表示、5MB 転送) |
+| 1 日あたりの実費 | 未計測。PoC で VM を動かしたのは 4GB × 延べ約 15 分 (試算では約 $0.07)。Cost Explorer に反映されたら確認する |
+| PoC 中に直した不具合 | 7 件: gh のインストール、validate フック、/run の本文形式、mvm ssh の引数、tmux の日本語、mvm shell の制御メッセージと端末復元、mvm logs (AWS CLI v1 対応)。ほかに `mvm ls` の時刻表示 |
+| 本番前に必要な対応 | MicroVM メモリのクォータ引き上げ (8GB → 40GB 以上)、Bedrock を使うならモデル利用申請 |
+| 片付け | `mvm stop-all`、`mvm infra delete`、MicroVM イメージの削除を実施 |

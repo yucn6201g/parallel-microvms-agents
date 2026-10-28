@@ -94,7 +94,9 @@ docs/
 
 ## 現状と注意点
 
-- Lambda MicroVMs は 2026 年 6 月に提供開始されたサービスです。API の形式は AWS 公式の API モデル (botocore) と AWS のエージェント向けドキュメントで確認していますが、**この資材はまだ実機の AWS アカウントで動作確認していません**。最初に [docs/poc-checklist.md](docs/poc-checklist.md) の順に 1 台で検証してから並列化してください。
+- Lambda MicroVMs は 2026 年 6 月に提供開始されたサービスです。2026-10-28 に東京リージョンの実際の AWS アカウントで、1 台での PoC (イメージのビルド、起動、peek / send、SSH / シェル接続、サスペンドと自動レジューム、保存と復元、Bedrock 認証の経路) を実施しました。結果と未確認の項目は [docs/poc-checklist.md](docs/poc-checklist.md) にまとめています。
+- **10 台並列にはクォータの引き上げが必要です**。既定の `Max allocated ARM_64 MicroVM memory` は 8GB で、4GB の VM は同時に 2 台までしか起動できません。Service Quotas で 40GB 以上に引き上げを申請してください。
+- VM 内のエージェント (`agent` ユーザー) は sudo を使えません (コンテナに no_new_privs が付いているため)。root が必要な作業は `mvm shell` (root で入る) で行うか、必要なパッケージを `image/Dockerfile` に追加してください。
 - 手元 CLI は Linux 上で、AWS CLI のスタブとローカルの WebSocket サーバーを使ってテストしています。Windows / macOS の実機での確認項目は [docs/poc-checklist.md](docs/poc-checklist.md) の「C2」にまとめています。
 - MicroVM の寿命は最大 8 時間です。成果物は git に push するか、`mvm save` / 定期スナップショットで S3 に残してください。
 - 料金単価はローンチ時に報告された値で試算しています。必ず AWS の料金ページで最新の単価を確認してください。

@@ -43,13 +43,15 @@ mvm secret set anthropic-api-key     # Claude Console で発行したキー
 
 ### Amazon Bedrock
 
-1. Bedrock コンソールで Anthropic のモデルへのアクセスを有効にする
+1. Bedrock コンソールで Anthropic のモデルへのアクセスを有効にする (初回は利用申請が必要。有効になっていないと `Access to Anthropic models is not allowed for this account.` と返る。PoC で確認)
 2. `config.env` の `ENABLE_BEDROCK=true` (既定) のまま `mvm infra deploy` を実行する。実行ロールに `bedrock:InvokeModel*` が付く
 3. 必要なら `config.env` の `BEDROCK_REGION` と `CLAUDE_MODEL` (Bedrock コンソールで確認した推論プロファイル ID) を設定する
 
 ```bash
-mvm up a1 --claude-auth bedrock --model <推論プロファイル ID>
+mvm up a1 --claude-auth bedrock --model <推論プロファイル ID>   # 例: jp.anthropic.claude-haiku-5-5
 ```
+
+推論プロファイル ID の一覧は `aws bedrock list-inference-profiles --region ap-northeast-1` で確認できます (`jp.` は国内、`global.` はグローバルのクロスリージョン推論)。
 
 キーを管理する必要がなく、費用も AWS の請求にまとまります。
 

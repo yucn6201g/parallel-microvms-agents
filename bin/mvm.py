@@ -834,7 +834,10 @@ def cmd_ls(args):
             continue
         p = s.get("payload", {})
         auth = f"{p.get('claudeAuth', '-')}/{p.get('codexAuth', '-')}"
-        print(fmt.format(name, state, p.get("agent", "-"), auth, s.get("startedAt") or "-", s["microvmId"]))
+        started = s.get("startedAt") or "-"
+        if isinstance(started, (int, float)):  # AWS CLI v1 は UNIX 秒で返す
+            started = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(started))
+        print(fmt.format(name, state, p.get("agent", "-"), auth, started, s["microvmId"]))
     return 0
 
 

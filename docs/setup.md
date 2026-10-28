@@ -8,7 +8,7 @@
 | ツール | 用途 | Windows (PowerShell) | macOS |
 |---|---|---|---|
 | Python 3.9 以上 | `mvm` 本体 | `winget install Python.Python.3.12` | 標準 (`xcode-select --install`) または `brew install python` |
-| AWS CLI v2 (最新版) | `aws lambda-microvms`。古い CLI には無い | `winget install Amazon.AWSCLI` | `brew install awscli` |
+| AWS CLI v2 (最新版) | `aws lambda-microvms`。古い CLI には無い (最新の v1 でも可) | `winget install Amazon.AWSCLI` | `brew install awscli` |
 | OpenSSH クライアント | `mvm ssh`、VS Code Remote-SSH | Windows 10/11 に標準搭載 (`ssh -V` で確認) | 標準搭載 |
 | Git | このリポジトリの取得 | `winget install Git.Git` | 標準 |
 
@@ -74,6 +74,19 @@ mvm doctor
 
 `list-managed-microvm-images` が成功し、`arn:aws:lambda:ap-northeast-1:aws:microvm-image:al2023-1` のようなベースイメージが表示されれば OK です。
 ベースイメージの ARN が異なる場合は、`config.env` の `BASE_IMAGE_ARN` に設定します。
+
+### クォータの確認 (並列で使う場合は必須)
+
+既定のクォータでは 10 台を同時に動かせません (PoC で確認)。Service Quotas コンソールの「AWS Lambda」で次を確認し、足りなければ引き上げを申請してください。
+
+| クォータ | 既定 (PoC のアカウント) | 10 台 × 4GB に必要な値 |
+|---|---|---|
+| Max allocated ARM_64 MicroVM memory (L-CD1C0CC4) | 8GB | 40GB 以上 |
+| Rate of RunMicrovm API requests (L-535CA9B6) | 1 回/秒 | そのままで可 (`mvm fleet` は 1 台ずつ順に起動する) |
+
+```bash
+aws service-quotas get-service-quota --service-code lambda --quota-code L-CD1C0CC4 --region ap-northeast-1
+```
 
 ## 3. AWS リソースの作成
 
