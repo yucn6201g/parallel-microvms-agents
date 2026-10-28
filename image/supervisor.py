@@ -207,10 +207,14 @@ class HookHandler(Handler):
                 return self.reply(503)
             return self.reply(200 if result else 500)
         if hook == "run":
+            # 本文は {"microvmId": "...", "runHookPayload": "<RunMicrovm に渡した文字列>"} の形で届く
             try:
-                session = json.loads(payload or b"{}")
-            except ValueError:
+                body = json.loads(payload or b"{}")
+                inner = body.get("runHookPayload")
+                session = json.loads(inner) if isinstance(inner, str) and inner else dict(inner or {})
+            except (ValueError, AttributeError, TypeError):
                 return self.reply(400, {"error": "runHookPayload must be JSON"})
+            session["microvmId"] = body.get("microvmId")
             os.makedirs(PMVA_DIR, mode=0o700, exist_ok=True)
             tmp = SESSION_FILE + ".tmp"
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
