@@ -11,6 +11,7 @@ ARG WEBSOCAT_VERSION=1.13.0
 ARG CLAUDE_CODE_VERSION=latest
 ARG CODEX_VERSION=latest
 ARG INSTALL_GH=true
+ARG GH_VERSION=2.103.3
 
 USER root
 
@@ -24,12 +25,16 @@ RUN PM="$(command -v dnf || command -v microdnf)" \
  && "$PM" clean all \
  && rm -rf /var/cache/dnf /var/cache/yum
 
-# GitHub CLI (任意)
+# GitHub CLI (任意)。公式 rpm リポジトリは AL2023 の dnf で署名検証に失敗するため、リリースの tar.gz を checksum 付きで入れる
 RUN if [ "$INSTALL_GH" = "true" ]; then \
-      PM="$(command -v dnf || command -v microdnf)" \
-      && curl -fsSL https://cli.github.com/packages/rpm/gh-cli.repo -o /etc/yum.repos.d/gh-cli.repo \
-      && "$PM" install -y gh \
-      && "$PM" clean all; \
+      cd /tmp \
+      && curl -fsSLO "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_arm64.tar.gz" \
+      && curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_checksums.txt" \
+           | grep " gh_${GH_VERSION}_linux_arm64.tar.gz\$" | sha256sum -c - \
+      && tar -xzf "gh_${GH_VERSION}_linux_arm64.tar.gz" \
+      && install -m 0755 "gh_${GH_VERSION}_linux_arm64/bin/gh" /usr/local/bin/gh \
+      && rm -rf gh_* \
+      && gh --version; \
     fi
 
 # Node.js (ARM64 公式バイナリ。SHASUMS256 で整合性確認)
