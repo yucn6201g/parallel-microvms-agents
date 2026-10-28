@@ -2,11 +2,14 @@
 
 エージェントの認証情報は **AWS Secrets Manager** (`${PMVA_PREFIX}/...`) に置きます。MicroVM の起動時に `bootstrap.sh` が実行ロールの権限で取得するので、イメージやローカルの設定ファイルには残りません。
 方式は `config.env` の既定値か、`mvm up` のオプションでセッションごとに選べます。
+`mvm` の呼び出し方 (Windows は `.\bin\mvm.cmd`、macOS は `bin/mvm`) は [setup.md](setup.md#mvm-の呼び出し方) を参照してください。以下のコマンドは両 OS 共通です。
+
+`mvm secret set` は値を入力すると画面に表示せずに登録します。値はコマンドライン引数に載せないので、シェルの履歴にも残りません。
 
 ```bash
-bin/mvm up a1 --agent claude --claude-auth bedrock
-bin/mvm up a2 --agent codex  --codex-auth chatgpt
-bin/mvm up a3 --agent both   --claude-auth oauth-token --codex-auth api-key   # 1 台で両方
+mvm up a1 --agent claude --claude-auth bedrock
+mvm up a2 --agent codex  --codex-auth chatgpt
+mvm up a3 --agent both   --claude-auth oauth-token --codex-auth api-key   # 1 台で両方
 ```
 
 ## Claude Code
@@ -25,7 +28,7 @@ bin/mvm up a3 --agent both   --claude-auth oauth-token --codex-auth api-key   # 
 
 ```bash
 claude setup-token                       # ブラウザでログインするとトークンが表示される
-bin/mvm secret set claude-oauth-token    # 表示されたトークンを貼り付け
+mvm secret set claude-oauth-token    # 表示されたトークンを貼り付け
 ```
 
 注意: 10 台が同じサブスクリプションを使うと、利用上限 (レート制限) を全台で分け合います。上限にかかりやすい場合は、API キーや Bedrock と組み合わせてください。
@@ -33,7 +36,7 @@ bin/mvm secret set claude-oauth-token    # 表示されたトークンを貼り�
 ### API キー
 
 ```bash
-bin/mvm secret set anthropic-api-key     # Claude Console で発行したキー
+mvm secret set anthropic-api-key     # Claude Console で発行したキー
 ```
 
 `apiKeyHelper` で渡すので、起動時に「この API キーを使いますか？」という確認は出ません。
@@ -41,19 +44,25 @@ bin/mvm secret set anthropic-api-key     # Claude Console で発行したキー
 ### Amazon Bedrock
 
 1. Bedrock コンソールで Anthropic のモデルへのアクセスを有効にする
-2. `infra deploy` を `ENABLE_BEDROCK=true` (既定) で実行する。実行ロールに `bedrock:InvokeModel*` が付く
+2. `config.env` の `ENABLE_BEDROCK=true` (既定) のまま `mvm infra deploy` を実行する。実行ロールに `bedrock:InvokeModel*` が付く
 3. 必要なら `config.env` の `BEDROCK_REGION` と `CLAUDE_MODEL` (Bedrock コンソールで確認した推論プロファイル ID) を設定する
 
 ```bash
-bin/mvm up a1 --claude-auth bedrock --model <推論プロファイル ID>
+mvm up a1 --claude-auth bedrock --model <推論プロファイル ID>
 ```
 
 キーを管理する必要がなく、費用も AWS の請求にまとまります。
 
 ### LLM ゲートウェイ
 
+次の内容のファイル (例: `gateway.json`) を作り、ファイルから登録します。Windows / macOS 共通です。登録後はファイルを削除してください。
+
+```json
+{"baseUrl": "https://llm-gateway.example.com", "authToken": "..."}
+```
+
 ```bash
-echo '{"baseUrl":"https://llm-gateway.example.com","authToken":"..."}' | bin/mvm secret set anthropic-gateway
+mvm secret set anthropic-gateway --file gateway.json
 ```
 
 ## Codex
@@ -67,7 +76,7 @@ echo '{"baseUrl":"https://llm-gateway.example.com","authToken":"..."}' | bin/mvm
 ### API キー
 
 ```bash
-bin/mvm secret set openai-api-key
+mvm secret set openai-api-key
 ```
 
 ### ChatGPT アカウント
@@ -76,8 +85,10 @@ bin/mvm secret set openai-api-key
 
 ```bash
 codex login                                            # ブラウザで ChatGPT にログイン
-bin/mvm secret set codex-auth-json --file ~/.codex/auth.json
+mvm secret set codex-auth-json --file ~/.codex/auth.json
 ```
+
+`--file` の `~` は Windows でも `%USERPROFILE%` (`C:\Users\<名前>`) に展開されるので、上のコマンドはどちらの OS でも同じです。
 
 注意: 同じ `auth.json` を複数の VM で同時に使うと、トークン更新のタイミングでログインが切れることがあります。その場合は VM ごとに `interactive` (デバイスコード認証) でログインするか、API キーを使ってください。
 `codex login --device-auth` が使えるかどうかは、イメージに入っている Codex のバージョンで `codex login --help` を実行して確認してください。
@@ -87,7 +98,7 @@ bin/mvm secret set codex-auth-json --file ~/.codex/auth.json
 clone / push 用のトークンです。対象リポジトリに絞った Fine-grained personal access token (Contents: Read and write、Pull requests: Read and write) を推奨します。
 
 ```bash
-bin/mvm secret set github-token
+mvm secret set github-token
 ```
 
 VM 内では git の credential store と `GH_TOKEN` (gh CLI 用) に設定されます。
@@ -97,9 +108,9 @@ VM 内では git の credential store と `GH_TOKEN` (gh CLI 用) に設定さ�
 シークレット名を変えて登録し、起動時に指定します (名前は `${PMVA_PREFIX}/` で始める必要があります)。
 
 ```bash
-bin/mvm secret set claude-oauth-token --name pmva/claude-oauth-token-team
-bin/mvm up t1 --claude-secret pmva/claude-oauth-token-team
-bin/mvm fleet 3 --prefix team --claude-secret pmva/claude-oauth-token-team
+mvm secret set claude-oauth-token --name pmva/claude-oauth-token-team
+mvm up t1 --claude-secret pmva/claude-oauth-token-team
+mvm fleet 3 --prefix team --claude-secret pmva/claude-oauth-token-team
 ```
 
 ## 認証情報の扱い

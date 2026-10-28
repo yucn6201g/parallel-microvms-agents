@@ -5,8 +5,9 @@ Claude Code / Codex を **AWS Lambda MicroVMs** 上で最大 10 本並列に動�
 
 ```
  手元 PC (軽い)                               AWS (ap-northeast-1)
+ Windows / macOS
 ┌──────────────────────┐   HTTPS / WSS     ┌───────────────────────────────────────────────┐
-│ bin/mvm              │  (IAM で発行した    │ Lambda MicroVMs  ※1 エージェント = 1 MicroVM  │
+│ mvm (Python)         │  (IAM で発行した    │ Lambda MicroVMs  ※1 エージェント = 1 MicroVM  │
 │  ├ peek / send / watch│──短命トークン)────▶│ ┌ MicroVM agent-01 ───────────────────────┐   │
 │  ├ ssh (tmux に接続)  │                    │ │ supervisor.py  :8080 状態/操作 API        │   │
 │  └ shell (AWS 標準)   │                    │ │                :9000 ライフサイクルフック │   │
@@ -28,20 +29,43 @@ Claude Code / Codex を **AWS Lambda MicroVMs** 上で最大 10 本並列に動�
 | 多様な認証方式 | Claude Code: サブスクリプション (OAuth トークン) / API キー / Amazon Bedrock / LLM ゲートウェイ / 対話ログイン<br>Codex: API キー / ChatGPT ログイン (auth.json) / 対話ログイン |
 | 8 時間制限への対応 | ワークスペースを S3 に定期保存し、`mvm renew` で新しい MicroVM に復元 |
 | コスト試算 | `mvm cost`（[docs/cost.md](docs/cost.md)） |
+| 手元 PC は Windows / macOS 両対応 | 手元 CLI は Python 標準ライブラリのみで実装。必要なのは Python 3.9 以上、AWS CLI v2、OpenSSH クライアント (両 OS に標準搭載) だけ |
 
 ## クイックスタート
 
+手元 PC に Python 3.9 以上と AWS CLI v2 を入れてから始めます ([docs/setup.md](docs/setup.md#0-手元-pc-の準備-windows--macos))。
+
+`mvm` の呼び出し方は OS によって違います。
+
+| OS | 呼び出し方 | `mvm` だけで呼べるようにする |
+|---|---|---|
+| Windows (PowerShell) | `.\bin\mvm.cmd` | `Set-Alias mvm "$PWD\bin\mvm.cmd"` |
+| macOS | `bin/mvm` | `alias mvm="$PWD/bin/mvm"` |
+
+```powershell
+# Windows (PowerShell)
+Copy-Item config.example.env config.env
+Set-Alias mvm "$PWD\bin\mvm.cmd"
+```
+
 ```bash
-cp config.example.env config.env      # リージョンや既定の認証方式を編集
-bin/mvm doctor                        # 前提ツール・AWS 認証・リージョン対応を確認
-bin/mvm infra deploy                  # S3 / IAM ロール / ログを作成
-claude setup-token                    # (サブスクリプションの場合) 長期トークンを発行
-bin/mvm secret set claude-oauth-token # 発行したトークンを Secrets Manager に登録
-bin/mvm secret set github-token       # clone / push 用の GitHub トークン
-bin/mvm image build                   # Claude Code / Codex 入りのイメージをビルド
-bin/mvm up test-01 --repo https://github.com/<owner>/<repo>.git --prompt "README を読んで概要を説明して"
-bin/mvm peek test-01                  # 画面を確認
-bin/mvm ssh test-01                   # tmux にアタッチして直接操作 (Ctrl-b d で切断)
+# macOS
+cp config.example.env config.env
+alias mvm="$PWD/bin/mvm"
+```
+
+ここから先は両 OS 共通です。
+
+```bash
+mvm doctor                        # 前提ツール・AWS 認証・リージョン対応を確認
+mvm infra deploy                  # S3 / IAM ロール / ログを作成
+claude setup-token                # (サブスクリプションの場合) 長期トークンを発行
+mvm secret set claude-oauth-token # 発行したトークンを Secrets Manager に登録
+mvm secret set github-token       # clone / push 用の GitHub トークン
+mvm image build                   # Claude Code / Codex 入りのイメージをビルド
+mvm up test-01 --repo https://github.com/<owner>/<repo>.git --prompt "README を読んで概要を説明して"
+mvm peek test-01                  # 画面を確認
+mvm ssh test-01                   # tmux にアタッチして直接操作 (Ctrl-b d で切断)
 ```
 
 詳しい手順は [docs/setup.md](docs/setup.md) を参照してください。
@@ -49,7 +73,9 @@ bin/mvm ssh test-01                   # tmux にアタッチして直接操作 (
 ## ディレクトリ構成
 
 ```
-bin/mvm                     ローカル操作 CLI (bash。macOS 標準 bash 3.2 でも動作)
+bin/mvm.py                  ローカル操作 CLI 本体 (Python 標準ライブラリのみ。Windows / macOS / Linux 共通)
+bin/mvm                     macOS / Linux 用の起動スクリプト
+bin/mvm.cmd                 Windows 用の起動スクリプト (PowerShell / コマンドプロンプト)
 config.example.env          設定テンプレート
 infra/cloudformation.yaml   S3、ビルドロール、実行ロール、ログ、操作用 IAM ポリシー
 image/                      MicroVM イメージ (zip 化して CreateMicrovmImage に渡す)
@@ -69,5 +95,6 @@ docs/
 ## 現状と注意点
 
 - Lambda MicroVMs は 2026 年 6 月に提供開始されたサービスです。API の形式は AWS 公式の API モデル (botocore) と AWS のエージェント向けドキュメントで確認していますが、**この資材はまだ実機の AWS アカウントで動作確認していません**。最初に [docs/poc-checklist.md](docs/poc-checklist.md) の順に 1 台で検証してから並列化してください。
+- 手元 CLI は Linux 上で、AWS CLI のスタブとローカルの WebSocket サーバーを使ってテストしています。Windows / macOS の実機での確認項目は [docs/poc-checklist.md](docs/poc-checklist.md) の「C2」にまとめています。
 - MicroVM の寿命は最大 8 時間です。成果物は git に push するか、`mvm save` / 定期スナップショットで S3 に残してください。
 - 料金単価はローンチ時に報告された値で試算しています。必ず AWS の料金ページで最新の単価を確認してください。

@@ -59,7 +59,7 @@ def load_session():
 def run(cmd, timeout=10):
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        return p.returncode, p.stdout
+        return p.returncode, p.stdout if p.returncode == 0 else (p.stderr or p.stdout).strip()
     except (OSError, subprocess.TimeoutExpired) as e:
         return 1, str(e)
 

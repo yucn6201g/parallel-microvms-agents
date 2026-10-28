@@ -1,6 +1,6 @@
 # コスト試算
 
-`bin/mvm cost` (`scripts/estimate_cost.py`) で前提を変えて計算できます。以下は既定の前提での結果です。
+`mvm cost` (`scripts/estimate_cost.py`) で前提を変えて計算できます。以下は既定の前提での結果です。
 
 ## 前提と単価
 

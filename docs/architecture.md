@@ -9,6 +9,17 @@
 - 画面の取得 (`peek` / `watch`) と指示の送信 (`send`)
 - 必要なときだけの対話接続 (`ssh` / `shell`)。手元の負荷は ssh クライアントとターミナルの描画だけです
 
+### 手元 PC は Windows / macOS の両方に対応
+
+| 方針 | 理由 |
+|---|---|
+| 手元 CLI (`bin/mvm.py`) は Python の標準ライブラリだけで書く | Windows / macOS とも Python と AWS CLI を入れるだけで動く。bash や WSL に依存しない |
+| WebSocket クライアントを `mvm` に内蔵する | websocat などの追加ツールが要らない。`HTTPS_PROXY` (CONNECT) にも対応する |
+| AWS の操作は AWS CLI v2 を呼び出す | SSO やプロファイルなど、手元で設定済みの AWS 認証をそのまま使える |
+| SSH は各 OS 標準の OpenSSH クライアントを使う | Windows 10/11 と macOS に標準で入っている。VS Code Remote-SSH とも共通 |
+| 起動スクリプトを OS ごとに用意 (`bin/mvm`、`bin\mvm.cmd`) | 本体は共通で、呼び出し方だけが違う |
+| VM 内のスクリプトは改行を LF に固定 (`.gitattributes`、zip 化時にも変換) | Windows で clone しても MicroVM 内の bash が壊れない |
+
 ## Lambda MicroVMs の主な仕様
 
 | 項目 | 内容 |
@@ -40,7 +51,7 @@
 | 方法 | 手元の負荷 | 用途 | 仕組み |
 |---|---|---|---|
 | `mvm peek` / `watch` / `send` | ごく小さい (定期的な HTTPS) | 進捗確認、短い指示 | VM 内 `supervisor.py` の `:8080` API が `tmux capture-pane` / `send-keys` を実行 |
-| `mvm ssh` | 小さい (ssh + websocat) | 対話操作、VS Code Remote-SSH、scp、ポート転送 | ssh の ProxyCommand で websocat が WSS (`:7681`) に接続し、VM 内の websocat → sshd (127.0.0.1:2222) につなぐ |
+| `mvm ssh` | 小さい (ssh + mvm の中継) | 対話操作、VS Code Remote-SSH、scp、ポート転送 | ssh の ProxyCommand で `mvm _ssh-proxy` (内蔵 WebSocket クライアント) が WSS (`:7681`) に接続し、VM 内の websocat → sshd (127.0.0.1:2222) につなぐ |
 | `mvm shell` / コンソールの Connect | 小さい | SSH が使えないときの予備、障害調査 | AWS 標準の `SHELL_INGRESS` (`:8022`) |
 
 ブラウザからは任意のヘッダを付けられないため、Web ターミナル (ttyd など) は採用していません。AWS コンソールの Connect ボタンがブラウザ用の手段になります。

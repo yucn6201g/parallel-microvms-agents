@@ -1,0 +1,3 @@
+# Windows で clone しても MicroVM 内で動くスクリプトが CRLF にならないようにする
+* text=auto eol=lf
+*.cmd text eol=crlf
