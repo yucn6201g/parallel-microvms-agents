@@ -20,7 +20,7 @@ RUN PM="$(command -v dnf || command -v microdnf)" \
  && "$PM" install -y \
       git tmux jq python3 tar gzip xz unzip zip \
       procps-ng findutils which less vim-minimal diffutils patch \
-      openssh-server openssh-clients shadow-utils sudo awscli-2 \
+      openssh-server openssh-clients shadow-utils util-linux awscli-2 \
       make gcc gcc-c++ \
  && "$PM" clean all \
  && rm -rf /var/cache/dnf /var/cache/yum
@@ -58,10 +58,9 @@ RUN curl -fsSL -o /usr/local/bin/websocat \
  && websocat --version
 
 # 実行ユーザー (Claude Code の --dangerously-skip-permissions は root では使えないため非 root)
-# MicroVM 自体が隔離環境なので、エージェントがパッケージを追加できるよう sudo を許可する。
-RUN useradd -m -u 1000 -s /bin/bash agent \
- && echo 'agent ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/agent \
- && chmod 0440 /etc/sudoers.d/agent
+# MicroVM のコンテナには no_new_privs が付いているため sudo は使えない (PoC で確認)。
+# root が必要な作業は mvm shell (root で入る) から行うか、必要なパッケージをこのイメージに追加する。
+RUN useradd -m -u 1000 -s /bin/bash agent
 
 COPY supervisor.py bootstrap.sh snapshot.sh /opt/pmva/
 COPY agent-attach /usr/local/bin/agent-attach

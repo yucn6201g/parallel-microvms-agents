@@ -407,14 +407,22 @@ def ws_protocols(token, port):
     return [f"lambda-microvms.authentication.{token}", "lambda-microvms", f"lambda-microvms.port.{port}"]
 
 
-def pump(ws, read_input):
-    """標準入力 → WebSocket、WebSocket → 標準出力 を中継する。どちらかが閉じたら終了。"""
+def pump(ws, read_input, skip=None, on_close=None):
+    """標準入力 → WebSocket、WebSocket → 標準出力 を中継する。どちらかが閉じたら終了。
+
+    skip: 表示しないメッセージを判定する関数 (シェル接続の制御メッセージ用)
+    on_close: 相手が切断したときに、プロセス終了前に呼ぶ関数 (端末設定の復元用)
+    """
     def to_stdout():
         while True:
             data = ws.recv()
             if data is None:
                 break
+            if skip and skip(data):
+                continue
             os.write(1, data)
+        if on_close:
+            on_close()
         os._exit(0)
 
     def keepalive():
@@ -961,8 +969,13 @@ def cmd_shell(args):
         ws = WebSocket(s["endpoint"], "/shell", ws_protocols(token, SHELL_PORT))
     except OSError as e:
         die(f"シェルに接続できません: {e}")
-    with RawTerminal():
-        pump(ws, lambda: os.read(0, 4096))
+    # 接続直後に {"type":"session_init",...} という制御メッセージが届くので表示しない (PoC で確認)
+    def is_control(data):
+        return data.startswith(b'{"type":"session_') and data.rstrip().endswith(b"}")
+
+    with RawTerminal() as term:
+        pump(ws, lambda: os.read(0, 4096), skip=is_control,
+             on_close=lambda: term.restore and term.restore())
     return 0
 
 
