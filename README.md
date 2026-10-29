@@ -3,20 +3,31 @@
 Claude Code / Codex を **AWS Lambda MicroVMs** 上で最大 10 本並列に動かし、手元の PC は「画面を見る・指示を出す」だけにするための資材一式です。
 ビルド・テスト・エージェント本体はすべてクラウド側の MicroVM で実行されるので、手元 PC の CPU 使用率と発熱を抑えられます。
 
-```
- 手元 PC (軽い)                               AWS (ap-northeast-1)
- Windows / macOS
-┌──────────────────────┐   HTTPS / WSS     ┌───────────────────────────────────────────────┐
-│ mvm (Python)         │  (IAM で発行した    │ Lambda MicroVMs  ※1 エージェント = 1 MicroVM  │
-│  ├ peek / send / watch│──短命トークン)────▶│ ┌ MicroVM agent-01 ───────────────────────┐   │
-│  ├ ssh (tmux に接続)  │                    │ │ supervisor.py  :8080 状態/操作 API        │   │
-│  └ shell (AWS 標準)   │                    │ │                :9000 ライフサイクルフック │   │
-│ ターミナル / VS Code  │                    │ │ tmux "main" ── claude / codex             │   │
-└──────────────────────┘                    │ │ sshd ← websocat :7681 (SSH over WS)       │   │
-                                             │ └───────────────────────────────────────────┘   │
-                                             │   ... agent-02 〜 agent-10                      │
-                                             │ Secrets Manager (認証情報) / S3 (ワークスペース) │
-                                             └───────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+  subgraph PC["手元 PC (Windows / macOS)"]
+    term["ターミナル / VS Code"]
+    mvm["mvm (Python)<br/>peek / send / watch<br/>ssh / shell"]
+  end
+  subgraph AWS["AWS 東京リージョン"]
+    subgraph VM1["Lambda MicroVM agent-01"]
+      sup["supervisor.py<br/>:8080 状態・操作 API<br/>:9000 ライフサイクルフック"]
+      bridge["websocat :7681 → sshd<br/>SSH over WebSocket"]
+      tmux["tmux セッション main<br/>claude / codex"]
+      boot["bootstrap.sh / snapshot.sh"]
+    end
+    sm[("Secrets Manager<br/>認証情報")]
+    s3[("S3<br/>ワークスペース")]
+    more["agent-02 〜 agent-10<br/>同じ構成"]
+  end
+  term --- mvm
+  mvm -- "HTTPS / WSS<br/>短命トークン" --> sup
+  mvm -- "SSH over WSS" --> bridge
+  sup --> tmux
+  bridge --> tmux
+  boot -. "起動時に取得" .-> sm
+  boot -. "保存・復元" .-> s3
+  tmux ~~~ more
 ```
 
 ## できること
