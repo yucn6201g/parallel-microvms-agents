@@ -62,11 +62,11 @@ RUN curl -fsSL -o /usr/local/bin/websocat \
 # root が必要な作業は mvm shell (root で入る) から行うか、必要なパッケージをこのイメージに追加する。
 RUN useradd -m -u 1000 -s /bin/bash agent
 
-COPY supervisor.py bootstrap.sh snapshot.sh /opt/pmva/
+COPY supervisor.py bootstrap.sh snapshot.sh notify.sh /opt/pmva/
 COPY agent-attach /usr/local/bin/agent-attach
 COPY tmux.conf /home/agent/.tmux.conf
 COPY bashrc.pmva /home/agent/.bashrc.pmva
-RUN chmod 0755 /opt/pmva/supervisor.py /opt/pmva/bootstrap.sh /opt/pmva/snapshot.sh /usr/local/bin/agent-attach \
+RUN chmod 0755 /opt/pmva/supervisor.py /opt/pmva/bootstrap.sh /opt/pmva/snapshot.sh /opt/pmva/notify.sh /usr/local/bin/agent-attach \
  && echo '[ -f ~/.bashrc.pmva ] && . ~/.bashrc.pmva' >> /home/agent/.bashrc \
  && mkdir -p /home/agent/work /home/agent/.pmva \
  && chown -R agent:agent /home/agent

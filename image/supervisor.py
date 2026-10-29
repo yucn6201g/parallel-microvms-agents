@@ -131,6 +131,83 @@ def capture(window, lines):
     return "\n".join(out.rstrip("\n").splitlines()[-lines:])
 
 
+ACTIVITY_INTERVAL = 30          # 作業中かどうかを調べる間隔 (秒)
+PUBLISH_INTERVAL = 60           # 状態を S3 に書き出す間隔 (秒)
+CPU_BUSY_TICKS = 100            # ACTIVITY_INTERVAL の間にこれ以上 CPU を使ったら作業中 (100 tick = 1 秒)
+activity = {"last": time.time(), "cpu": None, "screens": None}
+
+
+def pane_cpu_ticks():
+    """tmux の各ペインで動くプロセス (エージェント、ビルド、テスト) が使った CPU 時間の合計。"""
+    rc, out = run(["tmux", "list-panes", "-a", "-F", "#{pane_pid}"])
+    roots = {int(x) for x in out.split() if x.isdigit()} if rc == 0 else set()
+    procs = {}
+    for d in os.listdir("/proc"):
+        if not d.isdigit():
+            continue
+        try:
+            with open(f"/proc/{d}/stat", encoding="utf-8") as f:
+                fields = f.read().rsplit(")", 1)[1].split()
+        except (OSError, IndexError):
+            continue
+        # ppid と utime + stime + cutime + cstime (終了した子プロセスの分も含める)
+        procs[int(d)] = (int(fields[1]), sum(int(x) for x in fields[11:15]))
+    children = {}
+    for pid, (ppid, _) in procs.items():
+        children.setdefault(ppid, []).append(pid)
+    total, stack, seen = 0, list(roots), set()
+    while stack:
+        pid = stack.pop()
+        if pid in seen or pid not in procs:
+            continue
+        seen.add(pid)
+        total += procs[pid][1]
+        stack.extend(children.get(pid, []))
+    return total
+
+
+def check_activity():
+    """画面が変わったか、ペイン内のプロセスが CPU を使っていれば作業中とみなす。"""
+    screens = tuple(capture(w["name"], 50) for w in tmux_windows())
+    cpu = pane_cpu_ticks()
+    busy = (activity["screens"] is not None and screens != activity["screens"]) or \
+           (activity["cpu"] is not None and cpu - activity["cpu"] >= CPU_BUSY_TICKS)
+    activity["screens"], activity["cpu"] = screens, cpu
+    if busy:
+        activity["last"] = time.time()
+    return busy
+
+
+def publish_status():
+    """最後に作業した時刻を S3 に書く。AWS 側の定期処理 (keepalive) が、作業中の VM だけを起こし続けるのに使う。"""
+    s = load_session()
+    if not (s.get("snapshotBucket") and s.get("name") and s.get("microvmId")):
+        return
+    body = json.dumps({"name": s["name"], "microvmId": s["microvmId"],
+                       "lastActivity": activity["last"], "updatedAt": time.time()})
+    env = dict(os.environ, AWS_REGION=s.get("region") or "", AWS_DEFAULT_REGION=s.get("region") or "")
+    try:
+        p = subprocess.run(["aws", "s3", "cp", "--only-show-errors", "-",
+                            f"s3://{s['snapshotBucket']}/status/{s['name']}.json"],
+                           input=body, text=True, capture_output=True, timeout=60, env=env)
+        if p.returncode != 0:
+            log(f"publish status failed: {p.stderr.strip()[:200]}")
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log(f"publish status failed: {e}")
+
+
+def activity_loop():
+    last_publish = 0.0
+    while True:
+        time.sleep(ACTIVITY_INTERVAL)
+        if not read_text(STATE_FILE).startswith("ready"):
+            continue
+        check_activity()
+        if time.time() - last_publish >= PUBLISH_INTERVAL:
+            publish_status()
+            last_publish = time.time()
+
+
 def status(lines):
     s = load_session()
     windows = tmux_windows()
@@ -147,6 +224,7 @@ def status(lines):
         "bootstrap": read_text(STATE_FILE, "not-started"),
         "lastSnapshot": read_text(LAST_SNAPSHOT_FILE) or None,
         "uptimeSeconds": int(float(read_text("/proc/uptime", "0").split()[0])),
+        "idleSeconds": int(time.time() - activity["last"]),
         "windows": windows,
     }
 
@@ -264,6 +342,7 @@ def main():
     os.makedirs(PMVA_DIR, mode=0o700, exist_ok=True)
     threading.Thread(target=serve, args=(HOOK_PORT, HookHandler), daemon=True).start()
     threading.Thread(target=periodic_snapshot_loop, daemon=True).start()
+    threading.Thread(target=activity_loop, daemon=True).start()
     log("supervisor started")
     serve(API_PORT, ApiHandler)
 

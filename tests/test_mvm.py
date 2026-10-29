@@ -383,6 +383,16 @@ class CliTest(unittest.TestCase):
         args = json.loads(sorted(self.stub_dir.glob("microvm-*.args"))[1].read_text(encoding="utf-8"))
         self.assertNotIn("--idle-policy", args)
 
+    def test_notify_option(self):
+        self.mvm("up", "n1", "--notify")
+        self.mvm("up", "n2")
+        n1, n2 = self.payloads()
+        self.assertEqual(n1["notifySecret"], "pmva/notify-webhook")
+        self.assertNotIn("notifySecret", n2)
+        rc, _, err = self.mvm("secret", "set", "notify-webhook", input=b"not-a-url", check=False)
+        self.assertNotEqual(rc, 0)
+        self.mvm("secret", "set", "notify-webhook", input=b"https://hooks.slack.com/services/T/B/X")
+
     def test_memory_quota_blocks_fleet_before_launch(self):
         rc, out, err = self.mvm("fleet", "3", check=False)  # 8GB の上限に 4GB x 3 は入らない
         self.assertNotEqual(rc, 0)

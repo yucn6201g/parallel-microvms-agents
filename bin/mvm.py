@@ -55,12 +55,14 @@ DEFAULTS = {
     "DEFAULT_CODEX_AUTH": "api-key", "DEFAULT_CLAUDE_ARGS": "", "DEFAULT_CODEX_ARGS": "",
     "BEDROCK_REGION": "", "CLAUDE_MODEL": "", "USE_GITHUB_TOKEN": "true", "ENABLE_BEDROCK": "true",
     "GIT_USER_NAME": "", "GIT_USER_EMAIL": "", "SSH_PUBLIC_KEY_FILE": "~/.ssh/id_ed25519.pub",
+    "BUDGET_MONTHLY_USD": "0", "BUDGET_EMAIL": "", "KEEPALIVE_RATE_MINUTES": "5", "KEEPALIVE_ACTIVE_SECONDS": "900",
+    "NOTIFY_WEBHOOK": "false",
 }
 AGENTS = ("claude", "codex", "both", "none")
 CLAUDE_AUTHS = ("api-key", "oauth-token", "bedrock", "gateway", "interactive", "none")
 CODEX_AUTHS = ("api-key", "chatgpt", "interactive", "none")
 SECRET_KINDS = ("anthropic-api-key", "claude-oauth-token", "anthropic-gateway",
-                "openai-api-key", "codex-auth-json", "github-token")
+                "openai-api-key", "codex-auth-json", "github-token", "notify-webhook")
 
 C = {}  # 読み込んだ設定
 
@@ -592,11 +594,12 @@ def cmd_doctor(_args):
 
 def cmd_infra(args):
     if args.action == "deploy":
+        prepare_new_stack()
         rc = aws_interactive(
             "cloudformation", "deploy",
             "--template-file", str(ROOT / "infra" / "cloudformation.yaml"),
             "--stack-name", C["STACK_NAME"],
-            "--parameter-overrides", f"Prefix={C['PMVA_PREFIX']}", f"EnableBedrock={str(as_bool(C['ENABLE_BEDROCK'])).lower()}",
+            "--parameter-overrides", *infra_parameters(),
             "--capabilities", "CAPABILITY_NAMED_IAM", "--no-fail-on-empty-changeset")
         if rc != 0:
             return rc
@@ -629,6 +632,41 @@ def cmd_infra(args):
         (STATE_DIR / "stack-outputs.json").unlink(missing_ok=True)
         log("削除しました。イメージは mvm image delete、シークレットは Secrets Manager で個別に削除してください")
     return 0
+
+
+def infra_parameters():
+    params = [
+        f"Prefix={C['PMVA_PREFIX']}",
+        f"EnableBedrock={str(as_bool(C['ENABLE_BEDROCK'])).lower()}",
+        f"KeepaliveRateMinutes={int(C['KEEPALIVE_RATE_MINUTES'])}",
+        f"KeepaliveActiveSeconds={int(C['KEEPALIVE_ACTIVE_SECONDS'])}",
+        f"BudgetMonthlyUsd={float(C['BUDGET_MONTHLY_USD']):g}",
+    ]
+    if C["BUDGET_EMAIL"]:
+        params.append(f"BudgetEmail={C['BUDGET_EMAIL']}")
+    return params
+
+
+def prepare_new_stack():
+    """スタックを新規に作る前に、前回の削除後に残ったものを片付ける (PoC で発生)。
+
+    - 前回の作成が途中で失敗し、中身のないスタックが REVIEW_IN_PROGRESS のまま残っている
+    - スタック削除の後に終了中の VM がログを書き、ロググループがスタック管理外で作り直されている
+    """
+    r = aws("cloudformation", "describe-stacks", "--stack-name", C["STACK_NAME"], check=False)
+    status = (r or {}).get("Stacks", [{}])[0].get("StackStatus")
+    if status == "REVIEW_IN_PROGRESS":
+        log(f"途中で止まった空のスタック {C['STACK_NAME']} を削除します")
+        aws("cloudformation", "delete-stack", "--stack-name", C["STACK_NAME"], output=None)
+        aws("cloudformation", "wait", "stack-delete-complete", "--stack-name", C["STACK_NAME"], output=None)
+        status = None
+    if status:
+        return
+    group = f"/aws/lambda-microvms/{C['PMVA_PREFIX']}"
+    groups = aws("logs", "describe-log-groups", "--log-group-name-prefix", group, check=False) or {}
+    if any(g.get("logGroupName") == group for g in groups.get("logGroups", [])):
+        log(f"スタック管理外で残っているロググループ {group} を削除します (前回の削除後に作られたもの)")
+        aws("logs", "delete-log-group", "--log-group-name", group, output=None)
 
 
 def wait_until_terminated(timeout=300):
@@ -672,6 +710,8 @@ def cmd_secret(args):
             assert v.get("baseUrl") and v.get("authToken")
         except (ValueError, AssertionError, AttributeError):
             die('{"baseUrl":"...","authToken":"..."} 形式の JSON を渡してください')
+    if kind == "notify-webhook" and not value.startswith("https://"):
+        die("Webhook の URL (https://...) を渡してください")
     if kind == "codex-auth-json":
         try:
             json.loads(value)
@@ -700,7 +740,7 @@ def cmd_secret(args):
 def build_artifact_zip(dest):
     """image/ を zip にする。Windows で clone した場合に備え、改行を LF に、実行権限を付けて格納する。"""
     src = ROOT / "image"
-    executables = {"supervisor.py", "bootstrap.sh", "snapshot.sh", "agent-attach"}
+    executables = {"supervisor.py", "bootstrap.sh", "snapshot.sh", "notify.sh", "agent-attach"}
     with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
         for p in sorted(src.rglob("*")):
             if p.is_dir() or "__pycache__" in p.parts or p.suffix == ".pyc" or p.name == ".DS_Store":
@@ -815,6 +855,7 @@ def build_payload(name, a):
         github_secret = ""
     else:
         github_secret = a.github_secret or (f"{prefix}/github-token" if as_bool(C["USE_GITHUB_TOKEN"]) else "")
+    notify = as_bool(C["NOTIFY_WEBHOOK"]) if a.notify is None else a.notify
     branch = a.branch or (f"pmva/{name}" if a.repo else "")
     bucket = stack_output("ArtifactBucketName")
     restore = f"s3://{bucket}/workspaces/{name}/latest.tar.gz" if a.restore == "latest" else (a.restore or "")
@@ -834,6 +875,7 @@ def build_payload(name, a):
         "prompt": a.prompt or "", "restore": restore,
         "snapshotBucket": bucket, "snapshotIntervalSeconds": int(C["SNAPSHOT_INTERVAL_SECONDS"]),
         "sshPublicKey": ssh_key,
+        "notifySecret": f"{prefix}/notify-webhook" if notify else "",
     }
     return {k: v for k, v in payload.items() if v != ""}
 
@@ -1229,6 +1271,9 @@ def add_up_options(p):
     p.add_argument("--bedrock-region")
     p.add_argument("--idle", help="アイドルでサスペンドするまでの秒数。off で無効")
     p.add_argument("--max-duration", help="最大寿命 (秒、上限 28800)")
+    p.add_argument("--notify", dest="notify", action="store_true", default=None,
+                   help="完了・入力待ちを <prefix>/notify-webhook の URL に通知する")
+    p.add_argument("--no-notify", dest="notify", action="store_false", help="通知しない")
 
 
 def build_parser():

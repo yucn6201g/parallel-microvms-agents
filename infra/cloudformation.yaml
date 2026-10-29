@@ -23,9 +23,34 @@ Parameters:
     Type: Number
     Default: 14
     AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365]
+  BudgetMonthlyUsd:
+    Type: Number
+    Default: 0
+    MinValue: 0
+    Description: 月額の予算 (USD)。0 なら予算アラートを作らない。対象はアカウント全体の費用
+  BudgetEmail:
+    Type: String
+    Default: ""
+    Description: 予算アラートの通知先メールアドレス
+  KeepaliveRateMinutes:
+    Type: Number
+    Default: 5
+    MinValue: 0
+    MaxValue: 60
+    Description: 作業中の MicroVM を起こし続ける定期処理の間隔 (分)。0 で無効。IDLE_MAX_SECONDS より短くする
+  KeepaliveActiveSeconds:
+    Type: Number
+    Default: 900
+    MinValue: 60
+    Description: 最後の作業 (画面の変化や CPU 使用) からこの秒数以内なら作業中とみなして起こし続ける
 
 Conditions:
   BedrockEnabled: !Equals [!Ref EnableBedrock, "true"]
+  BudgetEnabled: !And
+    - !Not [!Equals [!Ref BudgetMonthlyUsd, 0]]
+    - !Not [!Equals [!Ref BudgetEmail, ""]]
+  KeepaliveEnabled: !Not [!Equals [!Ref KeepaliveRateMinutes, 0]]
+  KeepaliveEveryMinute: !Equals [!Ref KeepaliveRateMinutes, 1]
 
 Resources:
   ArtifactBucket:
@@ -50,6 +75,10 @@ Resources:
             Status: Enabled
             Prefix: workspace-history/
             ExpirationInDays: !Ref WorkspaceSnapshotRetentionDays
+          - Id: expire-stale-status
+            Status: Enabled
+            Prefix: status/
+            ExpirationInDays: 2
           - Id: expire-old-image-artifacts
             Status: Enabled
             Prefix: images/
@@ -151,6 +180,7 @@ Resources:
                 Resource:
                   - !Sub "${ArtifactBucket.Arn}/workspaces/*"
                   - !Sub "${ArtifactBucket.Arn}/workspace-history/*"
+                  - !Sub "${ArtifactBucket.Arn}/status/*"
               - Sid: ListWorkspaceSnapshots
                 Effect: Allow
                 Action: s3:ListBucket
@@ -252,6 +282,167 @@ Resources:
             Effect: Allow
             Action: cloudformation:DescribeStacks
             Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*"
+
+  # ---- 作業中の MicroVM を起こし続ける定期処理 (手元 PC を閉じても作業が止まらないようにする)
+  # MicroVM のアイドル判定はエンドポイントへの受信通信だけを見る。VM 内の supervisor.py が
+  # 最後の作業時刻を status/<name>.json に書き、ここで作業中の VM にだけ /healthz を送る。
+  KeepaliveRole:
+    Type: AWS::IAM::Role
+    Condition: KeepaliveEnabled
+    Properties:
+      RoleName: !Sub "${Prefix}-keepalive"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: keepalive
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt ArtifactBucket.Arn
+                Condition:
+                  StringLike:
+                    s3:prefix: "status/*"
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "${ArtifactBucket.Arn}/status/*"
+              - Effect: Allow
+                Action:
+                  - lambda:GetMicrovm
+                  - lambda:CreateMicrovmAuthToken
+                Resource: "*"
+
+  KeepaliveFunction:
+    Type: AWS::Lambda::Function
+    Condition: KeepaliveEnabled
+    Properties:
+      FunctionName: !Sub "${Prefix}-keepalive"
+      Runtime: python3.13
+      Architectures: [arm64]
+      Handler: index.handler
+      Timeout: 120
+      MemorySize: 128
+      Role: !GetAtt KeepaliveRole.Arn
+      Environment:
+        Variables:
+          BUCKET: !Ref ArtifactBucket
+          ACTIVE_SECONDS: !Ref KeepaliveActiveSeconds
+      Code:
+        ZipFile: |
+          import json, os, time, urllib.request
+          import boto3, botocore.session
+          from botocore.auth import SigV4Auth
+          from botocore.awsrequest import AWSRequest
+          R = os.environ["AWS_REGION"]
+          B = os.environ["BUCKET"]
+          W = int(os.environ["ACTIVE_SECONDS"])
+          s3 = boto3.client("s3")
+
+          def api(method, path, body=None):
+              # boto3 の対応状況に左右されないよう、MicroVMs の REST API を直接署名して呼ぶ
+              url = f"https://lambda.{R}.amazonaws.com/2025-09-09/microvms/{path}"
+              data = json.dumps(body) if body is not None else None
+              req = AWSRequest(method=method, url=url, data=data,
+                               headers={"Content-Type": "application/json"} if data else {})
+              cred = botocore.session.Session().get_credentials().get_frozen_credentials()
+              SigV4Auth(cred, "lambda", R).add_auth(req)
+              r = urllib.request.Request(url, data=data.encode() if data else None,
+                                         method=method, headers=dict(req.headers))
+              with urllib.request.urlopen(r, timeout=15) as f:
+                  return json.loads(f.read() or b"{}")
+
+          def handler(event, context):
+              now, pinged, skipped = time.time(), [], []
+              pages = s3.get_paginator("list_objects_v2").paginate(Bucket=B, Prefix="status/")
+              for o in [o for p in pages for o in p.get("Contents", [])]:
+                  try:
+                      st = json.loads(s3.get_object(Bucket=B, Key=o["Key"])["Body"].read())
+                      # 状態が古い (= 一時停止・終了済み) か、しばらく作業していなければ何もしない
+                      if now - st["updatedAt"] > 600 or now - st["lastActivity"] > W:
+                          skipped.append(st.get("name"))
+                          continue
+                      vm = api("GET", st["microvmId"])
+                      if vm.get("state") != "RUNNING":
+                          continue
+                      tok = api("POST", st["microvmId"] + "/auth-token",
+                                {"expirationInMinutes": 5, "allowedPorts": [{"port": 8080}]})
+                      host = vm["endpoint"].split("://")[-1].rstrip("/")
+                      req = urllib.request.Request(f"https://{host}/healthz", headers={
+                          "X-aws-proxy-auth": tok["authToken"]["X-aws-proxy-auth"],
+                          "X-aws-proxy-port": "8080"})
+                      urllib.request.urlopen(req, timeout=15).read()
+                      pinged.append(st.get("name"))
+                  except Exception as e:
+                      print(f"error {o['Key']}: {e!r}")
+              print(json.dumps({"pinged": pinged, "idle": skipped}))
+              return {"pinged": pinged}
+
+  KeepaliveLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: KeepaliveEnabled
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${Prefix}-keepalive"
+      RetentionInDays: !Ref LogRetentionDays
+
+  KeepaliveSchedule:
+    Type: AWS::Events::Rule
+    Condition: KeepaliveEnabled
+    Properties:
+      Name: !Sub "${Prefix}-keepalive"
+      ScheduleExpression: !If
+        - KeepaliveEveryMinute
+        - "rate(1 minute)"
+        - !Sub "rate(${KeepaliveRateMinutes} minutes)"
+      Targets:
+        - Id: keepalive
+          Arn: !GetAtt KeepaliveFunction.Arn
+
+  KeepalivePermission:
+    Type: AWS::Lambda::Permission
+    Condition: KeepaliveEnabled
+    Properties:
+      FunctionName: !Ref KeepaliveFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt KeepaliveSchedule.Arn
+
+  # ---- 月額の予算アラート (任意)
+  MonthlyBudget:
+    Type: AWS::Budgets::Budget
+    Condition: BudgetEnabled
+    Properties:
+      Budget:
+        BudgetName: !Sub "${Prefix}-monthly"
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref BudgetMonthlyUsd
+          Unit: USD
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref BudgetEmail
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref BudgetEmail
 
 Outputs:
   ArtifactBucketName:

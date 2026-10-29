@@ -92,6 +92,25 @@ case "$CODEX_AUTH" in
   *) warn "unknown codexAuth: $CODEX_AUTH" ;;
 esac
 
+# ---------------------------------------------------------------- 完了・入力待ちの通知
+NOTIFY_SECRET="$(j .notifySecret)"
+if [ -n "$NOTIFY_SECRET" ]; then
+  log "notify webhook: $NOTIFY_SECRET"
+  secret "$NOTIFY_SECRET" > "$SECRETS_DIR/notify_webhook"
+  # Claude Code: 応答の完了 (Stop) と許可・入力待ち (Notification) でフックを呼ぶ
+  settings="$HOME/.claude/settings.json"
+  [ -s "$settings" ] || echo '{}' > "$settings"
+  jq '.hooks.Stop = [{"hooks": [{"type": "command", "command": "/opt/pmva/notify.sh claude-stop"}]}]
+      | .hooks.Notification = [{"hooks": [{"type": "command", "command": "/opt/pmva/notify.sh claude-notification"}]}]' \
+    "$settings" > "$settings.tmp" && mv "$settings.tmp" "$settings"
+  # Codex: notify はトップレベルのキーなので、テーブル ([projects...]) より前に置く
+  codex_cfg="$HOME/.codex/config.toml"
+  if ! grep -q '^notify *=' "$codex_cfg" 2>/dev/null; then
+    { echo 'notify = ["/opt/pmva/notify.sh", "codex"]'; cat "$codex_cfg" 2>/dev/null || true; } > "$codex_cfg.tmp"
+    mv "$codex_cfg.tmp" "$codex_cfg"
+  fi
+fi
+
 # ---------------------------------------------------------------- Git / GitHub
 GITHUB_SECRET="$(j .githubSecret)"
 if [ -n "$GITHUB_SECRET" ]; then
