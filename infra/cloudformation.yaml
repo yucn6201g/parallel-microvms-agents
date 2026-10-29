@@ -236,6 +236,10 @@ Resources:
             Effect: Allow
             Action: secretsmanager:ListSecrets
             Resource: "*"
+          - Sid: ReadMicrovmQuota
+            Effect: Allow
+            Action: servicequotas:GetServiceQuota
+            Resource: "*"
           - Sid: ReadLogs
             Effect: Allow
             Action:

@@ -141,14 +141,28 @@ def aws_env():
     return env
 
 
-def aws(*args, check=True, output="json"):
-    """AWS CLI を実行して結果を返す。失敗時は check=True なら終了、False なら None。"""
+THROTTLE_MARKERS = ("ThrottlingException", "TooManyRequestsException", "Rate exceeded")
+
+
+def aws(*args, check=True, output="json", retries=5):
+    """AWS CLI を実行して結果を返す。失敗時は check=True なら終了、False なら None。
+
+    API のレート制限 (RunMicrovm は既定で 1 回/秒) に当たったら待ってやり直す。
+    RunMicrovm は clientToken 付きで呼ぶので、やり直しても二重に起動しない。
+    """
     cmd = [aws_bin(), *args]
     if output:
         cmd += ["--output", output]
-    p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", env=aws_env())
+    for attempt in range(retries + 1):
+        p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", env=aws_env())
+        if p.returncode == 0 or attempt == retries or not any(m in p.stderr for m in THROTTLE_MARKERS):
+            break
+        time.sleep(min(2 ** attempt, 16))
     if p.returncode != 0:
         if check:
+            if "ServiceQuotaExceededException" in p.stderr:
+                die(f"AWS のクォータを超えました: {p.stderr.strip()}\n"
+                    "  MicroVM のメモリ上限は mvm doctor で確認できます。並列数を増やすには Service Quotas で引き上げを申請してください")
             die(f"aws {' '.join(args[:2])} に失敗しました: {p.stderr.strip()}")
         return None
     out = p.stdout.strip()
@@ -177,6 +191,31 @@ def stack_output(key):
         if o["OutputKey"] == key:
             return o["OutputValue"]
     die(f"スタック出力 {key} がありません")
+
+
+MEMORY_QUOTA_CODE = "L-CD1C0CC4"  # Max allocated ARM_64 MicroVM memory (GB)
+_memory_quota = []
+
+
+def memory_quota_mib():
+    """アカウントの MicroVM メモリ上限 (MiB)。権限がないなどで取得できなければ None。"""
+    if not _memory_quota:
+        r = aws("service-quotas", "get-service-quota", "--service-code", "lambda",
+                "--quota-code", MEMORY_QUOTA_CODE, check=False, retries=0) or {}
+        value = r.get("Quota", {}).get("Value")
+        _memory_quota.append(int(float(value) * 1024) if value is not None else None)
+    return _memory_quota[0]
+
+
+def check_memory_quota(running, adding):
+    """running 台が起動中のところへ adding 台を足しても上限内かを確かめる。"""
+    quota = memory_quota_mib()
+    need = (running + adding) * int(C["MEMORY_MIB"])
+    if quota is not None and need > quota:
+        fit = max(quota // int(C["MEMORY_MIB"]) - running, 0)
+        die(f"MicroVM のメモリ上限を超えます (上限 {quota // 1024}GB、必要 {need // 1024}GB = "
+            f"{running + adding} 台 x {int(C['MEMORY_MIB']) // 1024}GB)。今は あと {fit} 台まで起動できます。\n"
+            f"  Service Quotas で「Max allocated ARM_64 MicroVM memory」({MEMORY_QUOTA_CODE}) の引き上げを申請してください")
 
 
 def find_image_arn():
@@ -307,12 +346,22 @@ def open_tcp(host, port, timeout):
     return sock
 
 
+def ws_target(endpoint):
+    """WebSocket の接続先 (host, port, tls)。PMVA_WS_BASE_URL はテスト・デバッグ用 (例: ws://127.0.0.1:9001)。"""
+    override = os.environ.get("PMVA_WS_BASE_URL")
+    if override:
+        u = urllib.parse.urlparse(override)
+        tls = u.scheme == "wss"
+        return u.hostname, u.port or (443 if tls else 80), tls
+    return endpoint, 443, True
+
+
 class WebSocket:
     """RFC 6455 の最小限のクライアント (バイナリフレームの送受信、ping/pong、close)。"""
 
-    def __init__(self, host, path, protocols, timeout=30):
-        raw = open_tcp(host, 443, timeout)
-        self.sock = ssl.create_default_context().wrap_socket(raw, server_hostname=host)
+    def __init__(self, host, path, protocols, timeout=30, port=443, tls=True):
+        raw = open_tcp(host, port, timeout)
+        self.sock = ssl.create_default_context().wrap_socket(raw, server_hostname=host) if tls else raw
         key = base64.b64encode(os.urandom(16)).decode()
         req = (f"GET {path} HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n"
@@ -521,6 +570,17 @@ def cmd_doctor(_args):
     else:
         print(f"  NG   {C['AWS_REGION']} で list-managed-microvm-images に失敗: {p.stderr.strip()[:200]}")
         ok = False
+    quota = memory_quota_mib()
+    if quota is None:
+        print("  --   MicroVM のメモリ上限を取得できません (servicequotas:GetServiceQuota の権限が必要)")
+    else:
+        fit = quota // int(C["MEMORY_MIB"])
+        mark = "ok" if fit >= int(C["MAX_AGENTS"]) else "!!"
+        print(f"  {mark}   MicroVM のメモリ上限 {quota // 1024}GB → {int(C['MEMORY_MIB']) // 1024}GB の VM を同時に {fit} 台まで"
+              f" (MAX_AGENTS={C['MAX_AGENTS']})")
+        if fit < int(C["MAX_AGENTS"]):
+            print(f"         MAX_AGENTS 台を動かすには Service Quotas で {MEMORY_QUOTA_CODE} を"
+                  f" {int(C['MAX_AGENTS']) * int(C['MEMORY_MIB']) // 1024}GB 以上に引き上げてください")
     key = expand_path(C["SSH_PUBLIC_KEY_FILE"])
     if key and key.exists():
         print(f"  ok   SSH 公開鍵: {key}")
@@ -557,7 +617,7 @@ def cmd_infra(args):
         aws_interactive("cloudformation", "delete-stack", "--stack-name", C["STACK_NAME"])
         aws_interactive("cloudformation", "wait", "stack-delete-complete", "--stack-name", C["STACK_NAME"])
         (STATE_DIR / "stack-outputs.json").unlink(missing_ok=True)
-        log("削除しました (Secrets Manager のシークレットとイメージは残っています)")
+        log("削除しました。イメージは mvm image delete、シークレットは Secrets Manager で個別に削除してください")
     return 0
 
 
@@ -633,6 +693,15 @@ def cmd_image(args):
     if args.action == "base":
         for item in lmv("list-managed-microvm-images").get("items", []):
             print(item["imageArn"])
+        return 0
+    if args.action == "delete":
+        arn = find_image_arn() or die(f"イメージ {C['IMAGE_NAME']} はありません")
+        if not args.yes:
+            ans = input(f"イメージ {arn} を全バージョンごと削除します。よろしいですか? [y/N] ")
+            if ans.strip().lower() != "y":
+                die("中止しました")
+        lmv("delete-microvm-image", "--image-identifier", arn)
+        log(f"削除を開始しました: {arn} (使うときは mvm image build で作り直せます)")
         return 0
     if args.action == "status":
         arn = find_image_arn() or die(f"イメージ {C['IMAGE_NAME']} はまだありません (mvm image build)")
@@ -753,18 +822,24 @@ def launch(name, payload, idle, max_duration):
         die("runHookPayload が 4096 バイトを超えています。長い指示は起動後に mvm send で送ってください")
     if is_active(name):
         die(f"セッション {name} は既に起動しています")
-    if len(active_names()) >= int(C["MAX_AGENTS"]):
+    running = len(active_names())
+    if running >= int(C["MAX_AGENTS"]):
         die(f"起動中のセッションが上限 ({C['MAX_AGENTS']}) に達しています")
+    check_memory_quota(running, 1)
     arn = find_image_arn() or die(f"イメージ {C['IMAGE_NAME']} がありません。先に mvm image build を実行してください")
     ver = lmv("get-microvm-image", "--image-identifier", arn).get("latestActiveImageVersion")
     if not ver:
         die("利用可能なイメージバージョンがありません (mvm image status)")
+    # 指示文などを含むペイロードはコマンドラインに載せずファイルで渡す
+    # (Windows の aws.cmd 経由だと cmd.exe が & や | などの記号を解釈して壊れるため)
+    payload_file = STATE_DIR / f"payload-{name}.json"
+    payload_file.write_text(payload_json, encoding="utf-8")
     connectors = [f"arn:aws:lambda:{C['AWS_REGION']}:aws:network-connector:aws-network-connector:{c}"
                   for c in C["INGRESS_CONNECTORS"].split()]
     args = [
         "--image-identifier", arn, "--image-version", ver,
         "--execution-role-arn", stack_output("ExecutionRoleArn"),
-        "--run-hook-payload", payload_json,
+        "--run-hook-payload", "file://" + str(payload_file),
         "--maximum-duration-in-seconds", str(max_duration),
         "--logging", json.dumps({"cloudWatch": {"logGroup": stack_output("LogGroupName")}}),
         "--client-token", f"pmva-{name}-{int(time.time())}",
@@ -778,7 +853,10 @@ def launch(name, payload, idle, max_duration):
             "autoResumeEnabled": as_bool(C["IDLE_AUTO_RESUME"]),
         })]
     log(f"起動: {name} (image {ver}, {C['MEMORY_MIB']}MiB, idle={idle}, max={max_duration}s)")
-    resp = lmv("run-microvm", *args)
+    try:
+        resp = lmv("run-microvm", *args)
+    finally:
+        payload_file.unlink()
     endpoint = resp["endpoint"].split("://", 1)[-1].rstrip("/")
     save_session({
         "name": name, "microvmId": resp["microvmId"], "endpoint": endpoint,
@@ -803,9 +881,12 @@ def cmd_fleet(args):
     prompts = []
     if args.prompts_file:
         prompts = expand_path(args.prompts_file).read_text(encoding="utf-8").splitlines()
-    for i in range(1, args.count + 1):
-        name = f"{args.prefix}-{i:02d}"
-        if is_active(name):
+    names = [f"{args.prefix}-{i:02d}" for i in range(1, args.count + 1)]
+    running = active_names()
+    # 1 台目を起動する前に、全台分がクォータに収まるかを確かめる
+    check_memory_quota(len(running), len([n for n in names if n not in running]))
+    for i, name in enumerate(names, start=1):
+        if name in running:
             log(f"{name} は起動済みのためスキップ")
             continue
         a = argparse.Namespace(**vars(args))
@@ -969,7 +1050,8 @@ def cmd_shell(args):
     token = r["authToken"]["X-aws-proxy-auth"]
     log("接続します。入ったら agent-attach でエージェントの tmux に接続できます (切断は exit)")
     try:
-        ws = WebSocket(s["endpoint"], "/shell", ws_protocols(token, SHELL_PORT))
+        host, port, tls = ws_target(s["endpoint"])
+        ws = WebSocket(host, "/shell", ws_protocols(token, SHELL_PORT), port=port, tls=tls)
     except OSError as e:
         die(f"シェルに接続できません: {e}")
     # 接続直後に {"type":"session_init",...} という制御メッセージが届くので表示しない (PoC で確認)
@@ -1011,7 +1093,8 @@ def cmd_ssh_proxy(args):
     s = load_session(args.name)
     token = auth_token(args.name, SSH_BRIDGE_PORT)
     try:
-        ws = WebSocket(s["endpoint"], "/", ws_protocols(token, SSH_BRIDGE_PORT))
+        host, port, tls = ws_target(s["endpoint"])
+        ws = WebSocket(host, "/", ws_protocols(token, SSH_BRIDGE_PORT), port=port, tls=tls)
     except OSError as e:
         die(f"SSH ブリッジに接続できません: {e}")
     set_binary_stdio()
@@ -1139,8 +1222,9 @@ def build_parser():
     x.add_argument("--name", help="シークレット名 (既定 <prefix>/<kind>)")
     x.add_argument("--file", help="値をファイルから読む (省略時は入力 / 標準入力)")
     x.set_defaults(func=cmd_secret)
-    x = sub.add_parser("image", help="エージェント実行イメージをビルド / 状態確認 / ベースイメージ一覧")
-    x.add_argument("action", choices=("build", "status", "base"))
+    x = sub.add_parser("image", help="エージェント実行イメージをビルド / 状態確認 / ベースイメージ一覧 / 削除")
+    x.add_argument("action", choices=("build", "status", "base", "delete"))
+    x.add_argument("--yes", action="store_true", help="delete の確認を省略する")
     x.set_defaults(func=cmd_image)
 
     x = sub.add_parser("up", help="MicroVM を 1 台起動してエージェントを開始")

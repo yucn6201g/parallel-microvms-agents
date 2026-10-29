@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # 手元 PC で使う mvm を Windows / macOS / Linux それぞれで確かめる (AWS は使わない)
+    name: test (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install tmux and jq (MicroVM 側スクリプトの結合テスト用)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y tmux jq
+      - name: Unit and CLI tests
+        run: python -m unittest discover -s tests -v
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install cfn-lint
+        run: pip install cfn-lint
+      - name: shellcheck
+        run: shellcheck -S warning bin/mvm image/bootstrap.sh image/snapshot.sh image/agent-attach
+      - name: cfn-lint
+        run: cfn-lint infra/cloudformation.yaml
+      - name: Compile Python
+        run: python -m py_compile bin/mvm.py image/supervisor.py scripts/estimate_cost.py tests/*.py
