@@ -138,8 +138,6 @@ mvm infra deploy
 
 普段の `mvm` の操作 (起動・接続・停止・イメージのビルド) は、管理者ではなく **`pmva-operator` ポリシーだけを付けた専用の IAM ユーザー**で行います。`mvm doctor` は、ルートユーザーや管理者権限 (`AdministratorAccess`) の認証情報、作成から 90 日を超えたアクセスキーを使っていると警告します。
 
-> **PoC で起きたこと**: PoC では管理者ユーザーの長期アクセスキーをクラウドの開発環境 (Claude Code on the web) に渡して作業しました。普段と違う場所から管理者のキーで IAM ロールや Lambda 関数を次々に作ったためか、AWS の不正利用検知で「第三者に不適切にアクセスされた可能性がある」と判断され、アカウントの一部サービスが制限されました (Lambda 関数の API の拒否、MicroVM メモリのクォータ 0)。解除には、ルートユーザーのパスワード変更と MFA の設定、CloudTrail の確認、AWS サポートへの連絡が必要です ([poc-checklist.md](poc-checklist.md) の G)。
-
 作り方 (管理者の認証情報で、自分の PC から実行):
 
 ```bash
@@ -329,9 +327,8 @@ VM の中で使えるコマンド:
 | bootstrap が `failed` | シークレット名・登録の有無、実行ロールの権限を確認 |
 | エージェントが止まっている | アイドルサスペンドされていた可能性。通信すると再開する。キープアライブが無効になっていないか (`KEEPALIVE_RATE_MINUTES`) も確認 |
 | SSH が `Broken pipe` で切れる | 途中の通信経路 (社内プロキシなど) が長時間の接続を切ることがある。PoC での切断は、すべてクラウドセッションの送信用中継が再起動したとき (WebSocket の close コード 1012 `server_draining`) で、AWS 側の切断ではなかった。`mvm ssh <name>` (コマンドなし) は自動で再接続する。原因を調べるときは `PMVA_DEBUG=<ファイル>` を設定すると切断理由を記録する |
-| `up` で「メモリ上限を超えます (上限 0GB)」 | `mvm doctor` でクォータを確認。0 の場合は AWS の不正利用検知でアカウントが制限されている可能性がある (PoC 中に 8GB → 0GB に変わり、同時に Lambda 関数の API も拒否されるようになった)。AWS からのメールとサポートケースを確認する |
-| `infra delete` で「削除できなかったため、スタックから外して残しました」と出る | Lambda 関数の API が拒否されているなどで消せなかったリソースだけを残し、残りは削除している。表示された `aws lambda delete-function ...` を、API が使えるようになってから実行する (残したままだと次の `infra deploy` が「前回の削除で残った Lambda 関数があります」で止まる) |
-| `mvm ls` の状態が `UNKNOWN` | AWS から状態を取得できなかった (権限・通信・アカウントの制限)。終了扱いにはしていないので、原因を解消すれば元に戻る。`PMVA_DEBUG=<ファイル>` でエラーを記録できる |
+| `up` で「メモリ上限を超えます」 | `mvm doctor` でクォータと起動できる台数を確認する。足りなければ[引き上げを申請](#クォータの確認-並列で使う場合は必須)する |
+| `infra delete` で「削除できなかったため、スタックから外して残しました」と出る | 権限の不足などで消せなかったリソースだけを残し、残りは削除している。原因を解消してから、表示された `aws lambda delete-function ...` を実行する (残したままだと次の `infra deploy` が「前回の削除で残った Lambda 関数があります」で止まる) |
+| `mvm ls` の状態が `UNKNOWN` | AWS から状態を取得できなかった (権限・通信)。終了扱いにはしていないので、原因を解消すれば元に戻る。`PMVA_DEBUG=<ファイル>` でエラーを記録できる |
 | `mvm renew` が「保存に失敗したので、終了せずに止めました」 | 作業内容を失わないよう VM を残している。`mvm ssh` で入って原因 (ディスク不足など) を確認するか、保存せずに作り直すなら `mvm stop <name> --no-save` → `mvm up <name> --restore latest` |
-| AWS から「アカウントが第三者に不適切にアクセスされた可能性」のメール | メールの手順 (ルートのパスワード変更、MFA、CloudTrail の確認、不要なリソースの確認) を行い、使っていたアクセスキーを無効化・削除してから、サポートケースに返信する。以後は[操作用の IAM ユーザー](#操作用の-iam-ユーザー)を使う |
-| `infra deploy` で `pmva-keepalive` / `pmva-nightly-stop` の作成が AccessDenied | 操作者の権限 (`lambda:CreateFunction` など) と、AWS Organizations の SCP を確認。`aws lambda list-functions` も拒否される場合はアカウント側の制限 |
+| `infra deploy` で `pmva-keepalive` / `pmva-nightly-stop` の作成が AccessDenied | 操作者の権限 (`lambda:CreateFunction` など) と、AWS Organizations の SCP を確認する |

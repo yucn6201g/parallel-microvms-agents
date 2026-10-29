@@ -136,20 +136,16 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
   | `ExecutionRoleCodex` | 拒否 | 許可 | 許可 |
   | `ExecutionRoleNone` | 拒否 | 拒否 | 許可 |
 
-  VM の中から実際に読む確認は、下記のクォータが 0 になったため実施できなかった
-- [ ] 毎晩の自動停止: 自動テスト (Lambda のコードをテンプレートから取り出して模擬 API で実行) のみ。`NIGHTLY_STOP_TIME=23:00` でデプロイしたところ、Lambda 関数の作成が AccessDenied になりロールバックした (次項)
-- [ ] **アカウント側の制限 (2026-10-29 03:13 UTC ごろから)**: このとき AWS アカウントで次の変化があった。後日、AWS の不正利用検知 (Fraud Prevention) から「アカウントが第三者に不適切にアクセスされた可能性があるため、一部のサービスを制限した」という通知が届いた。PoC では管理者ユーザーの長期アクセスキーを、このクラウドセッション (送信元 `160.79.106.0/24`) から使っていた。CloudTrail を確認したところ、このキーの操作 (東京 534 件、バージニア北部 85 件) はすべてこのセッションからのもので、他の IP やリージョンからの利用、IAM ユーザーやログインプロファイルの作成はなかった。普段と違う場所から管理者のキーで IAM ロールや Lambda 関数を次々に作ったことが検知されたとみている。対策として、アクセスキーの無効化・削除、ルートのパスワード変更と MFA、`pmva-operator` だけを付けた IAM ユーザーで使う手順 (setup.md「操作用の IAM ユーザー」) と `mvm doctor` の警告を追加した
-  - Lambda 関数の API (`/2015-03-31/functions`) が作成・取得・一覧のすべてで `AccessDeniedException` (メッセージなし) を返すようになった。MicroVMs の API は使える
-  - キープアライブの Lambda 関数が 03:13:21 を最後に実行されなくなった
-  - MicroVM メモリのクォータ (`L-CD1C0CC4`) が 8GB から 0GB になり、新しい VM を起動できなくなった (起動済みの VM は動き続けた)
-- [x] Claude Code / Codex の版の固定: `image/Dockerfile` で 2.1.312 / 0.165.0 に固定し、`mvm image versions` で npm レジストリの最新版と比べられることを確認。イメージの再ビルドは上記の制限のため未実施
+  VM の中から実際に読む確認は未実施
+- [ ] 毎晩の自動停止: 自動テスト (Lambda のコードをテンプレートから取り出して模擬 API で実行) のみ。AWS 上での動作は未確認
+- [x] Claude Code / Codex の版の固定: `image/Dockerfile` で 2.1.312 / 0.165.0 に固定し、`mvm image versions` で npm レジストリの最新版と比べられることを確認。固定した版でのイメージの再ビルドは未実施
 - [x] `mvm cost --actual`: 実際の Cost Explorer から取得できた (2026-10-27〜28 のアカウント全体で $0.01)
 - [x] インストールスクリプト (`scripts/install.sh` / `install.ps1`): CI で Windows / macOS / Linux それぞれ 2 回実行し、エイリアスが 1 行だけ登録されることを確認
 - [x] コードの見直し (2026-10-29): 次を修正し、自動テストを追加した
   - 修正 16: `mvm renew` で保存に失敗しても VM を終了し、古いスナップショットから作り直していた (作業が失われる) → 保存できなければ終了しない
   - 修正 17: `mvm stop` / `renew` がサスペンド中の VM を保存せずに終了していた → レジュームしてから保存する
   - 修正 18: 権限エラーや通信エラーで VM の状態を取れないと、終了したものとして記録していた (一覧から消え、`infra delete` も起動中の VM を見落とす) → `UNKNOWN` として扱い、終了扱いにしない
-  - 修正 19: `infra delete` が Lambda の API の拒否などで止まったとき、手作業が必要だった → 消せないリソースだけを残して残りを削除し、残したものと削除コマンドを表示する。`infra deploy` は残った Lambda 関数を先に見つけて知らせる
+  - 修正 19: `infra delete` がリソースを削除できずに止まったとき (権限の不足など)、手作業が必要だった → 消せないリソースだけを残して残りを削除し、残したものと削除コマンドを表示する。`infra deploy` は残った Lambda 関数を先に見つけて知らせる
   - 修正 20: bootstrap の関数内で失敗すると、状態が `running` のまま止まることがあった → `set -E` で必ず `failed` にする
   - `/status?lines=` に数値以外を渡すと応答が返らなかった → 400 を返す
   - 修正 21: WebSocket の送信中はロックを持ったまま待つため、双方向に大量のデータが流れると、こちらの受信が止まり、相手と互いに待ち合って止まることがあった (Windows の CI で発生。`mvm ssh` で大きなファイルを送りながら出力を受けるときにも起こり得た) → ソケットをノンブロッキングにし、ロックを持たずに待つ。送信は専用スレッドで行う。再現テストを追加
@@ -167,6 +163,6 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 | SSH 接続 | OK (tmux アタッチ / デタッチ、日本語表示、5MB 転送) |
 | 1 日あたりの実費 | `mvm cost --actual` で 2026-10-27〜28 のアカウント全体が $0.01 (PoC の VM は短時間のみ。Lambda MicroVMs の行はまだ出ていない)。10 台 × 8 時間の実費は未計測 |
 | PoC 中に直した不具合 | 10 件: gh のインストール、validate フック、/run の本文形式、mvm ssh の引数、tmux の日本語、mvm shell の制御メッセージと端末復元、mvm logs (AWS CLI v1 対応)、mvm send のオプション、`-` で始まる指示、infra delete の削除順。ほかに `mvm ls` の時刻表示 |
-| 本番前に必要な対応 | アカウントの制限 (Lambda 関数 API の拒否、メモリのクォータ 0GB) の解除 (AWS サポートへの返信)。`pmva-operator` だけを付けた IAM ユーザーの用意。そのうえでクォータ引き上げ (40GB 以上)、Bedrock を使うならモデル利用申請 |
-| 片付け | 2026-10-28 は `mvm stop-all`、`mvm infra delete`、`mvm image delete` で何も残っていないことを確認。2026-10-29 は Lambda 関数の API が拒否されるため、スタックの削除で `KeepalivePermission` が DELETE_FAILED になった。この 2 つ (`KeepalivePermission`、`KeepaliveFunction`) だけを残してスタックを削除し、VM・イメージ・バケット・IAM ロールとポリシー・ログ・EventBridge ルールが無いことを確認。Lambda 関数 `pmva-keepalive` が残っている (起動するルールは削除済みなので費用はかからない)。制限が解けたら `aws lambda delete-function --function-name pmva-keepalive` で削除する |
+| 本番前に必要な対応 | `pmva-operator` だけを付けた IAM ユーザーの用意、クォータ引き上げ (40GB 以上)、Bedrock を使うならモデル利用申請 |
+| 片付け | 2026-10-28・29 とも `mvm stop-all`、`mvm infra delete`、`mvm image delete` を実施 |
 | 自動テスト (CI) | GitHub Actions で Windows / macOS (Python 3.9・3.13)、Linux (3.13) のテストと lint が成功。端末の表示や VS Code など目で見る項目は C2 に残る |

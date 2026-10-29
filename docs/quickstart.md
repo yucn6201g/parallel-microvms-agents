@@ -23,7 +23,7 @@
 
 ## 1. AWS アカウントを守る
 
-AI エージェントに AWS を使わせるので、最初にアカウントの守りを固めます。**この手順を飛ばさないでください** (PoC では、管理者のキーを別の環境で使ったことで AWS の不正利用検知に引っかかり、アカウントが制限されました)。
+AI エージェントに AWS を使わせるので、最初にアカウントの守りを固めます。**この手順を飛ばさないでください**。
 
 1. AWS マネジメントコンソールに**ルートユーザー**でサインインし、右上のアカウント名 →「セキュリティ認証情報」→「MFA を割り当てる」で MFA を設定する
 2. 同じ画面の「アクセスキー」に何もないことを確認する (ルートのアクセスキーは作らない)
@@ -200,7 +200,7 @@ mvm cost --actual --days 7
 | `mvm doctor` で「AWS 認証情報がありません」 | `config.env` の `AWS_PROFILE` と、`aws configure` で付けたプロファイル名が同じか。SSO なら `aws sso login --profile admin` |
 | `mvm doctor` で「lambda-microvms に未対応」 | AWS CLI が古い。最新版に入れ直す |
 | `mvm infra deploy` で AccessDenied | 管理者のプロファイル (`AWS_PROFILE=admin`) で実行しているか |
-| `mvm up` で「メモリ上限を超えます」 | すでに起動中の VM を `mvm ls` で確認して止める。上限が 0GB なら AWS 側でアカウントが制限されている可能性 ([setup.md](setup.md#トラブルシューティング)) |
+| `mvm up` で「メモリ上限を超えます」 | すでに起動中の VM を `mvm ls` で確認して止める。台数を増やしたいときはクォータの引き上げを申請する ([setup.md](setup.md#クォータの確認-並列で使う場合は必須)) |
 | `mvm peek` で bootstrap が `failed` | 手順 6 のシークレットを登録したか (`mvm secret ls`)。`mvm shell test-01` で入って `cat ~agent/.pmva/bootstrap.log` |
 | `mvm ssh` で「SSH 公開鍵なしで起動されています」 | 手順 2 の `ssh-keygen` をしたか。作った後に `mvm renew test-01` で起動し直す (それまでは `mvm shell test-01` で入れる) |
 | 手順 5 の後に `mvm image build` や `mvm up` で AccessDenied | `pmva-operator` ポリシーに足りない権限がある (このポリシーだけでの動作はまだ実機で確認できていない)。エラーに出た操作を [setup.md](setup.md#操作用の-iam-ユーザー) の手順で追加する |
