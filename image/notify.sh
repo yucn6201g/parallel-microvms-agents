@@ -26,7 +26,8 @@ case "$kind" in
   codex)
     event="${2:-}"
     [ "$(jq -r '.type // empty' <<<"$event" 2>/dev/null)" = "agent-turn-complete" ] || exit 0
-    last="$(jq -r '."last-assistant-message" // empty' <<<"$event" 2>/dev/null | head -c 300)"
+    # 文字単位で切り詰める (head -c だと日本語の途中で切れて文字化けする)
+    last="$(jq -r '(."last-assistant-message" // "")[0:300]' <<<"$event" 2>/dev/null)"
     msg="Codex の応答が終わりました${last:+: $last}"
     ;;
   *)

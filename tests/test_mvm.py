@@ -10,7 +10,9 @@ import http.server
 import importlib.util
 import json
 import os
+import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -42,13 +44,14 @@ class EchoWebSocketServer:
 
     GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
-    def __init__(self):
+    def __init__(self, ssl_context=None):
         self.sock = socket.socket()
         self.sock.bind(("127.0.0.1", 0))
         self.sock.listen()
         self.port = self.sock.getsockname()[1]
         self.protocols = []
         self.paths = []
+        self.ssl_context = ssl_context
         threading.Thread(target=self._serve, daemon=True).start()
 
     def close(self):
@@ -60,6 +63,11 @@ class EchoWebSocketServer:
                 conn, _ = self.sock.accept()
             except OSError:
                 return
+            if self.ssl_context:
+                try:
+                    conn = self.ssl_context.wrap_socket(conn, server_side=True)
+                except (OSError, ssl.SSLError):
+                    continue
             threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
 
     @staticmethod
@@ -281,6 +289,49 @@ class WebSocketTest(unittest.TestCase):
                              "lambda-microvms.authentication.TOK, lambda-microvms, lambda-microvms.port.7681")
         finally:
             server.close()
+
+    @unittest.skipUnless(shutil.which("openssl"), "openssl が必要")
+    def test_tls_concurrent_send_and_receive(self):
+        """受信スレッド・送信・ping を同時に動かしても TLS 上のデータが壊れないこと。"""
+        with tempfile.TemporaryDirectory() as d:
+            cert, key = Path(d) / "cert.pem", Path(d) / "key.pem"
+            subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", str(key),
+                            "-out", str(cert), "-days", "1", "-subj", "/CN=localhost",
+                            "-addext", "subjectAltName=DNS:localhost"], check=True, capture_output=True)
+            server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            server_ctx.load_cert_chain(str(cert), str(key))
+            server = EchoWebSocketServer(ssl_context=server_ctx)
+            original = mvm.ssl.create_default_context
+            mvm.ssl.create_default_context = lambda: original(cafile=str(cert))
+            try:
+                ws = mvm.WebSocket("localhost", "/", ["lambda-microvms"], port=server.port, tls=True)
+                chunks = [os.urandom(1000 + i * 37) for i in range(300)]
+                expected = b"".join(chunks)
+                got = bytearray()
+
+                def reader():
+                    while len(got) < len(expected):
+                        data = ws.recv()
+                        if data is None:
+                            return
+                        got.extend(data)
+
+                def pinger():
+                    for _ in range(200):
+                        ws.send(b"", 0x9)
+
+                threads = [threading.Thread(target=reader), threading.Thread(target=pinger)]
+                for th in threads:
+                    th.start()
+                for c in chunks:
+                    ws.send(c)
+                threads[0].join(60)
+                threads[1].join(60)
+                self.assertEqual(bytes(got), expected)
+                ws.close()
+            finally:
+                mvm.ssl.create_default_context = original
+                server.close()
 
     def test_through_connect_proxy(self):
         server, proxy = EchoWebSocketServer(), ConnectProxy()

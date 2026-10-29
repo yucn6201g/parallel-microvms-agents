@@ -323,6 +323,7 @@ Resources:
   KeepaliveFunction:
     Type: AWS::Lambda::Function
     Condition: KeepaliveEnabled
+    DependsOn: KeepaliveLogGroup
     Properties:
       FunctionName: !Sub "${Prefix}-keepalive"
       Runtime: python3.13

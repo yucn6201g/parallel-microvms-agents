@@ -28,7 +28,9 @@ Claude Code / Codex を **AWS Lambda MicroVMs** 上で最大 10 本並列に動�
 | 手元 PC から指示 | `mvm send <name> "指示"`（接続せずに入力）、または `mvm ssh` で直接操作 |
 | 多様な認証方式 | Claude Code: サブスクリプション (OAuth トークン) / API キー / Amazon Bedrock / LLM ゲートウェイ / 対話ログイン<br>Codex: API キー / ChatGPT ログイン (auth.json) / 対話ログイン |
 | 8 時間制限への対応 | ワークスペースを S3 に定期保存し、`mvm renew` で新しい MicroVM に復元 |
-| コスト試算 | `mvm cost`（[docs/cost.md](docs/cost.md)） |
+| PC を閉じても作業を続ける | AWS 側のキープアライブが、作業中の VM だけを一時停止させない（作業が終われば止まる） |
+| 完了・入力待ちの通知 | Claude Code の hooks / Codex の notify から Slack などの Webhook に通知（`mvm up --notify`） |
+| コスト試算と予算アラート | `mvm cost`（[docs/cost.md](docs/cost.md)）、AWS Budgets のメール通知（任意） |
 | 手元 PC は Windows / macOS 両対応 | 手元 CLI は Python 標準ライブラリのみで実装。必要なのは Python 3.9 以上、AWS CLI v2、OpenSSH クライアント (両 OS に標準搭載) だけ |
 
 ## クイックスタート

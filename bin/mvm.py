@@ -383,13 +383,28 @@ class WebSocket:
         headers = {l.split(":", 1)[0].strip().lower(): l.split(":", 1)[1].strip() for l in lines[1:] if ":" in l}
         if headers.get("sec-websocket-accept") != accept:
             raise OSError("WebSocket handshake failed: invalid Sec-WebSocket-Accept")
+        # SSL ソケットは複数スレッドからの同時の読み書きに対して安全ではない (受信スレッドと
+        # 送信・ping が同時に触ると接続が壊れることがあった)。読み書きとも self.lock の中で行い、
+        # 受信は短いタイムアウトで区切って送信側にロックを譲る
         self.sock.settimeout(None)
         self.lock = threading.Lock()
         self.closed = False
 
+    def _recv_chunk(self):
+        while True:
+            with self.lock:
+                self.sock.settimeout(0.05)
+                try:
+                    return self.sock.recv(65536)
+                except (socket.timeout, ssl.SSLWantReadError):
+                    pass
+                finally:
+                    self.sock.settimeout(None)
+            time.sleep(0.002)
+
     def _read(self, n):
         while len(self.buf) < n:
-            chunk = self.sock.recv(65536)
+            chunk = self._recv_chunk()
             if not chunk:
                 raise EOFError
             self.buf += chunk
@@ -662,11 +677,11 @@ def prepare_new_stack():
         status = None
     if status:
         return
-    group = f"/aws/lambda-microvms/{C['PMVA_PREFIX']}"
-    groups = aws("logs", "describe-log-groups", "--log-group-name-prefix", group, check=False) or {}
-    if any(g.get("logGroupName") == group for g in groups.get("logGroups", [])):
-        log(f"スタック管理外で残っているロググループ {group} を削除します (前回の削除後に作られたもの)")
-        aws("logs", "delete-log-group", "--log-group-name", group, output=None)
+    for group in (f"/aws/lambda-microvms/{C['PMVA_PREFIX']}", f"/aws/lambda/{C['PMVA_PREFIX']}-keepalive"):
+        groups = aws("logs", "describe-log-groups", "--log-group-name-prefix", group, check=False) or {}
+        if any(g.get("logGroupName") == group for g in groups.get("logGroups", [])):
+            log(f"スタック管理外で残っているロググループ {group} を削除します (前回の削除後に作られたもの)")
+            aws("logs", "delete-log-group", "--log-group-name", group, output=None)
 
 
 def wait_until_terminated(timeout=300):
@@ -898,7 +913,6 @@ def launch(name, payload, idle, max_duration):
     # 指示文などを含むペイロードはコマンドラインに載せずファイルで渡す
     # (Windows の aws.cmd 経由だと cmd.exe が & や | などの記号を解釈して壊れるため)
     payload_file = STATE_DIR / f"payload-{name}.json"
-    payload_file.write_text(payload_json, encoding="utf-8")
     connectors = [f"arn:aws:lambda:{C['AWS_REGION']}:aws:network-connector:aws-network-connector:{c}"
                   for c in C["INGRESS_CONNECTORS"].split()]
     args = [
@@ -918,6 +932,7 @@ def launch(name, payload, idle, max_duration):
             "autoResumeEnabled": as_bool(C["IDLE_AUTO_RESUME"]),
         })]
     log(f"起動: {name} (image {ver}, {C['MEMORY_MIB']}MiB, idle={idle}, max={max_duration}s)")
+    payload_file.write_text(payload_json, encoding="utf-8")
     try:
         resp = lmv("run-microvm", *args)
     finally:

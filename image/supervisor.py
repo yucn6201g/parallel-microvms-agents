@@ -294,6 +294,8 @@ class HookHandler(Handler):
             except (ValueError, AttributeError, TypeError):
                 return self.reply(400, {"error": "runHookPayload must be JSON"})
             session["microvmId"] = body.get("microvmId")
+            # 作業判定はイメージのスナップショット時点の値を引き継いでいるので、セッション開始時にリセットする
+            activity.update(last=time.time(), cpu=None, screens=None)
             os.makedirs(PMVA_DIR, mode=0o700, exist_ok=True)
             tmp = SESSION_FILE + ".tmp"
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

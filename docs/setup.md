@@ -88,6 +88,12 @@ mvm doctor
 aws service-quotas get-service-quota --service-code lambda --quota-code L-CD1C0CC4 --region ap-northeast-1
 ```
 
+`mvm doctor` でも「同時に何台まで起動できるか」を表示します。上限を超える `mvm up` / `mvm fleet` は、1 台も起動する前に止まります。
+
+**引き上げの申請方法 (PoC で確認)**: PoC のアカウントでは、現在の値 (8GB) が AWS の既定値 (2048) より低く抑えられていました。この状態では Service Quotas の API / コンソールからの申請が「既定値より大きい値を指定してください」と拒否されます。その場合は AWS サポートセンターで「Service limit increase」のケースを作成し、次のように依頼してください (ベーシックサポートでも作成できます)。
+
+> サービス: AWS Lambda (Lambda MicroVMs) / リージョン: アジアパシフィック (東京) / クォータ: Max allocated ARM_64 MicroVM memory (L-CD1C0CC4) / 希望値: 40 GB / 用途: AI コーディングエージェントを 4GB の MicroVM 10 台で並列実行するため
+
 ## 3. AWS リソースの作成
 
 管理者権限のある認証情報で実行します。
@@ -103,6 +109,18 @@ mvm infra deploy
 - CloudWatch Logs `/aws/lambda-microvms/pmva`
 - 管理ポリシー `pmva-operator`: 普段 mvm を使う IAM ユーザー / SSO の権限セットにアタッチする
 - (既定) `pmva-bedrock-invoke`: Bedrock を使わない場合は `config.env` で `ENABLE_BEDROCK=false` にしてから実行
+- (既定) キープアライブ: Lambda 関数 `pmva-keepalive` と、それを 5 分ごとに呼ぶ EventBridge ルール ([下記](#pc-を閉じても作業を続ける-キープアライブ))
+- (任意) 予算アラート `pmva-monthly`: `config.env` の `BUDGET_MONTHLY_USD` と `BUDGET_EMAIL` を両方設定したときだけ作る
+
+### 操作用ポリシーの確認
+
+普段は管理者ではなく、`pmva-operator` ポリシーだけを付けたユーザー (またはロール) で `mvm` を使うことを想定しています。PoC は管理者ユーザーで行ったため、このポリシーで足りるかはまだ実機で確認できていません (確認しようとした環境では、AWS へのリクエストが管理者の認証情報で署名し直されるため)。最初に次の手順で確認してください。
+
+1. IAM ユーザー (または SSO の権限セット) に `pmva-operator` だけを付け、そのプロファイルを `config.env` の `AWS_PROFILE` に設定する
+2. `mvm doctor` → `mvm image status` → `mvm up op-test --agent none` → `mvm peek op-test` → `mvm ssh op-test -- id` → `mvm stop op-test` を順に実行する
+3. `AccessDenied` が出たら、エラーに出た操作 (例: `lambda:PassNetworkConnector`) を `infra/cloudformation.yaml` の `OperatorPolicy` に追加して `mvm infra deploy` する
+
+`mvm infra deploy` / `mvm infra delete` は IAM ロールやスタックを作成・削除するので、管理者の権限で実行します。
 
 ## 4. 認証情報の登録
 
@@ -171,6 +189,35 @@ Windows の注意:
 
 - Python は python.org 版か `winget` 版を使ってください。Microsoft Store 版の Python は実行ファイルのパスが特殊なため、ssh の ProxyCommand から起動できないことがあります。
 - VS Code Remote-SSH の設定 `remote.SSH.path` は既定 (Windows 標準の OpenSSH) のままで使えます。
+
+## PC を閉じても作業を続ける (キープアライブ)
+
+MicroVM は、エンドポイントへの受信通信が `IDLE_MAX_SECONDS` (既定 30 分) 無いと一時停止します。エージェントが作業中でも、手元から何も接続していなければ止まってしまうので、AWS 側に「作業中の VM だけを起こし続ける」仕組みを置いています。
+
+1. VM 内の `supervisor.py` が 30 秒ごとに、tmux の画面が変わったか、tmux 内のプロセス (エージェント、ビルド、テスト) が CPU を使ったかを調べ、最後に作業した時刻を 1 分ごとに S3 (`status/<name>.json`) に書く
+2. Lambda 関数 `pmva-keepalive` が `KEEPALIVE_RATE_MINUTES` (既定 5 分) ごとに動き、最後の作業から `KEEPALIVE_ACTIVE_SECONDS` (既定 900 秒) 以内の VM にだけ `/healthz` を送る
+3. 作業が終わった VM には何も送らないので、そのうち一時停止する (既定では作業終了から 15〜45 分ほど)
+
+設定は `config.env` で変えられます (変更後に `mvm infra deploy`)。`KEEPALIVE_RATE_MINUTES` は `IDLE_MAX_SECONDS` より十分短くしてください。`KEEPALIVE_RATE_MINUTES=0` で無効になります。費用は Lambda がほぼ無料枠内、S3 への書き込みが 10 台 × 8 時間 × 22 日で月 $0.5 程度です。
+
+## 完了・入力待ちの通知
+
+エージェントの応答が終わったときや、許可・入力を待っているときに、Slack などの Webhook に通知できます。
+
+1. Slack なら「Incoming Webhooks」で URL を発行する (Discord の Webhook URL、Teams のワークフローの URL でも可)
+2. `mvm secret set notify-webhook` で URL を登録する
+3. `config.env` で `NOTIFY_WEBHOOK=true` にするか、`mvm up <name> --notify` で起動する
+
+| エージェント | 通知されるとき | 仕組み |
+|---|---|---|
+| Claude Code | 応答の完了 (`Stop`)、許可・入力待ち (`Notification`) | `~/.claude/settings.json` の hooks から `/opt/pmva/notify.sh` を呼ぶ |
+| Codex | 応答の完了 (`agent-turn-complete`) | `~/.codex/config.toml` の `notify` から呼ぶ |
+
+通知は `[<セッション名>] Claude Code の応答が終わりました` のような 1 行です。通知に失敗してもエージェントは止まりません。
+
+## 予算アラート
+
+`config.env` に `BUDGET_MONTHLY_USD=600` と `BUDGET_EMAIL=you@example.com` のように設定して `mvm infra deploy` すると、AWS Budgets のアラートを作ります。実績が予算の 80% を超えたときと、月末の予測が 100% を超えたときにメールが届きます。対象はアカウント全体の費用です (このリポジトリ以外の利用も含みます)。
 
 ## 8. 日々の運用
 
