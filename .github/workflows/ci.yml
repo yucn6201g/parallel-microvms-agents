@@ -1,9 +1,16 @@
 name: CI
 
 on:
+  # プルリクエストのブランチは pull_request で走るので、push では main だけを対象にする (同じコミットで 2 回走らせない)
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
+
+# 同じブランチに続けて push したら、古い実行は止める
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -13,6 +20,8 @@ jobs:
     # 手元 PC で使う mvm を Windows / macOS / Linux それぞれで確かめる (AWS は使わない)
     name: test (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
+    # テストが止まっても既定の 6 時間待たないように (普段は 2 分ほどで終わる)
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -35,6 +44,7 @@ jobs:
 
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6

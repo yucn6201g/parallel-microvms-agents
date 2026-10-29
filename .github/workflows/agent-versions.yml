@@ -1,0 +1,60 @@
+# Claude Code / Codex の新しい版が npm に出ていないかを毎週確認し、出ていれば Issue で知らせる。
+# イメージの版は image/Dockerfile で固定しているので、更新は Issue を見て手動で行う
+# (mvm image update-versions → mvm image build → 動作確認 → commit。docs/setup.md)
+name: Agent versions
+
+on:
+  schedule:
+    - cron: "17 0 * * 1"  # 毎週月曜 09:17 (日本時間)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Compare pinned versions with npm
+        id: versions
+        env:
+          PMVA_CONFIG: config.example.env  # AWS は使わないので設定はテンプレートで足りる
+          PMVA_STATE_DIR: ${{ runner.temp }}/pmva-state
+        run: |
+          python bin/mvm.py image versions | tee versions.txt
+          if grep -q "更新あり" versions.txt; then
+            echo "outdated=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Open or update the issue
+        if: steps.versions.outputs.outdated == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="Claude Code / Codex の新しい版があります"
+          {
+            echo "image/Dockerfile で固定している版と、npm の最新版です ($(date -u +%Y-%m-%d) 時点)。"
+            echo
+            echo '```'
+            cat versions.txt
+            echo '```'
+            echo
+            echo "更新手順 (docs/setup.md「5. イメージのビルド」):"
+            echo
+            echo '```bash'
+            echo 'mvm image update-versions   # Dockerfile を書き換える'
+            echo 'mvm image build             # 新しいイメージを作る'
+            echo 'mvm up test-01 ...          # 動作を確認してから Dockerfile の変更を commit する'
+            echo '```'
+          } > body.md
+          number="$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number // empty')"
+          if [ -n "$number" ]; then
+            gh issue edit "$number" --body-file body.md
+            echo "Issue #$number を更新しました"
+          else
+            gh issue create --title "$title" --body-file body.md
+          fi

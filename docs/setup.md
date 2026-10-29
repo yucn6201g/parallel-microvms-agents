@@ -115,7 +115,7 @@ aws service-quotas get-service-quota --service-code lambda --quota-code L-CD1C0C
 
 ## 3. AWS リソースの作成
 
-管理者権限のある認証情報で実行します。
+管理者権限のある認証情報で、**自分の PC から**実行します (できれば IAM Identity Center (SSO) の一時的な認証情報で)。管理者のアクセスキーを作って他の環境に渡すことはしないでください ([下記](#操作用の-iam-ユーザー))。
 
 ```bash
 mvm infra deploy
@@ -124,18 +124,43 @@ mvm infra deploy
 作成されるもの:
 
 - S3 バケット `pmva-<account>-<region>`: イメージ資材 (`images/`)、ワークスペース (`workspaces/`、`workspace-history/`)
-- IAM ロール `pmva-microvm-build` (イメージビルド用)、`pmva-microvm-execution` (MicroVM 実行時)
+- IAM ロール `pmva-microvm-build` (イメージビルド用)、`pmva-microvm-execution*` (MicroVM 実行時。使うエージェントの組み合わせごとに 4 つ。[architecture.md](architecture.md#セキュリティ))
 - CloudWatch Logs `/aws/lambda-microvms/pmva`
 - 管理ポリシー `pmva-operator`: 普段 mvm を使う IAM ユーザー / SSO の権限セットにアタッチする
 - (既定) `pmva-bedrock-invoke`: Bedrock を使わない場合は `config.env` で `ENABLE_BEDROCK=false` にしてから実行
 - (既定) キープアライブ: Lambda 関数 `pmva-keepalive` と、それを 5 分ごとに呼ぶ EventBridge ルール ([下記](#pc-を閉じても作業を続ける-キープアライブ))
 - (任意) 予算アラート `pmva-monthly`: `config.env` の `BUDGET_MONTHLY_USD` と `BUDGET_EMAIL` を両方設定したときだけ作る
+- (任意) 毎晩の自動停止: Lambda 関数 `pmva-nightly-stop` と EventBridge Scheduler のスケジュール (`NIGHTLY_STOP_TIME` を設定したとき)
 
-### 操作用ポリシーの確認
+### 操作用の IAM ユーザー
 
-普段は管理者ではなく、`pmva-operator` ポリシーだけを付けたユーザー (またはロール) で `mvm` を使うことを想定しています。PoC は管理者ユーザーで行ったため、このポリシーで足りるかはまだ実機で確認できていません (確認しようとした環境では、AWS へのリクエストが管理者の認証情報で署名し直されるため)。最初に次の手順で確認してください。
+普段の `mvm` の操作 (起動・接続・停止・イメージのビルド) は、管理者ではなく **`pmva-operator` ポリシーだけを付けた専用の IAM ユーザー**で行います。`mvm doctor` は、ルートユーザーや管理者権限 (`AdministratorAccess`) の認証情報、作成から 90 日を超えたアクセスキーを使っていると警告します。
 
-1. IAM ユーザー (または SSO の権限セット) に `pmva-operator` だけを付け、そのプロファイルを `config.env` の `AWS_PROFILE` に設定する
+> **PoC で起きたこと**: PoC では管理者ユーザーの長期アクセスキーをクラウドの開発環境 (Claude Code on the web) に渡して作業しました。普段と違う場所から管理者のキーで IAM ロールや Lambda 関数を次々に作ったためか、AWS の不正利用検知で「第三者に不適切にアクセスされた可能性がある」と判断され、アカウントの一部サービスが制限されました (Lambda 関数の API の拒否、MicroVM メモリのクォータ 0)。解除には、ルートユーザーのパスワード変更と MFA の設定、CloudTrail の確認、AWS サポートへの連絡が必要です ([poc-checklist.md](poc-checklist.md) の G)。
+
+作り方 (管理者の認証情報で、自分の PC から実行):
+
+```bash
+mvm infra outputs                                   # OperatorPolicyArn を確認
+aws iam create-user --user-name pmva-operator
+aws iam attach-user-policy --user-name pmva-operator --policy-arn <OperatorPolicyArn>
+aws iam create-access-key --user-name pmva-operator # 出力されたキーを次のコマンドで入力する
+aws configure --profile pmva                        # キーは手元の ~/.aws/credentials にだけ保存する
+```
+
+`config.env` に `AWS_PROFILE=pmva` を書き、`mvm doctor` で「管理者権限ではありません」と出ることを確認します。
+
+守ること:
+
+- 管理者のアクセスキー・ルートユーザーのアクセスキーは作らない。他の環境 (クラウドの開発環境、CI、他人の PC) に渡すのは `pmva-operator` のキーだけにする
+- ルートユーザーには MFA を設定し、普段は使わない
+- アクセスキーは 90 日を目安に作り直し、古いキーは削除する (`mvm doctor` が警告する)
+- キーをチャットやリポジトリに貼らない (`config.env` と `.state/` は `.gitignore` 済み)
+- 予算アラート ([下記](#予算アラート)) を設定し、身に覚えのない費用に早く気付けるようにする
+
+**このポリシーで足りるかの確認**: PoC は管理者ユーザーで行ったため、`pmva-operator` だけで足りるかはまだ実機で確認できていません (確認しようとした環境では、AWS へのリクエストが管理者の認証情報で署名し直されるため)。最初に次の手順で確認してください。
+
+1. 上の手順で作ったプロファイルを `config.env` の `AWS_PROFILE` に設定する
 2. `mvm doctor` → `mvm image status` → `mvm up op-test --agent none` → `mvm peek op-test` → `mvm ssh op-test -- id` → `mvm stop op-test` を順に実行する
 3. `AccessDenied` が出たら、エラーに出た操作 (例: `lambda:PassNetworkConnector`) を `infra/cloudformation.yaml` の `OperatorPolicy` に追加して `mvm infra deploy` する
 
@@ -170,6 +195,8 @@ mvm image update-versions      # Dockerfile を最新版に書き換える (--cl
 mvm image build                # 新しいイメージを作る。動作を確認したら Dockerfile の変更を commit する
 mvm renew <name>               # 起動中の VM は renew で新しいイメージに移れる
 ```
+
+GitHub で管理している場合は、`.github/workflows/agent-versions.yml` が毎週 (月曜 9:17) 新しい版を確認し、出ていれば Issue「Claude Code / Codex の新しい版があります」を立てます (Actions タブの「Agent versions」から手動でも実行できます)。
 古いバージョンも保存料金がかかるので、不要になったら削除します (`aws lambda-microvms delete-microvm-image-version`)。
 
 ## 6. 1 台で動作確認
@@ -300,6 +327,9 @@ VM の中で使えるコマンド:
 | bootstrap が `failed` | シークレット名・登録の有無、実行ロールの権限を確認 |
 | エージェントが止まっている | アイドルサスペンドされていた可能性。通信すると再開する。キープアライブが無効になっていないか (`KEEPALIVE_RATE_MINUTES`) も確認 |
 | SSH が `Broken pipe` で切れる | 途中の通信経路 (社内プロキシなど) が長時間の接続を切ることがある。PoC での切断は、すべてクラウドセッションの送信用中継が再起動したとき (WebSocket の close コード 1012 `server_draining`) で、AWS 側の切断ではなかった。`mvm ssh <name>` (コマンドなし) は自動で再接続する。原因を調べるときは `PMVA_DEBUG=<ファイル>` を設定すると切断理由を記録する |
-| `up` で「メモリ上限を超えます (上限 0GB)」 | `mvm doctor` でクォータを確認。0 の場合は AWS 側でアカウントの利用が制限されている可能性がある (PoC 中に 8GB → 0GB に変わり、同時に Lambda 関数の API も拒否されるようになった)。AWS サポートに問い合わせる |
-| `infra delete` が `KeepalivePermission` などで DELETE_FAILED | Lambda 関数の API が拒否されている。`aws cloudformation delete-stack --stack-name pmva --retain-resources KeepalivePermission KeepaliveFunction` で残りを削除し、使えるようになってから `aws lambda delete-function --function-name pmva-keepalive` で関数を消す (残したままだと次の `infra deploy` が名前の重複で失敗する) |
+| `up` で「メモリ上限を超えます (上限 0GB)」 | `mvm doctor` でクォータを確認。0 の場合は AWS の不正利用検知でアカウントが制限されている可能性がある (PoC 中に 8GB → 0GB に変わり、同時に Lambda 関数の API も拒否されるようになった)。AWS からのメールとサポートケースを確認する |
+| `infra delete` で「削除できなかったため、スタックから外して残しました」と出る | Lambda 関数の API が拒否されているなどで消せなかったリソースだけを残し、残りは削除している。表示された `aws lambda delete-function ...` を、API が使えるようになってから実行する (残したままだと次の `infra deploy` が「前回の削除で残った Lambda 関数があります」で止まる) |
+| `mvm ls` の状態が `UNKNOWN` | AWS から状態を取得できなかった (権限・通信・アカウントの制限)。終了扱いにはしていないので、原因を解消すれば元に戻る。`PMVA_DEBUG=<ファイル>` でエラーを記録できる |
+| `mvm renew` が「保存に失敗したので、終了せずに止めました」 | 作業内容を失わないよう VM を残している。`mvm ssh` で入って原因 (ディスク不足など) を確認するか、保存せずに作り直すなら `mvm stop <name> --no-save` → `mvm up <name> --restore latest` |
+| AWS から「アカウントが第三者に不適切にアクセスされた可能性」のメール | メールの手順 (ルートのパスワード変更、MFA、CloudTrail の確認、不要なリソースの確認) を行い、使っていたアクセスキーを無効化・削除してから、サポートケースに返信する。以後は[操作用の IAM ユーザー](#操作用の-iam-ユーザー)を使う |
 | `infra deploy` で `pmva-keepalive` / `pmva-nightly-stop` の作成が AccessDenied | 操作者の権限 (`lambda:CreateFunction` など) と、AWS Organizations の SCP を確認。`aws lambda list-functions` も拒否される場合はアカウント側の制限 |
