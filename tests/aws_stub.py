@@ -44,6 +44,9 @@ if cmd == "cloudformation describe-stacks":
         "ArtifactBucketName": "pmva-bucket",
         "BuildRoleArn": "arn:aws:iam::123456789012:role/build",
         "ExecutionRoleArn": "arn:aws:iam::123456789012:role/exec",
+        "ExecutionRoleClaudeArn": "arn:aws:iam::123456789012:role/exec-claude",
+        "ExecutionRoleCodexArn": "arn:aws:iam::123456789012:role/exec-codex",
+        "ExecutionRoleNoneArn": "arn:aws:iam::123456789012:role/exec-none",
         "LogGroupName": "/aws/lambda-microvms/pmva",
     }.items()]}]})
 if cmd == "service-quotas get-service-quota":
@@ -88,6 +91,8 @@ if cmd in ("secretsmanager create-secret", "secretsmanager put-secret-value"):
     value = Path(uri[len("file://"):]).read_text(encoding="utf-8")
     (D / ("secret-" + name.replace("/", "_"))).write_text(value, encoding="utf-8")
     out({"Name": name})
-if cmd in ("s3 rm", "cloudformation delete-stack", "cloudformation wait"):
+if cmd in ("s3 rm", "cloudformation delete-stack", "cloudformation wait", "cloudformation deploy"):
     sys.exit(0)
+if cmd == "logs describe-log-groups":
+    out({"logGroups": []})
 fail("unhandled: " + cmd, 1)

@@ -10,16 +10,23 @@ import textwrap
 import time
 import types
 import unittest
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def lambda_source():
-    text = (ROOT / "infra" / "cloudformation.yaml").read_text(encoding="utf-8")
-    block = text.split("ZipFile: |\n", 1)[1].split("\n\n  KeepaliveLogGroup", 1)[0]
-    return textwrap.dedent(block)
+def lambda_source(name="keepalive"):
+    """テンプレートから FunctionName が <prefix>-<name> の Lambda のインラインコードを取り出す。"""
+    lines = (ROOT / "infra" / "cloudformation.yaml").read_text(encoding="utf-8").splitlines()
+    i = next(n for n, l in enumerate(lines) if l.strip() == f'FunctionName: !Sub "${{Prefix}}-{name}"')
+    i = next(n for n in range(i, len(lines)) if lines[n].strip() == "ZipFile: |") + 1
+    body = []
+    while i < len(lines) and (not lines[i].strip() or lines[i].startswith(" " * 10)):
+        body.append(lines[i])
+        i += 1
+    return textwrap.dedent("\n".join(body).rstrip()) + "\n"
 
 
 class FakeS3:
@@ -39,7 +46,7 @@ class FakeS3:
 
 
 class KeepaliveTest(unittest.TestCase):
-    def load(self, objects, vms):
+    def load(self, objects, vms, name="keepalive", urlopen=None):
         """Lambda のコードを差し替えたモジュールで読み込む。vms: microvmId -> state"""
         self.requests = []
         fake_s3 = FakeS3(objects)
@@ -89,11 +96,12 @@ class KeepaliveTest(unittest.TestCase):
             return io.BytesIO(json.dumps(body).encode())
 
         self.saved_urlopen = urllib.request.urlopen
-        urllib.request.urlopen = fake_urlopen
+        urllib.request.urlopen = urlopen or fake_urlopen
         import os
-        os.environ.update({"AWS_REGION": "ap-northeast-1", "BUCKET": "b", "ACTIVE_SECONDS": "900"})
-        mod = types.ModuleType("keepalive")
-        exec(compile(lambda_source(), "keepalive", "exec"), mod.__dict__)
+        os.environ.update({"AWS_REGION": "ap-northeast-1", "BUCKET": "b", "ACTIVE_SECONDS": "900",
+                           "IMAGE_ARN": "arn:aws:lambda:ap-northeast-1:123:microvm-image:pmva-agent"})
+        mod = types.ModuleType(name)
+        exec(compile(lambda_source(name), name, "exec"), mod.__dict__)
         return mod
 
     def tearDown(self):
@@ -129,7 +137,47 @@ class KeepaliveTest(unittest.TestCase):
         self.assertNotIn("https://m-susp.lambda-microvm.example.on.aws/healthz", urls)
 
     def test_inline_code_fits_cloudformation_limit(self):
-        self.assertLess(len(lambda_source()), 4096)
+        for name in ("keepalive", "nightly-stop"):
+            self.assertLess(len(lambda_source(name)), 4096, name)
+
+    def test_nightly_stop_saves_then_terminates_active_vms(self):
+        calls = []
+        pages = {
+            None: {"items": [{"microvmId": "m-run", "state": "RUNNING"}, {"microvmId": "m-term", "state": "TERMINATED"}],
+                   "nextToken": "p2"},
+            "p2": {"items": [{"microvmId": "m-susp", "state": "SUSPENDED"}, {"microvmId": "m-bad", "state": "RUNNING"}]},
+        }
+
+        def urlopen(req, timeout=None):
+            url, method = req.full_url, req.get_method()
+            calls.append((method, url))
+            parsed = urllib.parse.urlparse(url)
+            if parsed.path == "/2025-09-09/microvms" and method == "GET":
+                q = urllib.parse.parse_qs(parsed.query)
+                self.assertEqual(q["imageIdentifier"], ["arn:aws:lambda:ap-northeast-1:123:microvm-image:pmva-agent"])
+                body = pages[q.get("nextToken", [None])[0]]
+            elif url.endswith("/auth-token"):
+                body = {"authToken": {"X-aws-proxy-auth": "TOK"}}
+            elif method == "GET":
+                vid = url.rsplit("/", 1)[1]
+                body = {"endpoint": f"https://{vid}.lambda-microvm.example.on.aws"}
+            elif url.endswith("/snapshot"):
+                if "m-bad" in url:
+                    raise OSError("snapshot failed")
+                body = {"ok": True}
+            else:
+                body = {}
+            return io.BytesIO(json.dumps(body).encode())
+
+        mod = self.load({}, {}, name="nightly-stop", urlopen=urlopen)
+        result = mod.handler({}, None)
+        self.assertEqual(result, {"stopped": ["m-run", "m-susp", "m-bad"]})
+        # 保存してから終了する。保存に失敗しても終了はする。終了済みの VM には触らない
+        run = [c for c in calls if "m-run" in c[1]]
+        self.assertEqual(run[-2], ("POST", "https://m-run.lambda-microvm.example.on.aws/snapshot"))
+        self.assertEqual(run[-1], ("DELETE", "https://lambda.ap-northeast-1.amazonaws.com/2025-09-09/microvms/m-run"))
+        self.assertIn(("DELETE", "https://lambda.ap-northeast-1.amazonaws.com/2025-09-09/microvms/m-bad"), calls)
+        self.assertFalse([c for c in calls if "m-term" in c[1]])
 
 
 if __name__ == "__main__":

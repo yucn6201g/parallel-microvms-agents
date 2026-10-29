@@ -434,6 +434,37 @@ class CliTest(unittest.TestCase):
         args = json.loads(sorted(self.stub_dir.glob("microvm-*.args"))[1].read_text(encoding="utf-8"))
         self.assertNotIn("--idle-policy", args)
 
+    def test_execution_role_matches_agents(self):
+        self.env["PMVA_STUB_QUOTA_GB"] = "100"
+        self.mvm("up", "r-claude")
+        self.mvm("up", "r-codex", "--agent", "codex")
+        self.mvm("up", "r-both", "--agent", "both")
+        self.mvm("up", "r-none", "--agent", "none", "--no-github")
+        roles = []
+        for f in sorted(self.stub_dir.glob("microvm-*.args")):
+            args = json.loads(f.read_text(encoding="utf-8"))
+            roles.append(args[args.index("--execution-role-arn") + 1].rsplit("/", 1)[1])
+        self.assertEqual(roles, ["exec-claude", "exec-codex", "exec", "exec-none"])
+
+    def test_secret_names_must_match_role_prefixes(self):
+        rc, _, err = self.mvm("up", "x1", "--claude-secret", "pmva/openai-api-key", check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("pmva/anthropic-", err)
+        self.mvm("up", "x2", "--claude-secret", "pmva/claude-oauth-token-team")
+        rc, _, _ = self.mvm("secret", "set", "openai-api-key", "--name", "pmva/claude-x", input=b"k", check=False)
+        self.assertNotEqual(rc, 0)
+        self.mvm("secret", "set", "openai-api-key", "--name", "pmva/openai-team", input=b"k")
+
+    def test_infra_parameters_include_nightly_stop(self):
+        cfg = Path(self.env["PMVA_CONFIG"])
+        cfg.write_text(cfg.read_text(encoding="utf-8") + "NIGHTLY_STOP_TIME=23:30\n", encoding="utf-8")
+        self.mvm("infra", "deploy", check=False)
+        calls = [json.loads(l) for l in (self.stub_dir / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
+        deploy = next(c for c in calls if c[:2] == ["cloudformation", "deploy"])
+        self.assertIn("NightlyStopCron=cron(30 23 * * ? *)", deploy)
+        self.assertIn("NightlyStopTimezone=Asia/Tokyo", deploy)
+        self.assertIn("ImageName=pmva-agent", deploy)
+
     def test_notify_option(self):
         self.mvm("up", "n1", "--notify")
         self.mvm("up", "n2")

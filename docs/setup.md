@@ -239,6 +239,20 @@ VM の中で使えるコマンド:
 - `~/.pmva/state`: 初期化状態 (`ready` / `failed: ...`)
 - `/opt/pmva/snapshot.sh`: 手動保存
 
+## GitHub リポジトリの設定 (任意)
+
+このリポジトリを自分の GitHub で管理する場合は、次の設定をおすすめします。
+
+1. **既定ブランチを `main` にする**: Settings → General → Default branch で `main` を選ぶ
+2. **`main` を保護する**: Settings → Branches → Add branch ruleset (または Add rule) で `main` を対象にし、「Require status checks to pass」に次の CI ジョブを追加する
+   - `lint`
+   - `test (ubuntu-latest, Python 3.13)`
+   - `test (windows-latest, Python 3.9)`、`test (windows-latest, Python 3.13)`
+   - `test (macos-latest, Python 3.9)`、`test (macos-latest, Python 3.13)`
+3. ひとりで使う場合は「Require a pull request before merging」のレビュー必須は付けない (自分のプルリクエストをマージできなくなる)
+
+非公開リポジトリのブランチ保護は GitHub の有料プランが必要な場合があります。
+
 ## トラブルシューティング
 
 | 症状 | 確認すること |

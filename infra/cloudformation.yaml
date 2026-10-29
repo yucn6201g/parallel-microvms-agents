@@ -44,8 +44,22 @@ Parameters:
     MinValue: 60
     Description: 最後の作業 (画面の変化や CPU 使用) からこの秒数以内なら作業中とみなして起こし続ける
 
+  NightlyStopCron:
+    Type: String
+    Default: ""
+    Description: 'すべての MicroVM を保存して終了する時刻 (EventBridge Scheduler の cron 式。例: "cron(0 23 * * ? *)")。空なら作らない'
+  NightlyStopTimezone:
+    Type: String
+    Default: Asia/Tokyo
+    Description: NightlyStopCron のタイムゾーン
+  ImageName:
+    Type: String
+    Default: pmva-agent
+    Description: 夜間の自動停止の対象にする MicroVM イメージ名
+
 Conditions:
   BedrockEnabled: !Equals [!Ref EnableBedrock, "true"]
+  NightlyStopEnabled: !Not [!Equals [!Ref NightlyStopCron, ""]]
   BudgetEnabled: !And
     - !Not [!Equals [!Ref BudgetMonthlyUsd, 0]]
     - !Not [!Equals [!Ref BudgetEmail, ""]]
@@ -140,8 +154,51 @@ Resources:
                   - logs:PutLogEvents
                 Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda-microvms/*"
 
-  # 実行中の MicroVM が IMDSv2 経由で引き受けるロール
-  # (シークレット取得、ワークスペーススナップショット、ログ、任意で Bedrock)
+  # 実行中の MicroVM が IMDSv2 経由で引き受けるロール。
+  # VM 内のエージェントが自分の使わない認証情報を読めないよう、使うエージェントごとにロールを分ける
+  # (mvm up が --agent / 認証方式に合わせて選ぶ)。シークレットは名前の接頭辞で区別する:
+  #   Claude: <prefix>/anthropic-*, <prefix>/claude-*   Codex: <prefix>/openai-*, <prefix>/codex-*
+  #   共通:   <prefix>/github-*, <prefix>/notify-*
+  RuntimePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${Prefix}-microvm-runtime"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: Logs
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda-microvms/*"
+          - Sid: CommonSecrets
+            Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource:
+              - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}/github-*"
+              - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}/notify-*"
+          - Sid: WorkspaceSnapshots
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+            Resource:
+              - !Sub "${ArtifactBucket.Arn}/workspaces/*"
+              - !Sub "${ArtifactBucket.Arn}/workspace-history/*"
+              - !Sub "${ArtifactBucket.Arn}/status/*"
+          - Sid: ListWorkspaceSnapshots
+            Effect: Allow
+            Action: s3:ListBucket
+            Resource: !GetAtt ArtifactBucket.Arn
+            Condition:
+              StringLike:
+                s3:prefix:
+                  - "workspaces/*"
+                  - "workspace-history/*"
+
+  # Claude Code と Codex の両方
   ExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -157,43 +214,95 @@ Resources:
               StringEquals:
                 aws:SourceAccount: !Ref AWS::AccountId
       Policies:
-        - PolicyName: runtime
+        - PolicyName: agent-secrets
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              - Sid: Logs
-                Effect: Allow
-                Action:
-                  - logs:CreateLogGroup
-                  - logs:CreateLogStream
-                  - logs:PutLogEvents
-                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda-microvms/*"
-              - Sid: ReadAgentSecrets
-                Effect: Allow
+              - Effect: Allow
                 Action: secretsmanager:GetSecretValue
-                Resource: !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}/*"
-              - Sid: WorkspaceSnapshots
-                Effect: Allow
-                Action:
-                  - s3:GetObject
-                  - s3:PutObject
                 Resource:
-                  - !Sub "${ArtifactBucket.Arn}/workspaces/*"
-                  - !Sub "${ArtifactBucket.Arn}/workspace-history/*"
-                  - !Sub "${ArtifactBucket.Arn}/status/*"
-              - Sid: ListWorkspaceSnapshots
-                Effect: Allow
-                Action: s3:ListBucket
-                Resource: !GetAtt ArtifactBucket.Arn
-                Condition:
-                  StringLike:
-                    s3:prefix:
-                      - "workspaces/*"
-                      - "workspace-history/*"
+                  - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}/anthropic-*"
+                  - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}/claude-*"
+                  - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}/openai-*"
+                  - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}/codex-*"
       ManagedPolicyArns: !If
         - BedrockEnabled
-        - [!Ref BedrockInvokePolicy]
-        - !Ref AWS::NoValue
+        - [!Ref RuntimePolicy, !Ref BedrockInvokePolicy]
+        - [!Ref RuntimePolicy]
+
+  ExecutionRoleClaude:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Prefix}-microvm-execution-claude"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: claude-secrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}/anthropic-*"
+                  - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}/claude-*"
+      ManagedPolicyArns: !If
+        - BedrockEnabled
+        - [!Ref RuntimePolicy, !Ref BedrockInvokePolicy]
+        - [!Ref RuntimePolicy]
+
+  ExecutionRoleCodex:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Prefix}-microvm-execution-codex"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: codex-secrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}/openai-*"
+                  - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}/codex-*"
+      ManagedPolicyArns:
+        - !Ref RuntimePolicy
+
+  # エージェントなし (--agent none)
+  ExecutionRoleNone:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Prefix}-microvm-execution-none"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      ManagedPolicyArns:
+        - !Ref RuntimePolicy
 
   BedrockInvokePolicy:
     Type: AWS::IAM::ManagedPolicy
@@ -241,6 +350,9 @@ Resources:
             Resource:
               - !GetAtt BuildRole.Arn
               - !GetAtt ExecutionRole.Arn
+              - !GetAtt ExecutionRoleClaude.Arn
+              - !GetAtt ExecutionRoleCodex.Arn
+              - !GetAtt ExecutionRoleNone.Arn
             Condition:
               StringEquals:
                 iam:PassedToService: lambda.amazonaws.com
@@ -415,6 +527,148 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt KeepaliveSchedule.Arn
 
+  # ---- 夜間の自動停止 (止め忘れ防止)。このイメージから起動した MicroVM をすべて保存してから終了する
+  NightlyStopRole:
+    Type: AWS::IAM::Role
+    Condition: NightlyStopEnabled
+    Properties:
+      RoleName: !Sub "${Prefix}-nightly-stop"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: nightly-stop
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:ListMicrovms
+                  - lambda:GetMicrovm
+                  - lambda:CreateMicrovmAuthToken
+                  - lambda:TerminateMicrovm
+                Resource: "*"
+
+  NightlyStopLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: NightlyStopEnabled
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${Prefix}-nightly-stop"
+      RetentionInDays: !Ref LogRetentionDays
+
+  NightlyStopFunction:
+    Type: AWS::Lambda::Function
+    Condition: NightlyStopEnabled
+    DependsOn: NightlyStopLogGroup
+    Properties:
+      FunctionName: !Sub "${Prefix}-nightly-stop"
+      Runtime: python3.13
+      Architectures: [arm64]
+      Handler: index.handler
+      Timeout: 900
+      MemorySize: 128
+      Role: !GetAtt NightlyStopRole.Arn
+      Environment:
+        Variables:
+          IMAGE_ARN: !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:microvm-image:${ImageName}"
+      Code:
+        ZipFile: |
+          import json, os, urllib.parse, urllib.request
+          import botocore.session
+          from botocore.auth import SigV4Auth
+          from botocore.awsrequest import AWSRequest
+          R = os.environ["AWS_REGION"]
+          IMG = os.environ["IMAGE_ARN"]
+
+          def api(method, path="", body=None, query=None):
+              url = f"https://lambda.{R}.amazonaws.com/2025-09-09/microvms" + (f"/{path}" if path else "")
+              if query:
+                  url += "?" + urllib.parse.urlencode(query)
+              data = json.dumps(body) if body is not None else None
+              req = AWSRequest(method=method, url=url, data=data,
+                               headers={"Content-Type": "application/json"} if data else {})
+              cred = botocore.session.Session().get_credentials().get_frozen_credentials()
+              SigV4Auth(cred, "lambda", R).add_auth(req)
+              r = urllib.request.Request(url, data=data.encode() if data else None,
+                                         method=method, headers=dict(req.headers))
+              with urllib.request.urlopen(r, timeout=30) as f:
+                  return json.loads(f.read() or b"{}")
+
+          def handler(event, context):
+              vms, token = [], None
+              while True:
+                  q = {"imageIdentifier": IMG, "maxResults": 50}
+                  if token:
+                      q["nextToken"] = token
+                  page = api("GET", query=q)
+                  vms += [v for v in page.get("items", []) if v["state"] in ("PENDING", "RUNNING", "SUSPENDED")]
+                  token = page.get("nextToken")
+                  if not token:
+                      break
+              stopped = []
+              for v in vms:
+                  vid = v["microvmId"]
+                  try:
+                      # 終了前にワークスペースを S3 に保存する (一時停止中なら自動で再開される)
+                      host = api("GET", vid)["endpoint"].split("://")[-1].rstrip("/")
+                      tok = api("POST", vid + "/auth-token",
+                                {"expirationInMinutes": 15, "allowedPorts": [{"port": 8080}]})
+                      req = urllib.request.Request(f"https://{host}/snapshot", data=b"{}", method="POST", headers={
+                          "X-aws-proxy-auth": tok["authToken"]["X-aws-proxy-auth"],
+                          "X-aws-proxy-port": "8080", "Content-Type": "application/json"})
+                      urllib.request.urlopen(req, timeout=300).read()
+                  except Exception as e:
+                      print(f"save failed {vid}: {e!r} (terminate hook will try again)")
+                  try:
+                      api("DELETE", vid)
+                      stopped.append(vid)
+                  except Exception as e:
+                      print(f"terminate failed {vid}: {e!r}")
+              print(json.dumps({"stopped": stopped}))
+              return {"stopped": stopped}
+
+  NightlyStopSchedulerRole:
+    Type: AWS::IAM::Role
+    Condition: NightlyStopEnabled
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: invoke
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt NightlyStopFunction.Arn
+
+  NightlyStopSchedule:
+    Type: AWS::Scheduler::Schedule
+    Condition: NightlyStopEnabled
+    Properties:
+      Name: !Sub "${Prefix}-nightly-stop"
+      ScheduleExpression: !Ref NightlyStopCron
+      ScheduleExpressionTimezone: !Ref NightlyStopTimezone
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      Target:
+        Arn: !GetAtt NightlyStopFunction.Arn
+        RoleArn: !GetAtt NightlyStopSchedulerRole.Arn
+
   # ---- 月額の予算アラート (任意)
   MonthlyBudget:
     Type: AWS::Budgets::Budget
@@ -452,6 +706,12 @@ Outputs:
     Value: !GetAtt BuildRole.Arn
   ExecutionRoleArn:
     Value: !GetAtt ExecutionRole.Arn
+  ExecutionRoleClaudeArn:
+    Value: !GetAtt ExecutionRoleClaude.Arn
+  ExecutionRoleCodexArn:
+    Value: !GetAtt ExecutionRoleCodex.Arn
+  ExecutionRoleNoneArn:
+    Value: !GetAtt ExecutionRoleNone.Arn
   LogGroupName:
     Value: !Ref MicrovmLogGroup
   OperatorPolicyArn:

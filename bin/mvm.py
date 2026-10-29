@@ -56,11 +56,18 @@ DEFAULTS = {
     "BEDROCK_REGION": "", "CLAUDE_MODEL": "", "USE_GITHUB_TOKEN": "true", "ENABLE_BEDROCK": "true",
     "GIT_USER_NAME": "", "GIT_USER_EMAIL": "", "SSH_PUBLIC_KEY_FILE": "~/.ssh/id_ed25519.pub",
     "BUDGET_MONTHLY_USD": "0", "BUDGET_EMAIL": "", "KEEPALIVE_RATE_MINUTES": "5", "KEEPALIVE_ACTIVE_SECONDS": "900",
-    "NOTIFY_WEBHOOK": "false",
+    "NOTIFY_WEBHOOK": "false", "NIGHTLY_STOP_TIME": "", "NIGHTLY_STOP_TIMEZONE": "Asia/Tokyo",
 }
 AGENTS = ("claude", "codex", "both", "none")
 CLAUDE_AUTHS = ("api-key", "oauth-token", "bedrock", "gateway", "interactive", "none")
 CODEX_AUTHS = ("api-key", "chatgpt", "interactive", "none")
+# 実行ロールはエージェントごとに分かれており、読めるシークレットを名前の接頭辞で区別する
+# (infra/cloudformation.yaml)。別名で登録するときも、この接頭辞で始める必要がある
+SECRET_NAME_PREFIXES = {
+    "anthropic-api-key": ("anthropic-", "claude-"), "claude-oauth-token": ("anthropic-", "claude-"),
+    "anthropic-gateway": ("anthropic-", "claude-"), "openai-api-key": ("openai-", "codex-"),
+    "codex-auth-json": ("openai-", "codex-"), "github-token": ("github-",), "notify-webhook": ("notify-",),
+}
 SECRET_KINDS = ("anthropic-api-key", "claude-oauth-token", "anthropic-gateway",
                 "openai-api-key", "codex-auth-json", "github-token", "notify-webhook")
 
@@ -676,7 +683,21 @@ def infra_parameters():
     ]
     if C["BUDGET_EMAIL"]:
         params.append(f"BudgetEmail={C['BUDGET_EMAIL']}")
+    params.append(f"ImageName={C['IMAGE_NAME']}")
+    params.append(f"NightlyStopCron={nightly_stop_cron(C['NIGHTLY_STOP_TIME'])}")
+    params.append(f"NightlyStopTimezone={C['NIGHTLY_STOP_TIMEZONE']}")
     return params
+
+
+def nightly_stop_cron(hhmm):
+    """'23:00' を EventBridge Scheduler の cron 式にする。空なら夜間の自動停止は作らない。"""
+    if not hhmm:
+        return ""
+    import re
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", hhmm.strip())
+    if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
+        die(f"NIGHTLY_STOP_TIME は HH:MM 形式で指定してください: {hhmm}")
+    return f"cron({int(m.group(2))} {int(m.group(1))} * * ? *)"
 
 
 def prepare_new_stack():
@@ -694,7 +715,8 @@ def prepare_new_stack():
         status = None
     if status:
         return
-    for group in (f"/aws/lambda-microvms/{C['PMVA_PREFIX']}", f"/aws/lambda/{C['PMVA_PREFIX']}-keepalive"):
+    for group in (f"/aws/lambda-microvms/{C['PMVA_PREFIX']}", f"/aws/lambda/{C['PMVA_PREFIX']}-keepalive",
+                  f"/aws/lambda/{C['PMVA_PREFIX']}-nightly-stop"):
         groups = aws("logs", "describe-log-groups", "--log-group-name-prefix", group, check=False) or {}
         if any(g.get("logGroupName") == group for g in groups.get("logGroups", [])):
             log(f"スタック管理外で残っているロググループ {group} を削除します (前回の削除後に作られたもの)")
@@ -725,8 +747,10 @@ def cmd_secret(args):
     if kind not in SECRET_KINDS:
         die(f"kind は {' | '.join(SECRET_KINDS)} のいずれかを指定してください")
     name = args.name or f"{prefix}/{kind}"
-    if not name.startswith(prefix + "/"):
-        die(f"シークレット名は {prefix}/ で始めてください (実行ロールが読めるのはその配下のみ)")
+    allowed = tuple(f"{prefix}/{x}" for x in SECRET_NAME_PREFIXES[kind])
+    if not name.startswith(allowed):
+        die(f"{kind} のシークレット名は {' / '.join(a + '...' for a in allowed)} で始めてください"
+            " (MicroVM の実行ロールが読めるのはその名前だけ)")
     if args.file:
         value = expand_path(args.file).read_text(encoding="utf-8")
     elif sys.stdin.isatty():
@@ -862,6 +886,21 @@ def valid_name(name):
         die(f"名前は英小文字・数字・ハイフン (31 文字以内) にしてください: {name}")
 
 
+def check_secret_name(option, value, kind):
+    allowed = tuple(f"{C['PMVA_PREFIX']}/{x}" for x in SECRET_NAME_PREFIXES[kind])
+    if value and not value.startswith(allowed):
+        die(f"{option} は {' / '.join(a + '...' for a in allowed)} で始まる名前にしてください"
+            " (MicroVM の実行ロールが読めるのはその名前だけ)")
+
+
+def execution_role_output(payload):
+    """使うエージェントの認証情報だけを読める実行ロール (スタック出力名) を選ぶ。"""
+    claude = payload.get("claudeAuth", "none") != "none"
+    codex = payload.get("codexAuth", "none") != "none"
+    return {(True, True): "ExecutionRoleArn", (True, False): "ExecutionRoleClaudeArn",
+            (False, True): "ExecutionRoleCodexArn", (False, False): "ExecutionRoleNoneArn"}[(claude, codex)]
+
+
 def build_payload(name, a):
     agent = a.agent or C["DEFAULT_AGENT"]
     if agent not in AGENTS:
@@ -887,6 +926,9 @@ def build_payload(name, a):
         github_secret = ""
     else:
         github_secret = a.github_secret or (f"{prefix}/github-token" if as_bool(C["USE_GITHUB_TOKEN"]) else "")
+    check_secret_name("--claude-secret", a.claude_secret, "claude-oauth-token")
+    check_secret_name("--codex-secret", a.codex_secret, "openai-api-key")
+    check_secret_name("--github-secret", a.github_secret, "github-token")
     notify = as_bool(C["NOTIFY_WEBHOOK"]) if a.notify is None else a.notify
     branch = a.branch or (f"pmva/{name}" if a.repo else "")
     bucket = stack_output("ArtifactBucketName")
@@ -934,7 +976,7 @@ def launch(name, payload, idle, max_duration):
                   for c in C["INGRESS_CONNECTORS"].split()]
     args = [
         "--image-identifier", arn, "--image-version", ver,
-        "--execution-role-arn", stack_output("ExecutionRoleArn"),
+        "--execution-role-arn", stack_output(execution_role_output(payload)),
         "--run-hook-payload", "file://" + str(payload_file),
         "--maximum-duration-in-seconds", str(max_duration),
         "--logging", json.dumps({"cloudWatch": {"logGroup": stack_output("LogGroupName")}}),
