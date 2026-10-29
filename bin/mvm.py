@@ -1182,7 +1182,22 @@ def cmd_ssh(args):
     host = f"agent@pmva-{args.name}"
     if command:
         return subprocess.call([ssh, *ssh_options(args.name), host, *command])
-    return subprocess.call([ssh, *ssh_options(args.name), "-t", host, "agent-attach"])
+    # tmux へのアタッチは、接続が切れたら (ssh の終了コード 255) 自動でつなぎ直す。
+    # 長時間の接続が AWS 側で切られることがまれにある (PoC で確認)。作業は tmux の中で続いている
+    failures = 0
+    while True:
+        started = time.time()
+        rc = subprocess.call([ssh, *ssh_options(args.name), "-t", host, "agent-attach"])
+        if rc != 255 or args.no_reconnect:
+            return rc
+        failures = 1 if time.time() - started > 60 else failures + 1
+        if failures > 5:
+            die("接続できません。mvm ls で状態を確認してください")
+        log(f"接続が切れました。{2 * failures} 秒後に再接続します (Ctrl-C で中止)")
+        try:
+            time.sleep(2 * failures)
+        except KeyboardInterrupt:
+            return rc
 
 
 def cmd_ssh_proxy(args):
@@ -1368,8 +1383,9 @@ def build_parser():
     x = sub.add_parser("watch", help="全セッションの状態を定期表示")
     x.add_argument("interval", nargs="?", type=int, default=60)
     x.set_defaults(func=cmd_watch)
-    x = sub.add_parser("ssh", help="SSH over WebSocket で接続 (既定で tmux にアタッチ)")
+    x = sub.add_parser("ssh", help="SSH over WebSocket で接続 (既定で tmux にアタッチ。切れたら自動で再接続)")
     x.add_argument("name")
+    x.add_argument("--no-reconnect", action="store_true", help="接続が切れても再接続しない")
     x.add_argument("remote_command", nargs=argparse.REMAINDER, metavar="command")
     x.set_defaults(func=cmd_ssh)
     x = sub.add_parser("_ssh-proxy")

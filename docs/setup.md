@@ -152,7 +152,7 @@ Claude Code / Codex は自動更新を無効にしているので、更新した
 mvm up test-01 --repo https://github.com/<owner>/<repo>.git
 mvm ls
 mvm peek test-01
-mvm ssh test-01            # tmux にアタッチ。Ctrl-b d で切断 (エージェントは動き続ける)
+mvm ssh test-01            # tmux にアタッチ。Ctrl-b d で切断 (エージェントは動き続ける)。接続が切れたら自動で再接続する
 mvm send test-01 "テストを実行して結果を要約して"   # "-" で始まる指示は mvm send test-01 -- "-h" のように書く
 mvm save test-01
 mvm stop test-01
@@ -248,4 +248,5 @@ VM の中で使えるコマンド:
 | `peek` が 502 | 起動直後なら数秒待つ。続く場合は `mvm shell` で入り、`~/.pmva/bootstrap.log` を確認 |
 | `peek` が 401/403 | トークン期限切れ。`.state/tokens/<name>.*` を消して再実行 |
 | bootstrap が `failed` | シークレット名・登録の有無、実行ロールの権限を確認 |
-| エージェントが止まっている | アイドルサスペンドされていた可能性。通信すると再開する。無人で走らせるなら `--idle off` |
+| エージェントが止まっている | アイドルサスペンドされていた可能性。通信すると再開する。キープアライブが無効になっていないか (`KEEPALIVE_RATE_MINUTES`) も確認 |
+| SSH が `Broken pipe` で切れる | AWS 側で長時間の接続がまれに切られる (PoC で 6 回中 2 回)。`mvm ssh <name>` (コマンドなし) は自動で再接続する。原因を調べるときは `PMVA_DEBUG=<ファイル>` を設定すると切断理由を記録する |
