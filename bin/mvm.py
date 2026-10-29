@@ -75,6 +75,14 @@ def log(msg):
     print(f"==> {msg}", file=sys.stderr, flush=True)
 
 
+def debug(msg):
+    """PMVA_DEBUG にファイル名を指定すると、接続の詳細 (切断理由など) を追記する。"""
+    path = os.environ.get("PMVA_DEBUG")
+    if path:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%H:%M:%S')} [{os.getpid()}] {msg}\n")
+
+
 # ---------------------------------------------------------------- 設定
 
 def parse_env_file(path):
@@ -440,13 +448,16 @@ class WebSocket:
                     n = int.from_bytes(self._read(8), "big")
                 mask = self._read(4) if b2 & 0x80 else None
                 payload = self._read(n) if n else b""
-            except (EOFError, OSError):
+            except (EOFError, OSError) as e:
+                debug(f"websocket closed while reading: {e!r}")
                 return None
             if mask and payload:
                 m = (mask * (n // 4 + 1))[:n]
                 payload = (int.from_bytes(payload, "big") ^ int.from_bytes(m, "big")).to_bytes(n, "big")
             opcode = b1 & 0x0F
             if opcode == 0x8:
+                code = int.from_bytes(payload[:2], "big") if len(payload) >= 2 else None
+                debug(f"websocket close frame from server: code={code} reason={payload[2:]!r}")
                 self.close()
                 return None
             if opcode == 0x9:
@@ -496,7 +507,8 @@ def pump(ws, read_input, skip=None, on_close=None):
             time.sleep(30)
             try:
                 ws.send(b"", 0x9)
-            except OSError:
+            except OSError as e:
+                debug(f"ping failed: {e!r}")
                 return
 
     threading.Thread(target=to_stdout, daemon=True).start()
@@ -504,8 +516,13 @@ def pump(ws, read_input, skip=None, on_close=None):
     while True:
         data = read_input()
         if not data:
+            debug("stdin closed")
             break
-        ws.send(data)
+        try:
+            ws.send(data)
+        except OSError as e:
+            debug(f"send failed: {e!r}")
+            break
     ws.close()
 
 
