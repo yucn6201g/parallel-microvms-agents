@@ -35,7 +35,7 @@ mvm infra outputs    # スタックの出力 (バケット名、ロールの ARN
 mvm infra delete     # スタックと S3 バケットの中身を削除する (確認あり)
 ```
 
-- `deploy`: `infra/cloudformation.yaml` を `config.env` の値で作成・更新します。予算アラート・キープアライブ・毎晩の自動停止などの設定は、変更後に `deploy` し直すと反映されます ([config.md](config.md))。前回の削除で残った Lambda 関数があると、先に知らせて止まります
+- `deploy`: CloudFormation のテンプレート (`INFRA_TEMPLATE=full` なら `infra/cloudformation.yaml`、`minimal` なら `infra/cloudformation-minimal.yaml`) を `config.env` の値で作成・更新します。予算アラート・キープアライブ・毎晩の自動停止などの設定は、変更後に `deploy` し直すと反映されます ([config.md](config.md))。前回の削除で残った Lambda 関数があると、先に知らせて止まります
 - `delete`: 起動中のセッションがあると止まります (先に `mvm stop-all`)。終了処理中の VM を待ってからバケットを空にします。権限の拒否などで消せないリソースがあれば、そのリソースだけを残して残りを削除し、残したものと削除コマンドを表示します
 
 ### secret
@@ -107,7 +107,7 @@ MicroVM を 1 台起動し、エージェントを tmux の中で開始します
 注意:
 
 - 起動時の設定 (指示文を含む) は 4KB までです。長い指示は起動後に `mvm send` で送ってください
-- 起動中のセッションが `MAX_AGENTS` 台に達しているとき、MicroVM メモリのクォータを超えるときは、起動せずに止まります
+- MicroVM メモリのクォータを超えるとき (と、`MAX_AGENTS` を設定していてその台数に達しているとき) は、起動せずに止まります
 - 起動するエージェントの組み合わせに応じて、その認証情報だけを読める実行ロールが自動で選ばれます
 
 ### fleet
@@ -116,7 +116,7 @@ MicroVM を 1 台起動し、エージェントを tmux の中で開始します
 mvm fleet <台数> [--prefix <接頭辞>] [--prompts-file <ファイル>] [up と同じオプション]
 ```
 
-`<接頭辞>-01` 〜 `<接頭辞>-NN` (既定の接頭辞は `agent`) をまとめて起動します。起動済みの名前は飛ばします。1 台目を起動する前に、全台がクォータに収まるかを確かめます。
+`<接頭辞>-01` 〜 `<接頭辞>-NN` (既定の接頭辞は `agent`) をまとめて起動します。起動済みの名前は飛ばします。1 台目を起動する前に、全台が MicroVM メモリのクォータに収まるかを確かめ、収まらなければ 1 台も起動しません。
 `--prompts-file` には 1 行に 1 つずつ指示を書きます。n 行目が n 台目の最初の指示になります (空行の台は `--prompt` の指示か、指示なし)。
 
 ---
@@ -261,7 +261,7 @@ mvm cost [試算のオプション]                 # 試算 (scripts/estimate_c
 mvm cost --actual [--days N] [--daily]      # Cost Explorer の実績
 ```
 
-試算の主なオプション: `--agents` (台数、既定 10)、`--memory-gb` (既定 4)、`--hours-per-day` (既定 8)、`--days-per-month` (既定 22)、`--suspended-ratio` (サスペンドしている割合)、`--usd-jpy` (既定 150)。全オプションは `mvm cost --help`、結果の読み方は [cost.md](cost.md)。
+試算の主なオプション: `--agents` (台数、既定 2)、`--memory-gb` (既定 4)、`--hours-per-day` (既定 8)、`--days-per-month` (既定 22)、`--suspended-ratio` (サスペンドしている割合)、`--usd-jpy` (既定 150)。全オプションは `mvm cost --help`、結果の読み方は [cost.md](cost.md)。
 `--actual` は直近 N 日 (既定 7、今日を含む) の実績をサービス別に表示します。アカウント全体の金額で、反映は最大 24 時間ほど遅れます。
 
 ---

@@ -99,7 +99,9 @@ mvm doctor           # 「ok AWS 認証」と「Lambda MicroVMs が利用可能�
 mvm infra deploy     # S3・IAM ロール・ログなどを作る (数分)
 ```
 
-`mvm doctor` の「同時に何台まで」の行も見ておきます。1 台目を動かすだけなら 1 台以上あれば十分です。10 台並べるにはクォータの引き上げが必要です ([setup.md](setup.md#クォータの確認-並列で使う場合は必須))。
+`mvm doctor` の「同時に何台まで」の行も見ておきます。この台数まで並列に動かせます ([setup.md](setup.md#クォータの確認))。
+
+キープアライブ・毎晩の自動停止・予算アラートが要らなければ、`mvm infra deploy` の前に `config.env` に `INFRA_TEMPLATE=minimal` を書き足すと、動かすのに必要なリソースだけを作ります ([setup.md](setup.md#3-aws-リソースの作成))。
 
 ## 5. 普段使う IAM ユーザーに切り替える
 
@@ -187,7 +189,7 @@ mvm cost --actual --days 7
 
 - 場面別の使い方 (並列実行、PC を閉じて任せる、8 時間を超える、費用を抑える): [usage.md](usage.md)
 - 全コマンドと設定項目: [commands.md](commands.md)、[config.md](config.md)
-- 何本も並べて動かす: `mvm fleet 3 --repo ...` ([setup.md の 7](setup.md#7-並列実行-最大-10-本))。10 本並べるにはクォータの引き上げが必要
+- 何本も並べて動かす: `mvm fleet 2 --repo ...` ([setup.md の 7](setup.md#7-並列実行))。同時に動かせる台数は `mvm doctor` で確認
 - VS Code から MicroVM の中のファイルを開く: `mvm ssh-config --install` してから Remote-SSH で `pmva-test-01` に接続
 - 応答が終わったら Slack などに通知する: [setup.md の通知](setup.md#完了入力待ちの通知)
 - 毎日の操作のまとめ: [setup.md の 8](setup.md#8-日々の運用)
@@ -200,7 +202,7 @@ mvm cost --actual --days 7
 | `mvm doctor` で「AWS 認証情報がありません」 | `config.env` の `AWS_PROFILE` と、`aws configure` で付けたプロファイル名が同じか。SSO なら `aws sso login --profile admin` |
 | `mvm doctor` で「lambda-microvms に未対応」 | AWS CLI が古い。最新版に入れ直す |
 | `mvm infra deploy` で AccessDenied | 管理者のプロファイル (`AWS_PROFILE=admin`) で実行しているか |
-| `mvm up` で「メモリ上限を超えます」 | すでに起動中の VM を `mvm ls` で確認して止める。台数を増やしたいときはクォータの引き上げを申請する ([setup.md](setup.md#クォータの確認-並列で使う場合は必須)) |
+| `mvm up` で「メモリ上限を超えます」 | クォータで決まる台数まで起動している。`mvm ls` で確認して、使っていないものを止める ([setup.md](setup.md#クォータの確認)) |
 | `mvm peek` で bootstrap が `failed` | 手順 6 のシークレットを登録したか (`mvm secret ls`)。`mvm shell test-01` で入って `cat ~agent/.pmva/bootstrap.log` |
 | `mvm ssh` で「SSH 公開鍵なしで起動されています」 | 手順 2 の `ssh-keygen` をしたか。作った後に `mvm renew test-01` で起動し直す (それまでは `mvm shell test-01` で入れる) |
 | 手順 5 の後に `mvm image build` や `mvm up` で AccessDenied | `pmva-operator` ポリシーに足りない権限がある (このポリシーだけでの動作はまだ実機で確認できていない)。エラーに出た操作を [setup.md](setup.md#操作用の-iam-ユーザー) の手順で追加する |
