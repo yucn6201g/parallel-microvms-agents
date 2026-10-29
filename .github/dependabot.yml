@@ -1,0 +1,13 @@
+# CI で使っている GitHub Actions の部品 (actions/checkout など) に新しい版が出たら、更新のプルリクエストを作る。
+# Claude Code / Codex の版は image/Dockerfile で固定しており、agent-versions.yml が別に知らせる
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Tokyo
+    commit-message:
+      prefix: "ci"

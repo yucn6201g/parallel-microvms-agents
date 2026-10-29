@@ -96,7 +96,8 @@ mvm ssh test-01                   # tmux にアタッチして直接操作 (Ctrl
 | 費用の試算 | [docs/cost.md](docs/cost.md) |
 | 設計と判断の理由 | [docs/architecture.md](docs/architecture.md) |
 | 実機での検証結果 | [docs/poc-checklist.md](docs/poc-checklist.md) |
-| このリポジトリを変更する (テスト、CI、注意点) | [docs/development.md](docs/development.md) |
+| このリポジトリを変更する (テスト、CI、注意点) | [docs/development.md](docs/development.md)、エージェント向けのルールは [AGENTS.md](AGENTS.md) |
+| 変更履歴 | [CHANGELOG.md](CHANGELOG.md) |
 
 ## ディレクトリ構成
 
@@ -117,6 +118,10 @@ scripts/install.ps1         Windows 用のセットアップ
 tests/                      自動テスト (python -m unittest discover -s tests)
 .github/workflows/ci.yml    Windows / macOS / Linux でテストと lint を実行する CI
 .github/workflows/agent-versions.yml  Claude Code / Codex の新しい版を毎週確認し、Issue で知らせる
+.github/dependabot.yml      CI で使う GitHub Actions の部品の更新をプルリクエストで知らせる
+AGENTS.md / CLAUDE.md       このリポジトリをコーディングエージェントで変更するときのルール
+CHANGELOG.md                変更履歴
+LICENSE                     ライセンス (MIT)
 docs/
   quickstart.md             はじめての人向けの最短手順
   usage.md                  場面別の使い方
@@ -153,3 +158,7 @@ AI エージェントや自動化ツールに AWS を操作させるので、ア
 - 手元 CLI は GitHub Actions で Windows / macOS / Linux それぞれについて自動テストしています (AWS CLI はスタブ、MicroVM 側はローカルのテストサーバーで代用)。端末の表示や VS Code など、目で見て確かめる項目は [docs/poc-checklist.md](docs/poc-checklist.md) の「C2」に残っています。
 - MicroVM の寿命は最大 8 時間です。成果物は git に push するか、`mvm save` / 定期スナップショットで S3 に残してください。
 - 料金単価はローンチ時に報告された値で試算しています。必ず AWS の料金ページで最新の単価を確認してください。
+
+## ライセンス
+
+[MIT License](LICENSE) です。
