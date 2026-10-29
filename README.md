@@ -82,6 +82,22 @@ mvm ssh test-01                   # tmux にアタッチして直接操作 (Ctrl
 
 詳しい手順は [docs/setup.md](docs/setup.md) を参照してください。
 
+## ドキュメント
+
+| 読みたいこと | ページ |
+|---|---|
+| はじめて使う (1 台目を動かすまで) | [docs/quickstart.md](docs/quickstart.md) |
+| 実際の作業での使い方 (並列実行、PC を閉じて任せる、8 時間を超える、費用を抑える) | [docs/usage.md](docs/usage.md) |
+| コマンドとオプションの一覧 | [docs/commands.md](docs/commands.md) |
+| `config.env` の全項目と反映のタイミング | [docs/config.md](docs/config.md) |
+| 認証方式ごとの設定 (サブスクリプション、API キー、Bedrock、ChatGPT、GitHub) | [docs/auth.md](docs/auth.md) |
+| 構築手順の詳細、日々の運用、トラブルシューティング | [docs/setup.md](docs/setup.md) |
+| よくある質問 | [docs/faq.md](docs/faq.md) |
+| 費用の試算 | [docs/cost.md](docs/cost.md) |
+| 設計と判断の理由 | [docs/architecture.md](docs/architecture.md) |
+| 実機での検証結果 | [docs/poc-checklist.md](docs/poc-checklist.md) |
+| このリポジトリを変更する (テスト、CI、注意点) | [docs/development.md](docs/development.md) |
+
 ## ディレクトリ構成
 
 ```
@@ -103,11 +119,16 @@ tests/                      自動テスト (python -m unittest discover -s test
 .github/workflows/agent-versions.yml  Claude Code / Codex の新しい版を毎週確認し、Issue で知らせる
 docs/
   quickstart.md             はじめての人向けの最短手順
-  architecture.md           設計と判断理由
-  setup.md                  構築手順と日々の運用
+  usage.md                  場面別の使い方
+  commands.md               コマンドリファレンス
+  config.md                 設定リファレンス (config.env)
   auth.md                   認証方式ごとの設定方法
+  setup.md                  構築手順と日々の運用
+  faq.md                    よくある質問
   cost.md                   コスト試算
-  poc-checklist.md          実機で最初に検証すべき項目
+  architecture.md           設計と判断理由
+  poc-checklist.md          実機での検証結果と、最初に検証すべき項目
+  development.md            開発者向けガイド
 ```
 
 ## AWS アカウントの安全対策
