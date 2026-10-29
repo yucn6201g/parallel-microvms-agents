@@ -285,9 +285,10 @@ class WebSocketTest(unittest.TestCase):
     def test_through_connect_proxy(self):
         server, proxy = EchoWebSocketServer(), ConnectProxy()
         saved = {k: os.environ.get(k) for k in ("HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy")}
-        os.environ["HTTPS_PROXY"] = f"http://127.0.0.1:{proxy.port}"
-        for k in ("https_proxy", "NO_PROXY", "no_proxy"):
+        # Windows では環境変数名の大文字小文字を区別しないので、消してから設定する
+        for k in ("https_proxy", "HTTPS_PROXY", "NO_PROXY", "no_proxy"):
             os.environ.pop(k, None)
+        os.environ["HTTPS_PROXY"] = f"http://127.0.0.1:{proxy.port}"
         try:
             ws = mvm.WebSocket("127.0.0.1", "/", ["lambda-microvms"], port=server.port, tls=False)
             ws.send(b"via-proxy")

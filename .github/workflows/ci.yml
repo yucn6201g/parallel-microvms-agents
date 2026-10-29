@@ -17,10 +17,14 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        # 3.9 は macOS 標準の Python (Xcode Command Line Tools)。Ubuntu の GitHub ランナーには 3.9 が無いので除く
         python: ["3.9", "3.13"]
+        exclude:
+          - os: ubuntu-latest
+            python: "3.9"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
       - name: Install tmux and jq (MicroVM 側スクリプトの結合テスト用)
@@ -32,8 +36,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - name: Install cfn-lint
