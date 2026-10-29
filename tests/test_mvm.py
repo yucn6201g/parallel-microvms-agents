@@ -419,6 +419,23 @@ class CliTest(unittest.TestCase):
         self.assertEqual(renewed["restore"], "s3://pmva-bucket/workspaces/r1/latest.tar.gz")
         self.assertNotIn("prompt", renewed)
 
+    def test_infra_delete_waits_for_termination(self):
+        self.mvm("up", "d1")
+        self.mvm("stop", "d1", "--no-save")
+        (self.stub_dir / "microvm-0000.terminating").write_text("1")
+        rc, out, err = self.mvm("infra", "delete", input=b"y\n")
+        calls = [json.loads(l) for l in (self.stub_dir / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
+        names = [" ".join(c[:2]) for c in calls]
+        last_get = max(i for i, n in enumerate(names) if n == "lambda-microvms get-microvm")
+        self.assertLess(last_get, names.index("s3 rm"), "VM が終了しきってからバケットを空にする")
+        self.assertIn("終了を待っています", err)
+
+    def test_infra_delete_refuses_with_running_sessions(self):
+        self.mvm("up", "d2")
+        rc, _, err = self.mvm("infra", "delete", input=b"y\n", check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("stop-all", err)
+
     def test_secret_set_from_stdin(self):
         self.mvm("secret", "set", "github-token", input="ghp_example\n".encode())
         self.assertEqual((self.stub_dir / "secret-pmva_github-token").read_text(encoding="utf-8"), "ghp_example")

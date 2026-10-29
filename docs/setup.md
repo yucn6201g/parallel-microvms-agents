@@ -135,7 +135,7 @@ mvm up test-01 --repo https://github.com/<owner>/<repo>.git
 mvm ls
 mvm peek test-01
 mvm ssh test-01            # tmux にアタッチ。Ctrl-b d で切断 (エージェントは動き続ける)
-mvm send test-01 "テストを実行して結果を要約して"
+mvm send test-01 "テストを実行して結果を要約して"   # "-" で始まる指示は mvm send test-01 -- "-h" のように書く
 mvm save test-01
 mvm stop test-01
 ```
@@ -181,6 +181,7 @@ Windows の注意:
 | 8 時間が近い | `mvm renew <name>` (保存 → 終了 → 新しい VM で復元。同じ設定とブランチを引き継ぐ) |
 | 前回の続きから始める | `mvm up <name> --restore latest ...` |
 | 1 日の終わり | `mvm stop-all` (各台を保存してから終了) |
+| 使わなくなったら片付ける | `mvm stop-all` → `mvm infra delete` → `mvm image delete` (イメージは置いておくと保存料金がかかる) |
 | ログを見る | `mvm logs --follow` |
 | 費用の確認 | `mvm cost`、Cost Explorer |
 

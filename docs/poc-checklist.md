@@ -98,8 +98,16 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 
 ## F. 並列化
 
-- [ ] `mvm fleet 10` で 10 台が起動する (レート制限・クォータに当たらないか)
-- [ ] `mvm watch` で全台を確認できる。手元 PC の CPU 使用率が下がったことを確認する
+2026-10-29 に、クォータ (8GB) の範囲内の 2 台で確認しました。
+
+- [x] `mvm fleet 2` で 2 台が 9 秒で起動し、両方 `bootstrap=ready` になった。レート制限 (RunMicrovm 1 回/秒) には当たらなかった
+- [x] 3 台目は mvm の事前チェックで止まる。チェックを通さずに AWS に直接 `run-microvm` すると `ServiceQuotaExceededException: The base maximum allocated memory limit has been reached` で拒否された → 上限は**ベースラインメモリの合計**で決まり、事前チェックの前提と一致
+- [x] 2 台に同時に `mvm send` / `mvm ssh` できた
+  - 修正 8: `mvm send <name> --window shell ...` のように名前の後に書いたオプションが指示文に混ざっていた → 修正
+  - 修正 9: `-` で始まる指示を tmux がオプションとして解釈していた → `send-keys -l --` で修正し、AWS 上で確認
+  - 修正 10: `stop-all` 直後の `infra delete` で、終了中の VM が terminate フックで S3 に保存したためバケットが空にならず、スタックの削除に失敗した → VM が終了しきるのを待ち、失敗時はもう一度バケットを空にして再試行するように修正
+- [ ] `mvm fleet 10` で 10 台が起動する (未確認: クォータの引き上げが必要)
+- [ ] `mvm watch` で全台を確認できる。手元 PC の CPU 使用率が下がったことを確認する (C2 で手元 PC から確認する)
 - [ ] 1 日運用した後、Cost Explorer の実費と [cost.md](cost.md) の試算を比べる
 
 ## 結果
@@ -114,6 +122,7 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 | シェル接続時のユーザー | root (SSH は agent) |
 | SSH 接続 | OK (tmux アタッチ / デタッチ、日本語表示、5MB 転送) |
 | 1 日あたりの実費 | 未計測。PoC で VM を動かしたのは 4GB × 延べ約 15 分 (試算では約 $0.07)。Cost Explorer に反映されたら確認する |
-| PoC 中に直した不具合 | 7 件: gh のインストール、validate フック、/run の本文形式、mvm ssh の引数、tmux の日本語、mvm shell の制御メッセージと端末復元、mvm logs (AWS CLI v1 対応)。ほかに `mvm ls` の時刻表示 |
+| PoC 中に直した不具合 | 10 件: gh のインストール、validate フック、/run の本文形式、mvm ssh の引数、tmux の日本語、mvm shell の制御メッセージと端末復元、mvm logs (AWS CLI v1 対応)、mvm send のオプション、`-` で始まる指示、infra delete の削除順。ほかに `mvm ls` の時刻表示 |
 | 本番前に必要な対応 | MicroVM メモリのクォータ引き上げ (8GB → 40GB 以上)、Bedrock を使うならモデル利用申請 |
-| 片付け | `mvm stop-all`、`mvm infra delete`、MicroVM イメージの削除を実施 |
+| 片付け | 2026-10-28・29 とも `mvm stop-all`、`mvm infra delete`、`mvm image delete` を実施し、何も残っていないことを確認 |
+| 自動テスト (CI) | GitHub Actions で Windows / macOS (Python 3.9・3.13)、Linux (3.13) のテストと lint が成功。端末の表示や VS Code など目で見る項目は C2 に残る |

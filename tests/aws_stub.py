@@ -67,6 +67,10 @@ if cmd == "lambda-microvms get-microvm":
     vid = opt("--microvm-identifier")
     if not (D / f"{vid}.payload").exists():
         fail("ResourceNotFoundException")
+    countdown = D / f"{vid}.terminating"  # 残り回数だけ TERMINATING を返す
+    if countdown.exists() and int(countdown.read_text()) > 0:
+        countdown.write_text(str(int(countdown.read_text()) - 1))
+        out({"state": "TERMINATING"})
     out({"state": "TERMINATED" if (D / f"{vid}.term").exists() else "RUNNING"})
 if cmd == "lambda-microvms terminate-microvm":
     (D / f"{opt('--microvm-identifier')}.term").touch()
@@ -84,4 +88,6 @@ if cmd in ("secretsmanager create-secret", "secretsmanager put-secret-value"):
     value = Path(uri[len("file://"):]).read_text(encoding="utf-8")
     (D / ("secret-" + name.replace("/", "_"))).write_text(value, encoding="utf-8")
     out({"Name": name})
+if cmd in ("s3 rm", "cloudformation delete-stack", "cloudformation wait"):
+    sys.exit(0)
 fail("unhandled: " + cmd, 1)

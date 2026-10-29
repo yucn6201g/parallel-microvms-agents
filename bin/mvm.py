@@ -613,12 +613,35 @@ def cmd_infra(args):
         ans = input(f"スタック {C['STACK_NAME']} と S3 バケット {bucket} の中身を削除します。よろしいですか? [y/N] ")
         if ans.strip().lower() != "y":
             die("中止しました")
-        aws_interactive("s3", "rm", f"s3://{bucket}", "--recursive", "--only-show-errors")
-        aws_interactive("cloudformation", "delete-stack", "--stack-name", C["STACK_NAME"])
-        aws_interactive("cloudformation", "wait", "stack-delete-complete", "--stack-name", C["STACK_NAME"])
+        if active_names():
+            die("起動中のセッションがあります。先に mvm stop-all を実行してください")
+        # 終了処理中の VM は terminate フックでワークスペースを S3 に保存する。
+        # バケットを空にした後に書き込まれると削除に失敗するので、終了しきるまで待つ (PoC で発生)
+        wait_until_terminated()
+        for attempt in range(2):
+            aws_interactive("s3", "rm", f"s3://{bucket}", "--recursive", "--only-show-errors")
+            aws_interactive("cloudformation", "delete-stack", "--stack-name", C["STACK_NAME"])
+            if aws_interactive("cloudformation", "wait", "stack-delete-complete", "--stack-name", C["STACK_NAME"]) == 0:
+                break
+            log("スタックの削除に失敗しました。バケットを空にしてもう一度試します")
+        else:
+            die(f"スタック {C['STACK_NAME']} を削除できませんでした。CloudFormation コンソールで原因を確認してください")
         (STATE_DIR / "stack-outputs.json").unlink(missing_ok=True)
         log("削除しました。イメージは mvm image delete、シークレットは Secrets Manager で個別に削除してください")
     return 0
+
+
+def wait_until_terminated(timeout=300):
+    """ローカルに記録のある MicroVM が TERMINATING の間は待つ。"""
+    deadline = time.time() + timeout
+    for name in session_names():
+        vid = load_session(name)["microvmId"]
+        while time.time() < deadline:
+            r = lmv("get-microvm", "--microvm-identifier", vid, check=False)
+            if not r or r.get("state") != "TERMINATING":
+                break
+            log(f"{name} の終了を待っています")
+            time.sleep(5)
 
 
 def cmd_secret(args):
