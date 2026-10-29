@@ -86,12 +86,15 @@ MicroVM はビルド時のスナップショットを全台で共有します。
 
 アイドル判定は受信通信しか見ないので、「作業中かどうか」を外から調べるためにエンドポイントへアクセスすると、それ自体がアイドルのタイマーを戻してしまいます。そこで向きを逆にして、VM が自分の状態を外 (S3) に書き出し、AWS 側の Lambda は S3 だけを見て判断します。
 
+```mermaid
+flowchart LR
+  eb["EventBridge<br/>5 分ごと"] --> fn["Lambda<br/>pmva-keepalive"]
+  vm["MicroVM<br/>supervisor.py"] -- "1 分ごとに書く" --> s3[("S3<br/>status/&lt;name&gt;.json")]
+  fn -- "lastActivity を読む" --> s3
+  fn -- "作業中かつ RUNNING の VM だけ<br/>/healthz にアクセス" --> vm
 ```
-VM (supervisor.py) ── 1 分ごと ──▶ S3 status/<name>.json {lastActivity, updatedAt}
-                                        │
-EventBridge (5 分ごと) ─▶ Lambda pmva-keepalive ─┘  作業中 (lastActivity が新しい) かつ RUNNING の VM だけ
-                                        └──────────▶ https://<endpoint>/healthz (受信通信 = アイドルのタイマーが戻る)
-```
+
+`/healthz` への受信通信で、その VM のアイドルのタイマーが戻ります。
 
 - 作業中の判定: tmux の画面が変わった、または tmux 内のプロセスが 30 秒で 1 秒以上 CPU を使った
 - 一時停止中・終了済みの VM は状態が更新されない (`updatedAt` が古い) ので、Lambda は触らない (起こさない)
