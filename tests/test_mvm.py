@@ -44,7 +44,9 @@ class EchoWebSocketServer:
 
     GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
-    def __init__(self, ssl_context=None):
+    def __init__(self, ssl_context=None, flood=0, sockbuf=None):
+        """flood: 接続直後に、相手から読む前にこのバイト数を送りつける。sockbuf: ソケットのバッファの大きさ。"""
+        self.flood, self.sockbuf = flood, sockbuf
         self.sock = socket.socket()
         self.sock.bind(("127.0.0.1", 0))
         self.sock.listen()
@@ -63,6 +65,9 @@ class EchoWebSocketServer:
                 conn, _ = self.sock.accept()
             except OSError:
                 return
+            if self.sockbuf:
+                for opt in (socket.SO_SNDBUF, socket.SO_RCVBUF):
+                    conn.setsockopt(socket.SOL_SOCKET, opt, self.sockbuf)
             if self.ssl_context:
                 try:
                     conn = self.ssl_context.wrap_socket(conn, server_side=True)
@@ -92,6 +97,8 @@ class EchoWebSocketServer:
         conn.sendall(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                       f"Sec-WebSocket-Accept: {accept}\r\nSec-WebSocket-Protocol: lambda-microvms\r\n\r\n").encode())
         conn.sendall(bytes([0x89, 0]))  # クライアントの pong 応答を試すため ping を送る
+        for _ in range(self.flood // 65536):
+            conn.sendall(bytes([0x82, 127]) + (65536).to_bytes(8, "big") + os.urandom(65536))
         try:
             while True:
                 hdr, buf = self._read(conn, buf, 2)
@@ -104,7 +111,9 @@ class EchoWebSocketServer:
                     n = int.from_bytes(ext, "big")
                 mask, buf = self._read(conn, buf, 4)
                 data, buf = self._read(conn, buf, n)
-                data = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
+                if n:
+                    m = (mask * (n // 4 + 1))[:n]
+                    data = (int.from_bytes(data, "big") ^ int.from_bytes(m, "big")).to_bytes(n, "big")
                 opcode = hdr[0] & 0x0F
                 if opcode == 0x8:
                     conn.sendall(bytes([0x88, 0]))
@@ -322,18 +331,55 @@ class WebSocketTest(unittest.TestCase):
                     for _ in range(200):
                         ws.send(b"", 0x9)
 
-                threads = [threading.Thread(target=reader), threading.Thread(target=pinger)]
+                def sender():
+                    for c in chunks:
+                        ws.send(c)
+
+                threads = [threading.Thread(target=f, daemon=True) for f in (reader, pinger, sender)]
                 for th in threads:
                     th.start()
-                for c in chunks:
-                    ws.send(c)
-                threads[0].join(60)
-                threads[1].join(60)
+                for th in threads:
+                    th.join(60)
+                self.assertFalse(any(th.is_alive() for th in threads), "送受信が止まった")
                 self.assertEqual(bytes(got), expected)
                 ws.close()
             finally:
                 mvm.ssl.create_default_context = original
                 server.close()
+
+    def test_sending_does_not_stop_receiving(self):
+        """相手が送り終えるまで読まないサーバーに、こちらも大量に送る。送信中に受信が止まると、
+        互いに相手が読むのを待って止まる (以前の実装で Windows の CI が止まった)。"""
+        size = 2 * 1024 * 1024
+        server = EchoWebSocketServer(flood=size, sockbuf=65536)
+        try:
+            ws = mvm.WebSocket("127.0.0.1", "/", ["lambda-microvms"], port=server.port, tls=False)
+            for opt in (socket.SO_SNDBUF, socket.SO_RCVBUF):
+                ws.sock.setsockopt(socket.SOL_SOCKET, opt, 65536)
+            received = [0]
+
+            def reader():
+                while received[0] < size * 2:  # 先に送りつけられた分 + こちらが送った分のエコー
+                    data = ws.recv()
+                    if data is None:
+                        return
+                    received[0] += len(data)
+
+            def sender():
+                chunk = os.urandom(65536)
+                for _ in range(size // 65536):
+                    ws.send(chunk)
+
+            threads = [threading.Thread(target=f, daemon=True) for f in (reader, sender)]
+            for th in threads:
+                th.start()
+            for th in threads:
+                th.join(30)
+            self.assertFalse(any(th.is_alive() for th in threads), f"止まった (受信 {received[0]} バイト)")
+            self.assertEqual(received[0], size * 2)
+            ws.close()
+        finally:
+            server.close()
 
     def test_through_connect_proxy(self):
         server, proxy = EchoWebSocketServer(), ConnectProxy()

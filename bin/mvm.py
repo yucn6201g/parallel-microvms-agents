@@ -10,10 +10,12 @@
 
 import argparse
 import base64
+import collections
 import getpass
 import hashlib
 import json
 import os
+import select
 import shutil
 import socket
 import ssl
@@ -415,23 +417,33 @@ class WebSocket:
         if headers.get("sec-websocket-accept") != accept:
             raise OSError("WebSocket handshake failed: invalid Sec-WebSocket-Accept")
         # SSL ソケットは複数スレッドからの同時の読み書きに対して安全ではない (受信スレッドと
-        # 送信・ping が同時に触ると接続が壊れることがあった)。読み書きとも self.lock の中で行い、
-        # 受信は短いタイムアウトで区切って送信側にロックを譲る
-        self.sock.settimeout(None)
+        # 送信・ping が同時に触ると接続が壊れることがあった)。そこでソケットをノンブロッキングにし、
+        # 読み書きは self.lock の中で 1 回ずつ行い、待つときはロックを持たずに select で待つ。
+        # ロックを持ったまま待つと、相手の受信待ち (送信バッファが一杯) と、こちらの受信待ち
+        # (ロックが取れない) が互いを待って止まる (Windows の CI で発生)。
+        # 送信は専用スレッドが行い、send() はキューに積むだけにする
+        self.sock.setblocking(False)
         self.lock = threading.Lock()
         self.closed = False
+        self.cond = threading.Condition()
+        self.control, self.data = collections.deque(), collections.deque()  # 送信待ちのフレーム
+        self.write_error = None
+        self.stopping = False
+        self.writer = threading.Thread(target=self._write_loop, daemon=True)
+        self.writer.start()
 
     def _recv_chunk(self):
+        """届いたデータを返す。相手が閉じたら b""。"""
         while True:
             with self.lock:
-                self.sock.settimeout(0.05)
                 try:
-                    return self.sock.recv(65536)
-                except (socket.timeout, ssl.SSLWantReadError):
+                    return self.sock.recv(65536)  # SSL の内部バッファに残っている分もここで読める
+                except (BlockingIOError, InterruptedError, ssl.SSLWantReadError, ssl.SSLWantWriteError):
                     pass
-                finally:
-                    self.sock.settimeout(None)
-            time.sleep(0.002)
+            try:
+                select.select([self.sock], [], [], 0.05)
+            except (OSError, ValueError):  # 閉じたソケット
+                return b""
 
     def _read(self, n):
         while len(self.buf) < n:
@@ -442,7 +454,10 @@ class WebSocket:
         data, self.buf = self.buf[:n], self.buf[n:]
         return data
 
+    MAX_PENDING_FRAMES = 64  # これ以上たまったら send() を待たせる (標準入力を読みすぎない)
+
     def send(self, data, opcode=0x2):
+        """フレームを送信キューに積む。制御フレーム (ping/pong/close) は待たずに積み、先に送る。"""
         n = len(data)
         header = bytes([0x80 | opcode])
         if n < 126:
@@ -455,8 +470,55 @@ class WebSocket:
         if n:
             m = (mask * (n // 4 + 1))[:n]
             data = (int.from_bytes(data, "big") ^ int.from_bytes(m, "big")).to_bytes(n, "big")
-        with self.lock:
-            self.sock.sendall(header + mask + data)
+        frame = header + mask + data
+        with self.cond:
+            if self.write_error is not None:
+                raise OSError(f"websocket send failed: {self.write_error!r}")
+            if opcode & 0x8:
+                # 受信スレッドからの pong もここに来るので、待たせない (待たせると受信が止まる)
+                self.control.append(frame)
+            else:
+                while len(self.data) >= self.MAX_PENDING_FRAMES and self.write_error is None:
+                    self.cond.wait()
+                if self.write_error is not None:
+                    raise OSError(f"websocket send failed: {self.write_error!r}")
+                self.data.append(frame)
+            self.cond.notify_all()
+
+    def _write_loop(self):
+        while True:
+            with self.cond:
+                while not self.control and not self.data and not self.stopping:
+                    self.cond.wait()
+                if not self.control and not self.data:
+                    return
+                frame = self.control.popleft() if self.control else self.data.popleft()
+                self.cond.notify_all()
+            try:
+                self._write(frame)
+            except OSError as e:
+                debug(f"websocket write failed: {e!r}")
+                with self.cond:
+                    self.write_error = e
+                    self.control.clear()
+                    self.data.clear()
+                    self.cond.notify_all()
+                return
+
+    def _write(self, frame):
+        """1 フレームを小分けに書く。書けないときはロックを手放し、受信スレッドが読めるようにする。"""
+        view = memoryview(frame)
+        while view:
+            # SSL では、書けずに終わった書き込みは同じ内容でやり直す必要があるので、長さを固定して切り出す
+            chunk = view[:16384]
+            with self.lock:
+                try:
+                    written = self.sock.send(chunk)
+                except (BlockingIOError, InterruptedError, ssl.SSLWantWriteError, ssl.SSLWantReadError):
+                    written = 0
+            view = view[written:]
+            if not written:
+                select.select([], [self.sock], [], 0.05)
 
     def recv(self):
         """データを返す。相手が閉じたら None。"""
@@ -498,6 +560,16 @@ class WebSocket:
         self.closed = True
         try:
             self.send(b"", 0x8)
+        except OSError:
+            pass
+        with self.cond:
+            self.stopping = True
+            self.cond.notify_all()
+        # 送信キューに残っているデータと close フレームを送り切ってから閉じる (受信スレッドから
+        # 呼ばれたときは送信スレッドの終了を待たない)
+        if threading.current_thread() is not self.writer:
+            self.writer.join(5)
+        try:
             self.sock.close()
         except OSError:
             pass
