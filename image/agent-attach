@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# エージェントの tmux セッションに接続する (シェル接続・SSH 接続のどちらからでも使う)
+if [ "$(id -u)" = "0" ] && id agent >/dev/null 2>&1; then
+  exec runuser -u agent -- env HOME=/home/agent "$0" "$@"
+fi
+# SSH 経由ではロケールが引き継がれず、tmux が日本語を _ に置き換えるため UTF-8 を明示する
+export LANG="${LANG:-C.UTF-8}"
+cd "$HOME" || exit 1
+if tmux has-session -t main 2>/dev/null; then
+  exec tmux -u attach -t main "$@"
+fi
+echo "tmux セッション 'main' がまだありません (初期化状態: $(cat "$HOME/.pmva/state" 2>/dev/null || echo unknown))"
+echo "ログ: ~/.pmva/bootstrap.log"
+exec tmux -u new-session -s main -c "${PMVA_WORKDIR:-$HOME/work}"

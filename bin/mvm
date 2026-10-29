@@ -1,0 +1,3 @@
+#!/bin/sh
+# macOS / Linux 用の起動スクリプト。本体は bin/mvm.py (Windows は bin\mvm.cmd)
+exec python3 "$(dirname "$0")/mvm.py" "$@"
