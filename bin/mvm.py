@@ -732,8 +732,7 @@ def is_admin_policy(policies):
 def credential_findings(arn):
     """使っている認証情報の注意点 (ルートユーザー、管理者権限、古いアクセスキー) を doctor 用の行で返す。
 
-    管理者権限の長期アクセスキーは、漏れたときの影響が大きく、普段と違う場所 (クラウドの開発環境など) から
-    使うと AWS の不正利用検知でアカウントが制限されることがある (PoC で発生)。
+    管理者権限の長期アクセスキーは、漏れたときの影響が大きいので、普段の操作には使わないよう促す。
     """
     import datetime
     see = "pmva-operator ポリシーだけを付けた IAM ユーザーで使ってください (docs/setup.md「操作用の IAM ユーザー」)"
@@ -753,8 +752,7 @@ def credential_findings(arn):
             r = aws("iam", "list-attached-group-policies", "--group-name", g["GroupName"], check=False) or {}
             policies += r.get("AttachedPolicies", [])
         if is_admin_policy(policies):
-            lines.append("  !!   管理者権限 (AdministratorAccess) の長期アクセスキーです。漏れたときの影響が大きく、"
-                         "他の環境に渡すと AWS の不正利用検知でアカウントが制限されることがあります。"
+            lines.append("  !!   管理者権限 (AdministratorAccess) の長期アクセスキーです。漏れたときの影響が大きいので、"
                          f"infra deploy 以外は {see}")
         keys = aws("iam", "list-access-keys", "--user-name", name, check=False) or {}
         now = datetime.datetime.now(datetime.timezone.utc)
@@ -822,8 +820,8 @@ def cmd_infra(args):
 def delete_stack_retaining_failed(max_rounds=5):
     """削除に失敗したリソースだけを残して、スタックの残りを削除する。
 
-    アカウントの制限などで Lambda の API が拒否されると、Lambda 関数とその実行許可が DELETE_FAILED になり、
-    スタックごと消せなくなる (PoC で発生)。依存関係の順に 1 つずつ失敗するので、失敗したものを足しながら繰り返す。
+    権限の不足などで Lambda 関数とその実行許可を削除できないと DELETE_FAILED になり、スタックごと消せなくなる。
+    依存関係の順に 1 つずつ失敗するので、失敗したものを足しながら繰り返す。
     成功したら残したリソースの一覧を、繰り返しても消せなければ None を返す。
     """
     retained = {}
@@ -850,7 +848,7 @@ def report_retained(resources):
     for fn in functions:
         print(f"  削除: aws lambda delete-function --function-name {fn} --region {C['AWS_REGION']}", file=sys.stderr)
     if functions:
-        print("  (Lambda 関数の実行許可は関数と一緒に消えます。Lambda の API が使えるようになってから削除してください。"
+        print("  (Lambda 関数の実行許可は関数と一緒に消えます。削除できなかった原因 (権限など) を解消してから削除してください。"
               "残したままだと次の mvm infra deploy が名前の重複で失敗します)", file=sys.stderr)
     others = [x for x in resources if x.get("ResourceType") not in ("AWS::Lambda::Function", "AWS::Lambda::Permission")]
     if others:
@@ -906,7 +904,7 @@ def prepare_new_stack():
                 f"  aws lambda delete-function --function-name {fn} --region {C['AWS_REGION']}")
         if "AccessDenied" in last_aws_error():
             log(f"Lambda 関数 {fn} の有無を確認できませんでした (AccessDenied)。infra deploy は Lambda 関数を作るので、"
-                "権限か、AWS アカウントの制限 (Organizations の SCP、AWS からの利用制限) を確認してください")
+                "権限か、AWS Organizations の SCP を確認してください")
             break
     for group in (f"/aws/lambda-microvms/{C['PMVA_PREFIX']}", f"/aws/lambda/{C['PMVA_PREFIX']}-keepalive",
                   f"/aws/lambda/{C['PMVA_PREFIX']}-nightly-stop"):

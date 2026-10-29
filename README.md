@@ -139,17 +139,16 @@ AI エージェントや自動化ツールに AWS を操作させるので、ア
 |---|---|
 | ルートユーザーを守る | パスワードを他で使わないものにし、MFA を設定する。普段は使わず、アクセスキーも作らない |
 | 普段は権限を絞ったユーザーで使う | `pmva-operator` ポリシーだけを付けた IAM ユーザーで `mvm` を使う ([手順](docs/setup.md#操作用の-iam-ユーザー))。`mvm infra deploy` だけを管理者 (できれば SSO の一時的な認証情報) で、自分の PC から実行する |
-| 管理者のキーを渡さない | クラウドの開発環境・CI・他人の PC には `pmva-operator` のキーだけを渡す。PoC では管理者のキーを渡したことで、AWS の不正利用検知によりアカウントが制限された |
+| 管理者のキーを渡さない | クラウドの開発環境・CI・他人の PC には `pmva-operator` のキーだけを渡す |
 | キーを定期的に作り直す | 90 日を目安に作り直し、古いキーを削除する。`mvm doctor` が管理者権限・ルート・古いキーを警告する |
 | 費用の異常に早く気付く | 予算アラート (`BUDGET_MONTHLY_USD` / `BUDGET_EMAIL`) を設定し、`mvm cost --actual` で実績を確認する |
-| 不審な操作を確認できるようにする | CloudTrail の証跡を有効にしておく。AWS から不正アクセスの可能性を知らせるメールが来たら、メールの手順に従い、使っていたキーを無効化・削除してからサポートに返信する |
+| 不審な操作を確認できるようにする | CloudTrail の証跡を有効にしておき、身に覚えのない操作がないかを確認できるようにする |
 | 認証情報を漏らさない | トークンやキーはチャットやリポジトリに貼らず、`mvm secret set` で Secrets Manager に登録する (`config.env` と `.state/` は `.gitignore` 済み) |
 
 ## 現状と注意点
 
 - Lambda MicroVMs は 2026 年 6 月に提供開始されたサービスです。2026-10-28 に東京リージョンの実際の AWS アカウントで、1 台での PoC (イメージのビルド、起動、peek / send、SSH / シェル接続、サスペンドと自動レジューム、保存と復元、Bedrock 認証の経路) を実施しました。結果と未確認の項目は [docs/poc-checklist.md](docs/poc-checklist.md) にまとめています。
 - **10 台並列にはクォータの引き上げが必要です**。PoC のアカウントでは `Max allocated ARM_64 MicroVM memory` が 8GB で、4GB の VM は同時に 2 台までしか起動できませんでした。40GB 以上への引き上げを AWS サポートに申請してください。
-- PoC の途中 (2026-10-29 03:13 UTC ごろ) から、PoC のアカウントが AWS の不正利用検知で制限されました (Lambda 関数の API の拒否、メモリのクォータ 0GB)。管理者の長期アクセスキーをクラウドの開発環境から使ったことがきっかけとみられます。下の「AWS アカウントの安全対策」を守ってください。詳しくは [docs/poc-checklist.md](docs/poc-checklist.md) の G を参照してください。
 - VM 内のエージェント (`agent` ユーザー) は sudo を使えません (コンテナに no_new_privs が付いているため)。root が必要な作業は `mvm shell` (root で入る) で行うか、必要なパッケージを `image/Dockerfile` に追加してください。
 - 手元 CLI は GitHub Actions で Windows / macOS / Linux それぞれについて自動テストしています (AWS CLI はスタブ、MicroVM 側はローカルのテストサーバーで代用)。端末の表示や VS Code など、目で見て確かめる項目は [docs/poc-checklist.md](docs/poc-checklist.md) の「C2」に残っています。
 - MicroVM の寿命は最大 8 時間です。成果物は git に push するか、`mvm save` / 定期スナップショットで S3 に残してください。
