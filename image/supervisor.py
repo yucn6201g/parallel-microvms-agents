@@ -154,7 +154,8 @@ def status(lines):
 def send_keys(window, text, enter):
     target = f"{TMUX_SESSION}:{window}"
     if text:
-        rc, out = run(["tmux", "send-keys", "-t", target, "-l", text])
+        # "--" を付けないと、"-" で始まる指示を tmux がオプションとして解釈してしまう
+        rc, out = run(["tmux", "send-keys", "-t", target, "-l", "--", text])
         if rc != 0:
             return False, out
     if enter:

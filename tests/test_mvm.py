@@ -453,6 +453,11 @@ class CliTest(unittest.TestCase):
             self.assertEqual(api.headers_seen[0].get("x-aws-proxy-port"), "8080")
             self.mvm("send", "a1", "テストを実行して", env=env)
             self.assertEqual(api.received[-1], ("/send", {"window": "claude", "text": "テストを実行して", "enter": True}))
+            # オプションを名前の後に書いても指示文に混ざらない。"-" で始まる指示は "--" の後に書く
+            self.mvm("send", "a1", "--window", "shell", "--no-enter", "echo", "hi", env=env)
+            self.assertEqual(api.received[-1][1], {"window": "shell", "text": "echo hi", "enter": False})
+            self.mvm("send", "a1", "--", "-h", env=env)
+            self.assertEqual(api.received[-1][1]["text"], "-h")
         finally:
             api.shutdown()
 

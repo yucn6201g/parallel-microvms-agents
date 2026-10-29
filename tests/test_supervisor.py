@@ -134,6 +134,9 @@ class SupervisorTest(unittest.TestCase):
         out = subprocess.run(["tmux", "capture-pane", "-p", "-t", "main:shell"], env=self.env,
                              capture_output=True, text=True).stdout
         self.assertIn("送信テスト-OK", out)
+        # "-" で始まる指示も tmux のオプションと解釈されずにそのまま入力される
+        code, r = self.request(self.api_port, "POST", "/send", {"window": "shell", "text": "--window echo dash-OK"})
+        self.assertEqual((code, r["ok"]), (200, True), r)
         code, r = self.request(self.api_port, "POST", "/send", {"window": "nope", "text": "x"})
         self.assertEqual(code, 500)
         self.assertTrue(r["error"])
