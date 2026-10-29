@@ -50,7 +50,7 @@ HOOKS = {
 }
 DEFAULTS = {
     "AWS_REGION": "ap-northeast-1", "AWS_PROFILE": "", "PMVA_PREFIX": "pmva", "STACK_NAME": "pmva",
-    "IMAGE_NAME": "pmva-agent", "BASE_IMAGE_ARN": "", "MEMORY_MIB": "4096", "MAX_AGENTS": "10",
+    "IMAGE_NAME": "pmva-agent", "BASE_IMAGE_ARN": "", "MEMORY_MIB": "4096", "MAX_AGENTS": "0",
     "MAX_DURATION_SECONDS": "28800", "IDLE_MAX_SECONDS": "1800", "IDLE_SUSPENDED_SECONDS": "21600",
     "IDLE_AUTO_RESUME": "true", "INGRESS_CONNECTORS": "HTTP_INGRESS SHELL_INGRESS",
     "SNAPSHOT_INTERVAL_SECONDS": "1800", "DEFAULT_AGENT": "claude", "DEFAULT_CLAUDE_AUTH": "oauth-token",
@@ -59,7 +59,11 @@ DEFAULTS = {
     "GIT_USER_NAME": "", "GIT_USER_EMAIL": "", "SSH_PUBLIC_KEY_FILE": "~/.ssh/id_ed25519.pub",
     "BUDGET_MONTHLY_USD": "0", "BUDGET_EMAIL": "", "KEEPALIVE_RATE_MINUTES": "5", "KEEPALIVE_ACTIVE_SECONDS": "900",
     "NOTIFY_WEBHOOK": "false", "NIGHTLY_STOP_TIME": "", "NIGHTLY_STOP_TIMEZONE": "Asia/Tokyo",
+    "INFRA_TEMPLATE": "full",
 }
+# mvm infra deploy で使う CloudFormation テンプレート。minimal は mvm の動作に必要なリソースだけ
+# (キープアライブ、毎晩の自動停止、予算アラートを含まない)
+INFRA_TEMPLATES = {"full": "cloudformation.yaml", "minimal": "cloudformation-minimal.yaml"}
 AGENTS = ("claude", "codex", "both", "none")
 CLAUDE_AUTHS = ("api-key", "oauth-token", "bedrock", "gateway", "interactive", "none")
 CODEX_AUTHS = ("api-key", "chatgpt", "interactive", "none")
@@ -240,7 +244,8 @@ def check_memory_quota(running, adding):
         fit = max(quota // int(C["MEMORY_MIB"]) - running, 0)
         die(f"MicroVM のメモリ上限を超えます (上限 {quota // 1024}GB、必要 {need // 1024}GB = "
             f"{running + adding} 台 x {int(C['MEMORY_MIB']) // 1024}GB)。今は あと {fit} 台まで起動できます。\n"
-            f"  Service Quotas で「Max allocated ARM_64 MicroVM memory」({MEMORY_QUOTA_CODE}) の引き上げを申請してください")
+            f"  起動中のセッションを止めるか (mvm ls → mvm stop)、もっと同時に動かしたい場合は Service Quotas で\n"
+            f"  「Max allocated ARM_64 MicroVM memory」({MEMORY_QUOTA_CODE}) の引き上げを申請してください")
 
 
 def find_image_arn():
@@ -705,13 +710,17 @@ def cmd_doctor(_args):
     if quota is None:
         print("  --   MicroVM のメモリ上限を取得できません (servicequotas:GetServiceQuota の権限が必要)")
     else:
+        # 同時に動かせる台数はクォータで決まる。MAX_AGENTS (0 なら制限なし) は、さらに絞りたいときだけ使う
         fit = quota // int(C["MEMORY_MIB"])
-        mark = "ok" if fit >= int(C["MAX_AGENTS"]) else "!!"
+        max_agents = int(C["MAX_AGENTS"])
+        mark = "ok" if fit >= max(max_agents, 1) else "!!"
+        limit = f"、MAX_AGENTS={max_agents}" if max_agents else ""
         print(f"  {mark}   MicroVM のメモリ上限 {quota // 1024}GB → {int(C['MEMORY_MIB']) // 1024}GB の VM を同時に {fit} 台まで"
-              f" (MAX_AGENTS={C['MAX_AGENTS']})")
-        if fit < int(C["MAX_AGENTS"]):
-            print(f"         MAX_AGENTS 台を動かすには Service Quotas で {MEMORY_QUOTA_CODE} を"
-                  f" {int(C['MAX_AGENTS']) * int(C['MEMORY_MIB']) // 1024}GB 以上に引き上げてください")
+              f"{limit}")
+        if fit < max(max_agents, 1):
+            want = max(max_agents, 1)
+            print(f"         {want} 台を動かすには、MEMORY_MIB を小さくするか、Service Quotas で {MEMORY_QUOTA_CODE} を"
+                  f" {want * int(C['MEMORY_MIB']) // 1024}GB 以上に引き上げてください")
     key = expand_path(C["SSH_PUBLIC_KEY_FILE"])
     if key and key.exists():
         print(f"  ok   SSH 公開鍵: {key}")
@@ -774,12 +783,20 @@ def credential_findings(arn):
 
 def cmd_infra(args):
     if args.action == "deploy":
+        template = infra_template()
+        declared = template_parameters(template)
+        params = [x for x in infra_parameters() if x.split("=", 1)[0] in declared]
+        if C["INFRA_TEMPLATE"] == "minimal":
+            log("最小構成のテンプレートで作成します (キープアライブ・毎晩の自動停止・予算アラートは作りません)")
+            ignored = [k for k in ("BUDGET_EMAIL", "NIGHTLY_STOP_TIME") if C[k]]
+            if ignored:
+                log(f"{' / '.join(ignored)} は最小構成では使いません。使うには INFRA_TEMPLATE=full にしてください")
         prepare_new_stack()
         rc = aws_interactive(
             "cloudformation", "deploy",
-            "--template-file", str(ROOT / "infra" / "cloudformation.yaml"),
+            "--template-file", str(template),
             "--stack-name", C["STACK_NAME"],
-            "--parameter-overrides", *infra_parameters(),
+            "--parameter-overrides", *params,
             "--capabilities", "CAPABILITY_NAMED_IAM", "--no-fail-on-empty-changeset")
         if rc != 0:
             return rc
@@ -853,6 +870,27 @@ def report_retained(resources):
     others = [x for x in resources if x.get("ResourceType") not in ("AWS::Lambda::Function", "AWS::Lambda::Permission")]
     if others:
         print("  上記のそれ以外のリソースは、AWS コンソールで確認して削除してください", file=sys.stderr)
+
+
+def infra_template():
+    name = C["INFRA_TEMPLATE"]
+    if name not in INFRA_TEMPLATES:
+        die(f"INFRA_TEMPLATE は {' | '.join(INFRA_TEMPLATES)} のいずれかを指定してください: {name}")
+    return ROOT / "infra" / INFRA_TEMPLATES[name]
+
+
+def template_parameters(path):
+    """テンプレートの Parameters に書かれた名前。宣言していないパラメータは渡さない。"""
+    import re
+    names, inside = set(), False
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if re.match(r"^\S", line):
+            inside = line.startswith("Parameters:")
+        elif inside:
+            m = re.match(r"^  ([A-Za-z0-9]+):", line)
+            if m:
+                names.add(m.group(1))
+    return names
 
 
 def infra_parameters():
@@ -1247,8 +1285,8 @@ def launch(name, payload, idle, max_duration):
     if is_active(name):
         die(f"セッション {name} は既に起動しています")
     running = len(active_names())
-    if running >= int(C["MAX_AGENTS"]):
-        die(f"起動中のセッションが上限 ({C['MAX_AGENTS']}) に達しています")
+    if int(C["MAX_AGENTS"]) and running >= int(C["MAX_AGENTS"]):
+        die(f"起動中のセッションが MAX_AGENTS ({C['MAX_AGENTS']}) に達しています")
     check_memory_quota(running, 1)
     arn = find_image_arn() or die(f"イメージ {C['IMAGE_NAME']} がありません。先に mvm image build を実行してください")
     ver = lmv("get-microvm-image", "--image-identifier", arn).get("latestActiveImageVersion")
@@ -1300,8 +1338,10 @@ def cmd_up(args):
 
 
 def cmd_fleet(args):
-    if args.count > int(C["MAX_AGENTS"]):
-        die(f"count は MAX_AGENTS ({C['MAX_AGENTS']}) 以下にしてください")
+    if args.count < 1:
+        die("台数は 1 以上にしてください")
+    if int(C["MAX_AGENTS"]) and args.count > int(C["MAX_AGENTS"]):
+        die(f"台数は MAX_AGENTS ({C['MAX_AGENTS']}) 以下にしてください")
     prompts = []
     if args.prompts_file:
         prompts = expand_path(args.prompts_file).read_text(encoding="utf-8").splitlines()
@@ -1699,7 +1739,7 @@ def build_parser():
     x.add_argument("name")
     add_up_options(x)
     x.set_defaults(func=cmd_up)
-    x = sub.add_parser("fleet", help="<prefix>-01..NN をまとめて起動 (MAX_AGENTS まで)")
+    x = sub.add_parser("fleet", help="<prefix>-01..NN をまとめて起動 (MicroVM メモリのクォータの範囲内で)")
     x.add_argument("count", type=int)
     x.add_argument("--prefix", default="agent")
     x.add_argument("--prompts-file", help="1 行に 1 つ、各エージェントへの最初の指示")

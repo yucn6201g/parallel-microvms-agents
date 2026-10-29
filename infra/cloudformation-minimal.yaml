@@ -1,0 +1,385 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  parallel-microvms-agents (最小構成) - Lambda MicroVMs 上で Claude Code / Codex を動かすのに必要なリソースだけを作る
+  (イメージ資材/ワークスペース保存用 S3、ビルドロール、実行ロール、ログ、ローカル操作用ポリシー)。
+  キープアライブ、毎晩の自動停止、予算アラートは含まない (必要なら infra/cloudformation.yaml を使う)
+
+# このテンプレートの Resources と Outputs は、infra/cloudformation.yaml の同名のものと同じ内容にしている
+# (tests/test_templates.py が確かめる)。共通部分を変えるときは両方を直すこと
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: pmva
+    AllowedPattern: "[a-z0-9-]+"
+    Description: リソース名と Secrets Manager のシークレット名に付けるプレフィックス
+  EnableBedrock:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: 実行ロールに Amazon Bedrock の呼び出し権限を付与するか (Claude Code の Bedrock 認証で使用)
+  WorkspaceSnapshotRetentionDays:
+    Type: Number
+    Default: 7
+    MinValue: 1
+    Description: ワークスペーススナップショット履歴 (workspace-history/) の保持日数。workspaces/<name>/latest は対象外
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365]
+
+Conditions:
+  BedrockEnabled: !Equals [!Ref EnableBedrock, "true"]
+
+Resources:
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${Prefix}-${AWS::AccountId}-${AWS::Region}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-workspace-snapshot-history
+            Status: Enabled
+            Prefix: workspace-history/
+            ExpirationInDays: !Ref WorkspaceSnapshotRetentionDays
+          - Id: expire-stale-status
+            Status: Enabled
+            Prefix: status/
+            ExpirationInDays: 2
+          - Id: expire-old-image-artifacts
+            Status: Enabled
+            Prefix: images/
+            ExpirationInDays: 30
+
+  ArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt ArtifactBucket.Arn
+              - !Sub "${ArtifactBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  MicrovmLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda-microvms/${Prefix}"
+      RetentionInDays: !Ref LogRetentionDays
+
+  # イメージビルド時に Lambda が引き受けるロール (S3 の資材読み取りとビルドログのみ)
+  BuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Prefix}-microvm-build"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: build
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadCodeArtifact
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "${ArtifactBucket.Arn}/images/*"
+              - Sid: WriteBuildLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda-microvms/*"
+
+  # 実行中の MicroVM が IMDSv2 経由で引き受けるロール。
+  # VM 内のエージェントが自分の使わない認証情報を読めないよう、使うエージェントごとにロールを分ける
+  # (mvm up が --agent / 認証方式に合わせて選ぶ)。シークレットは名前の接頭辞で区別する:
+  #   Claude: <prefix>/anthropic-*, <prefix>/claude-*   Codex: <prefix>/openai-*, <prefix>/codex-*
+  #   共通:   <prefix>/github-*, <prefix>/notify-*
+  RuntimePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${Prefix}-microvm-runtime"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: Logs
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda-microvms/*"
+          - Sid: CommonSecrets
+            Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource:
+              - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}/github-*"
+              - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}/notify-*"
+          - Sid: WorkspaceSnapshots
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+            Resource:
+              - !Sub "${ArtifactBucket.Arn}/workspaces/*"
+              - !Sub "${ArtifactBucket.Arn}/workspace-history/*"
+              - !Sub "${ArtifactBucket.Arn}/status/*"
+          - Sid: ListWorkspaceSnapshots
+            Effect: Allow
+            Action: s3:ListBucket
+            Resource: !GetAtt ArtifactBucket.Arn
+            Condition:
+              StringLike:
+                s3:prefix:
+                  - "workspaces/*"
+                  - "workspace-history/*"
+
+  # Claude Code と Codex の両方
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Prefix}-microvm-execution"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: agent-secrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}/anthropic-*"
+                  - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}/claude-*"
+                  - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}/openai-*"
+                  - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}/codex-*"
+      ManagedPolicyArns: !If
+        - BedrockEnabled
+        - [!Ref RuntimePolicy, !Ref BedrockInvokePolicy]
+        - [!Ref RuntimePolicy]
+
+  ExecutionRoleClaude:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Prefix}-microvm-execution-claude"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: claude-secrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}/anthropic-*"
+                  - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}/claude-*"
+      ManagedPolicyArns: !If
+        - BedrockEnabled
+        - [!Ref RuntimePolicy, !Ref BedrockInvokePolicy]
+        - [!Ref RuntimePolicy]
+
+  ExecutionRoleCodex:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Prefix}-microvm-execution-codex"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: codex-secrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}/openai-*"
+                  - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}/codex-*"
+      ManagedPolicyArns:
+        - !Ref RuntimePolicy
+
+  # エージェントなし (--agent none)
+  ExecutionRoleNone:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Prefix}-microvm-execution-none"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      ManagedPolicyArns:
+        - !Ref RuntimePolicy
+
+  BedrockInvokePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: BedrockEnabled
+    Properties:
+      ManagedPolicyName: !Sub "${Prefix}-bedrock-invoke"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: InvokeClaudeOnBedrock
+            Effect: Allow
+            Action:
+              - bedrock:InvokeModel
+              - bedrock:InvokeModelWithResponseStream
+              - bedrock:ListInferenceProfiles
+              - bedrock:GetInferenceProfile
+              - bedrock:ListFoundationModels
+            Resource: "*"
+
+  # ローカル PC で mvm を実行する IAM ユーザー / ロールにアタッチするポリシー
+  OperatorPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${Prefix}-operator"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ManageMicrovms
+            Effect: Allow
+            Action:
+              - lambda:*Microvm*
+              - lambda:ListTags
+              - lambda:TagResource
+              - lambda:UntagResource
+            Resource: "*"
+          - Sid: PassManagedNetworkConnectors
+            Effect: Allow
+            Action: lambda:PassNetworkConnector
+            Resource:
+              - !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:aws:network-connector:aws-network-connector:*"
+              - !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:network-connector:*"
+          - Sid: PassMicrovmRoles
+            Effect: Allow
+            Action: iam:PassRole
+            Resource:
+              - !GetAtt BuildRole.Arn
+              - !GetAtt ExecutionRole.Arn
+              - !GetAtt ExecutionRoleClaude.Arn
+              - !GetAtt ExecutionRoleCodex.Arn
+              - !GetAtt ExecutionRoleNone.Arn
+            Condition:
+              StringEquals:
+                iam:PassedToService: lambda.amazonaws.com
+          - Sid: Artifacts
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:ListBucket
+            Resource:
+              - !GetAtt ArtifactBucket.Arn
+              - !Sub "${ArtifactBucket.Arn}/*"
+          - Sid: ManageAgentSecrets
+            Effect: Allow
+            Action:
+              - secretsmanager:CreateSecret
+              - secretsmanager:PutSecretValue
+              - secretsmanager:DescribeSecret
+              - secretsmanager:DeleteSecret
+              - secretsmanager:TagResource
+            Resource: !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}/*"
+          - Sid: ListSecrets
+            Effect: Allow
+            Action: secretsmanager:ListSecrets
+            Resource: "*"
+          - Sid: ReadMicrovmQuota
+            Effect: Allow
+            Action: servicequotas:GetServiceQuota
+            Resource: "*"
+          - Sid: ReadActualCost  # mvm cost --actual (アカウント全体の金額が見える点に注意)
+            Effect: Allow
+            Action: ce:GetCostAndUsage
+            Resource: "*"
+          - Sid: ReadLogs
+            Effect: Allow
+            Action:
+              - logs:DescribeLogStreams
+              - logs:GetLogEvents
+              - logs:FilterLogEvents
+              - logs:StartLiveTail
+            Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda-microvms/*"
+          - Sid: ReadStack
+            Effect: Allow
+            Action: cloudformation:DescribeStacks
+            Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*"
+
+Outputs:
+  ArtifactBucketName:
+    Value: !Ref ArtifactBucket
+  BuildRoleArn:
+    Value: !GetAtt BuildRole.Arn
+  ExecutionRoleArn:
+    Value: !GetAtt ExecutionRole.Arn
+  ExecutionRoleClaudeArn:
+    Value: !GetAtt ExecutionRoleClaude.Arn
+  ExecutionRoleCodexArn:
+    Value: !GetAtt ExecutionRoleCodex.Arn
+  ExecutionRoleNoneArn:
+    Value: !GetAtt ExecutionRoleNone.Arn
+  LogGroupName:
+    Value: !Ref MicrovmLogGroup
+  OperatorPolicyArn:
+    Value: !Ref OperatorPolicy
+  SecretPrefix:
+    Value: !Sub "${Prefix}/"

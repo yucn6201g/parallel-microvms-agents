@@ -30,7 +30,7 @@ Claude Code / Codex を AWS Lambda MicroVMs 上で並列に動かし、手元の
 ```bash
 python -m unittest discover -s tests -v
 shellcheck -S warning bin/mvm scripts/install.sh image/bootstrap.sh image/snapshot.sh image/notify.sh image/agent-attach
-cfn-lint infra/cloudformation.yaml
+cfn-lint infra/cloudformation.yaml infra/cloudformation-minimal.yaml
 python -m py_compile bin/mvm.py image/supervisor.py scripts/estimate_cost.py tests/*.py
 ```
 

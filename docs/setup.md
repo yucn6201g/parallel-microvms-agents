@@ -80,7 +80,7 @@ cp config.example.env config.env           # macOS
 |---|---|---|
 | `AWS_REGION` | `ap-northeast-1` | Lambda MicroVMs 対応リージョン |
 | `MEMORY_MIB` | `4096` | 1 台のメモリ (= 2 vCPU)。重いビルドなら 8192 |
-| `MAX_AGENTS` | `10` | 同時起動数の上限 |
+| `MAX_AGENTS` | `0` | 同時起動数の上限。`0` ならクォータで決まる台数まで |
 | `IDLE_MAX_SECONDS` | `1800` | 接続が無いままこの秒数が経つとサスペンド |
 | `DEFAULT_CLAUDE_AUTH` / `DEFAULT_CODEX_AUTH` | `oauth-token` / `api-key` | 既定の認証方式 ([auth.md](auth.md)) |
 | `DEFAULT_CLAUDE_ARGS` | 空 | 例: `--dangerously-skip-permissions` (VM は隔離環境なので許可確認を省略してもよい) |
@@ -96,24 +96,24 @@ mvm doctor
 `list-managed-microvm-images` が成功し、`arn:aws:lambda:ap-northeast-1:aws:microvm-image:al2023-1` のようなベースイメージが表示されれば OK です。
 ベースイメージの ARN が異なる場合は、`config.env` の `BASE_IMAGE_ARN` に設定します。
 
-### クォータの確認 (並列で使う場合は必須)
+### クォータの確認
 
-既定のクォータでは 10 台を同時に動かせません (PoC で確認)。Service Quotas コンソールの「AWS Lambda」で次を確認し、足りなければ引き上げを申請してください。
+同時に動かせる MicroVM の台数は、AWS アカウントのクォータで決まります。`mvm` はこの範囲内で動かす前提で作っています。
 
-| クォータ | 既定 (PoC のアカウント) | 10 台 × 4GB に必要な値 |
+| クォータ | PoC のアカウント | 意味 |
 |---|---|---|
-| Max allocated ARM_64 MicroVM memory (L-CD1C0CC4) | 8GB | 40GB 以上 |
+| Max allocated ARM_64 MicroVM memory (L-CD1C0CC4) | 8GB | 同時に起動している VM のメモリの合計。8GB なら 4GB の VM が 2 台 (2GB なら 4 台) |
 | Rate of RunMicrovm API requests (L-535CA9B6) | 1 回/秒 | そのままで可 (`mvm fleet` は 1 台ずつ順に起動する) |
 
 ```bash
 aws service-quotas get-service-quota --service-code lambda --quota-code L-CD1C0CC4 --region ap-northeast-1
 ```
 
-`mvm doctor` でも「同時に何台まで起動できるか」を表示します。上限を超える `mvm up` / `mvm fleet` は、1 台も起動する前に止まります。
+`mvm doctor` でも「同時に何台まで起動できるか」を表示します。上限を超える `mvm up` / `mvm fleet` は、1 台も起動する前に止まります。1 台の大きさ (`MEMORY_MIB`) を小さくすると、同じクォータでより多く動かせます。
 
-**引き上げの申請方法 (PoC で確認)**: PoC のアカウントでは、現在の値 (8GB) が AWS の既定値 (2048) より低く抑えられていました。この状態では Service Quotas の API / コンソールからの申請が「既定値より大きい値を指定してください」と拒否されます。その場合は AWS サポートセンターで「Service limit increase」のケースを作成し、次のように依頼してください (ベーシックサポートでも作成できます)。
+**もっと同時に動かしたい場合 (任意)**: クォータの引き上げを申請します。PoC で確認した申請方法は次のとおりです。 PoC のアカウントでは、現在の値 (8GB) が AWS の既定値 (2048) より低く抑えられていました。この状態では Service Quotas の API / コンソールからの申請が「既定値より大きい値を指定してください」と拒否されます。その場合は AWS サポートセンターで「Service limit increase」のケースを作成し、次のように依頼してください (ベーシックサポートでも作成できます)。
 
-> サービス: AWS Lambda (Lambda MicroVMs) / リージョン: アジアパシフィック (東京) / クォータ: Max allocated ARM_64 MicroVM memory (L-CD1C0CC4) / 希望値: 40 GB / 用途: AI コーディングエージェントを 4GB の MicroVM 10 台で並列実行するため
+> サービス: AWS Lambda (Lambda MicroVMs) / リージョン: アジアパシフィック (東京) / クォータ: Max allocated ARM_64 MicroVM memory (L-CD1C0CC4) / 希望値: <台数 × 1 台のメモリ> GB / 用途: AI コーディングエージェントを MicroVM で並列実行するため
 
 ## 3. AWS リソースの作成
 
@@ -123,7 +123,16 @@ aws service-quotas get-service-quota --service-code lambda --quota-code L-CD1C0C
 mvm infra deploy
 ```
 
-作成されるもの:
+テンプレートは 2 種類あり、`config.env` の `INFRA_TEMPLATE` で選びます。
+
+| `INFRA_TEMPLATE` | テンプレート | 作るもの |
+|---|---|---|
+| `full` (既定) | `infra/cloudformation.yaml` | 下の一覧のすべて |
+| `minimal` | `infra/cloudformation-minimal.yaml` | 動かすのに必要なものだけ (S3、IAM ロール、ログ、操作用ポリシー、Bedrock の権限)。キープアライブ、毎晩の自動停止、予算アラートは作らない |
+
+最小構成では、手元から接続していない VM は作業中でも `IDLE_MAX_SECONDS` (既定 30 分) で一時停止します。PC を閉じてエージェントに任せたいときは `full` にするか、`mvm up <name> --idle off` で起動してください (止め忘れると寿命の 8 時間まで課金されます)。後から切り替えるときは、`INFRA_TEMPLATE` を変えて `mvm infra deploy` をやり直します。
+
+作成されるもの (`full` の場合):
 
 - S3 バケット `pmva-<account>-<region>`: イメージ資材 (`images/`)、ワークスペース (`workspaces/`、`workspace-history/`)
 - IAM ロール `pmva-microvm-build` (イメージビルド用)、`pmva-microvm-execution*` (MicroVM 実行時。使うエージェントの組み合わせごとに 4 つ。[architecture.md](architecture.md#セキュリティ))
@@ -213,18 +222,20 @@ mvm stop test-01
 
 [poc-checklist.md](poc-checklist.md) の項目もこの段階で確認してください。
 
-## 7. 並列実行 (最大 10 本)
+## 7. 並列実行
+
+同時に動かせる台数は MicroVM メモリのクォータで決まります (`mvm doctor` の「同時に何台まで」)。例は、PoC のアカウントと同じ 2 台の場合です。
 
 ```bash
-# 同じ設定で 10 台。ブランチは pmva/agent-01 〜 pmva/agent-10
-mvm fleet 10 --repo https://github.com/<owner>/<repo>.git
+# 同じ設定で 2 台。ブランチは pmva/agent-01、pmva/agent-02
+mvm fleet 2 --repo https://github.com/<owner>/<repo>.git
 
 # 1 行に 1 つのタスクを書いたファイルを渡して、各エージェントに別々の指示を与える
-mvm fleet 5 --prefix feat --repo https://github.com/<owner>/<repo>.git --prompts-file tasks.txt
+mvm fleet 2 --prefix feat --repo https://github.com/<owner>/<repo>.git --prompts-file tasks.txt
 
-# Claude Code と Codex を混在させる (合計で MAX_AGENTS まで)
-mvm fleet 6 --prefix cc --agent claude
-mvm fleet 4 --prefix cx --agent codex --codex-auth chatgpt
+# Claude Code と Codex を 1 台ずつ (合計でクォータの台数まで)
+mvm up cc-01 --agent claude
+mvm up cx-01 --agent codex --codex-auth chatgpt
 
 mvm watch          # 全台の画面末尾を 60 秒ごとに表示
 ```
@@ -251,7 +262,7 @@ MicroVM は、エンドポイントへの受信通信が `IDLE_MAX_SECONDS` (既
 2. Lambda 関数 `pmva-keepalive` が `KEEPALIVE_RATE_MINUTES` (既定 5 分) ごとに動き、最後の作業から `KEEPALIVE_ACTIVE_SECONDS` (既定 900 秒) 以内の VM にだけ `/healthz` を送る
 3. 作業が終わった VM には何も送らないので、そのうち一時停止する (既定では作業終了から 15〜45 分ほど)
 
-設定は `config.env` で変えられます (変更後に `mvm infra deploy`)。`KEEPALIVE_RATE_MINUTES` は `IDLE_MAX_SECONDS` より十分短くしてください。`KEEPALIVE_RATE_MINUTES=0` で無効になります。費用は Lambda がほぼ無料枠内、S3 への書き込みが 10 台 × 8 時間 × 22 日で月 $0.5 程度です。
+設定は `config.env` で変えられます (変更後に `mvm infra deploy`)。`KEEPALIVE_RATE_MINUTES` は `IDLE_MAX_SECONDS` より十分短くしてください。`KEEPALIVE_RATE_MINUTES=0` で無効になります。費用は Lambda がほぼ無料枠内、S3 への書き込みが 2 台 × 8 時間 × 22 日で月 $0.1 程度です。キープアライブは `INFRA_TEMPLATE=full` のときだけ作ります。
 
 ## 毎晩の自動停止 (止め忘れ防止)
 
@@ -327,7 +338,7 @@ VM の中で使えるコマンド:
 | bootstrap が `failed` | シークレット名・登録の有無、実行ロールの権限を確認 |
 | エージェントが止まっている | アイドルサスペンドされていた可能性。通信すると再開する。キープアライブが無効になっていないか (`KEEPALIVE_RATE_MINUTES`) も確認 |
 | SSH が `Broken pipe` で切れる | 途中の通信経路 (社内プロキシなど) が長時間の接続を切ることがある。PoC での切断は、すべてクラウドセッションの送信用中継が再起動したとき (WebSocket の close コード 1012 `server_draining`) で、AWS 側の切断ではなかった。`mvm ssh <name>` (コマンドなし) は自動で再接続する。原因を調べるときは `PMVA_DEBUG=<ファイル>` を設定すると切断理由を記録する |
-| `up` で「メモリ上限を超えます」 | `mvm doctor` でクォータと起動できる台数を確認する。足りなければ[引き上げを申請](#クォータの確認-並列で使う場合は必須)する |
+| `up` で「メモリ上限を超えます」 | `mvm doctor` でクォータと起動できる台数を確認する。台数を増やしたいときは、使っていない VM を止めるか、[引き上げを申請](#クォータの確認)する |
 | `infra delete` で「削除できなかったため、スタックから外して残しました」と出る | 権限の不足などで消せなかったリソースだけを残し、残りは削除している。原因を解消してから、表示された `aws lambda delete-function ...` を実行する (残したままだと次の `infra deploy` が「前回の削除で残った Lambda 関数があります」で止まる) |
 | `mvm ls` の状態が `UNKNOWN` | AWS から状態を取得できなかった (権限・通信)。終了扱いにはしていないので、原因を解消すれば元に戻る。`PMVA_DEBUG=<ファイル>` でエラーを記録できる |
 | `mvm renew` が「保存に失敗したので、終了せずに止めました」 | 作業内容を失わないよう VM を残している。`mvm ssh` で入って原因 (ディスク不足など) を確認するか、保存せずに作り直すなら `mvm stop <name> --no-save` → `mvm up <name> --restore latest` |

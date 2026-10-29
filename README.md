@@ -1,6 +1,6 @@
 # parallel-microvms-agents
 
-Claude Code / Codex を **AWS Lambda MicroVMs** 上で最大 10 本並列に動かし、手元の PC は「画面を見る・指示を出す」だけにするための資材一式です。
+Claude Code / Codex を **AWS Lambda MicroVMs** 上で並列に動かし (台数は AWS アカウントのクォータの範囲内)、手元の PC は「画面を見る・指示を出す」だけにするための資材一式です。
 ビルド・テスト・エージェント本体はすべてクラウド側の MicroVM で実行されるので、手元 PC の CPU 使用率と発熱を抑えられます。
 
 ```mermaid
@@ -18,7 +18,7 @@ flowchart LR
     end
     sm[("Secrets Manager<br/>認証情報")]
     s3[("S3<br/>ワークスペース")]
-    more["agent-02 〜 agent-10<br/>同じ構成"]
+    more["agent-02 〜<br/>同じ構成 (クォータの範囲で)"]
   end
   term --- mvm
   mvm -- "HTTPS / WSS<br/>短命トークン" --> sup
@@ -34,7 +34,7 @@ flowchart LR
 
 | 要件 | 実現方法 |
 |---|---|
-| 最大 10 エージェントの並列実行 | `mvm fleet 10` / `mvm up <name>`。`MAX_AGENTS=10` で上限を制御 |
+| 複数エージェントの並列実行 | `mvm fleet <台数>` / `mvm up <name>`。同時に動かせる台数は MicroVM メモリのクォータで決まり、超える前に止める (`mvm doctor` で確認) |
 | 手元 PC から画面確認 | `mvm peek`（画面末尾を取得）、`mvm watch`（全台を一覧表示）、`mvm ssh`（tmux にアタッチ） |
 | 手元 PC から指示 | `mvm send <name> "指示"`（接続せずに入力）、または `mvm ssh` で直接操作 |
 | 多様な認証方式 | Claude Code: サブスクリプション (OAuth トークン) / API キー / Amazon Bedrock / LLM ゲートウェイ / 対話ログイン<br>Codex: API キー / ChatGPT ログイン (auth.json) / 対話ログイン |
@@ -106,7 +106,8 @@ bin/mvm.py                  ローカル操作 CLI 本体 (Python 標準ライ�
 bin/mvm                     macOS / Linux 用の起動スクリプト
 bin/mvm.cmd                 Windows 用の起動スクリプト (PowerShell / コマンドプロンプト)
 config.example.env          設定テンプレート
-infra/cloudformation.yaml   S3、ビルドロール、実行ロール、ログ、操作用 IAM ポリシー
+infra/cloudformation.yaml   S3、ビルドロール、実行ロール、ログ、操作用 IAM ポリシー、キープアライブ、毎晩の自動停止、予算アラート
+infra/cloudformation-minimal.yaml  最小構成 (動かすのに必要なものだけ。INFRA_TEMPLATE=minimal)
 image/                      MicroVM イメージ (zip 化して CreateMicrovmImage に渡す)
   Dockerfile                AL2023 + Node.js + Claude Code + Codex + tmux + sshd + websocat
   supervisor.py             ライフサイクルフック (:9000) と状態/操作 API (:8080)
@@ -153,7 +154,7 @@ AI エージェントや自動化ツールに AWS を操作させるので、ア
 ## 現状と注意点
 
 - Lambda MicroVMs は 2026 年 6 月に提供開始されたサービスです。2026-10-28 に東京リージョンの実際の AWS アカウントで、1 台での PoC (イメージのビルド、起動、peek / send、SSH / シェル接続、サスペンドと自動レジューム、保存と復元、Bedrock 認証の経路) を実施しました。結果と未確認の項目は [docs/poc-checklist.md](docs/poc-checklist.md) にまとめています。
-- **10 台並列にはクォータの引き上げが必要です**。PoC のアカウントでは `Max allocated ARM_64 MicroVM memory` が 8GB で、4GB の VM は同時に 2 台までしか起動できませんでした。40GB 以上への引き上げを AWS サポートに申請してください。
+- 同時に動かせる台数は、AWS アカウントの MicroVM メモリのクォータ (`Max allocated ARM_64 MicroVM memory`) で決まります。PoC のアカウントでは 8GB で、4GB の VM が同時に 2 台 (2GB の VM なら 4 台) でした。`mvm doctor` で確認できます。
 - VM 内のエージェント (`agent` ユーザー) は sudo を使えません (コンテナに no_new_privs が付いているため)。root が必要な作業は `mvm shell` (root で入る) で行うか、必要なパッケージを `image/Dockerfile` に追加してください。
 - 手元 CLI は GitHub Actions で Windows / macOS / Linux それぞれについて自動テストしています (AWS CLI はスタブ、MicroVM 側はローカルのテストサーバーで代用)。端末の表示や VS Code など、目で見て確かめる項目は [docs/poc-checklist.md](docs/poc-checklist.md) の「C2」に残っています。
 - MicroVM の寿命は最大 8 時間です。成果物は git に push するか、`mvm save` / 定期スナップショットで S3 に残してください。
