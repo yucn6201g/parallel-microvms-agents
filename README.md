@@ -38,6 +38,9 @@ Claude Code / Codex を **AWS Lambda MicroVMs** 上で最大 10 本並列に動�
 
 ## クイックスタート
 
+**初めての人は [docs/quickstart.md](docs/quickstart.md) を上から順に進めてください。** AWS アカウントの守り方から 1 台目のエージェントを動かして止めるまでを、Windows / macOS の両方について 9 つの手順にまとめています。
+以下は流れの要約です。
+
 手元 PC に Python 3.9 以上と AWS CLI v2 を入れてから始めます ([docs/setup.md](docs/setup.md#0-手元-pc-の準備-windows--macos))。
 
 インストールスクリプトが前提ツールの確認、`config.env` の作成、`mvm` エイリアスの登録を行います (新しいターミナルを開くと `mvm` で呼べます)。
@@ -52,11 +55,11 @@ powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 scripts/install.sh
 ```
 
-ここから先は両 OS 共通です。
+ここから先は両 OS 共通です。`infra deploy` だけを管理者で行い、その後は `pmva-operator` ポリシーだけを付けた IAM ユーザーに切り替えます ([手順](docs/quickstart.md#5-普段使う-iam-ユーザーに切り替える))。
 
 ```bash
 mvm doctor                        # 前提ツール・AWS 認証・リージョン対応を確認
-mvm infra deploy                  # S3 / IAM ロール / ログを作成
+mvm infra deploy                  # (管理者で) S3 / IAM ロール / ログを作成
 claude setup-token                # (サブスクリプションの場合) 長期トークンを発行
 mvm secret set claude-oauth-token # 発行したトークンを Secrets Manager に登録
 mvm secret set github-token       # clone / push 用の GitHub トークン
@@ -88,6 +91,7 @@ tests/                      自動テスト (python -m unittest discover -s test
 .github/workflows/ci.yml    Windows / macOS / Linux でテストと lint を実行する CI
 .github/workflows/agent-versions.yml  Claude Code / Codex の新しい版を毎週確認し、Issue で知らせる
 docs/
+  quickstart.md             はじめての人向けの最短手順
   architecture.md           設計と判断理由
   setup.md                  構築手順と日々の運用
   auth.md                   認証方式ごとの設定方法
