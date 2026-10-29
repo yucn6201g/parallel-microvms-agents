@@ -1,6 +1,7 @@
 # 開発者向けガイド
 
 このリポジトリ自体を変更する人向けのページです。構成、テストの動かし方、変更するときの注意をまとめます。設計の背景は [architecture.md](architecture.md) を参照してください。
+Claude Code / Codex などのコーディングエージェントで変更するときのルールは、リポジトリ直下の [AGENTS.md](../AGENTS.md) にまとめています (Claude Code は `CLAUDE.md` から読み込みます)。
 
 ## 構成
 
@@ -67,6 +68,7 @@ python -m py_compile bin/mvm.py image/supervisor.py scripts/estimate_cost.py tes
 - lint: shellcheck、cfn-lint、Python の構文チェック
 
 `.github/workflows/agent-versions.yml` は毎週月曜に Claude Code / Codex の新しい版を確認し、あれば Issue を立てます (Actions タブから手動でも実行できます)。
+`.github/dependabot.yml` は、CI で使う GitHub Actions の部品 (`actions/checkout` など) に新しい版が出ると、更新のプルリクエストを作ります。
 
 ## 変更するときの注意
 
@@ -84,5 +86,22 @@ python -m py_compile bin/mvm.py image/supervisor.py scripts/estimate_cost.py tes
 
 1. ブランチを作って変更する
 2. テストと lint を手元で通す
-3. プルリクエストを作る。CI がすべて通ったら main にマージする
-4. MicroVM 内の動きを変えた場合は、マージの前に実機で確認する
+3. 利用者に見える変更なら `CHANGELOG.md` の「未リリース」に書く
+4. プルリクエストを作る。CI がすべて通ったら main にマージする
+5. MicroVM 内の動きを変えた場合は、マージの前に実機で確認する
+
+## リリース
+
+バージョンは [セマンティック バージョニング](https://semver.org/lang/ja/) で付けます (互換性のない変更で 1 つ目、機能の追加で 2 つ目、修正だけなら 3 つ目の数字を上げる)。
+
+1. `CHANGELOG.md` の「未リリース」の内容を、新しいバージョンの見出し (`## [0.2.0] - 日付`) の下に移す
+2. その変更を main にマージする
+3. main の最新のコミットにタグを付けて push する
+
+```bash
+git checkout main && git pull
+git tag -a v0.2.0 -m "v0.2.0"
+git push origin v0.2.0
+```
+
+GitHub の「Releases」で、そのタグからリリースを作り、`CHANGELOG.md` の該当部分を貼り付けると、変更点が一覧で見えるようになります。
