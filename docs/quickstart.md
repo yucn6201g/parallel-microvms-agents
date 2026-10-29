@@ -185,6 +185,8 @@ mvm cost --actual --days 7
 
 ## 次にやること
 
+- 場面別の使い方 (並列実行、PC を閉じて任せる、8 時間を超える、費用を抑える): [usage.md](usage.md)
+- 全コマンドと設定項目: [commands.md](commands.md)、[config.md](config.md)
 - 何本も並べて動かす: `mvm fleet 3 --repo ...` ([setup.md の 7](setup.md#7-並列実行-最大-10-本))。10 本並べるにはクォータの引き上げが必要
 - VS Code から MicroVM の中のファイルを開く: `mvm ssh-config --install` してから Remote-SSH で `pmva-test-01` に接続
 - 応答が終わったら Slack などに通知する: [setup.md の通知](setup.md#完了入力待ちの通知)

@@ -1,6 +1,6 @@
 # 構築手順と運用
 
-初めて使う場合は、まず [quickstart.md](quickstart.md) (最短手順) で 1 台目を動かしてください。このページは各手順の詳細と、日々の運用・トラブルシューティングをまとめたものです。
+初めて使う場合は、まず [quickstart.md](quickstart.md) (最短手順) で 1 台目を動かしてください。このページは各手順の詳細と、日々の運用・トラブルシューティングをまとめたものです。コマンドと設定項目の一覧は [commands.md](commands.md) と [config.md](config.md)、場面別の使い方は [usage.md](usage.md) にあります。
 
 ## 0. 手元 PC の準備 (Windows / macOS)
 
