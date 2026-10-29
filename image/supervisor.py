@@ -317,7 +317,10 @@ class ApiHandler(Handler):
         if url.path == "/healthz":
             return self.reply(200, {"ok": True})
         if url.path == "/status":
-            lines = int(parse_qs(url.query).get("lines", ["20"])[0])
+            try:
+                lines = int(parse_qs(url.query).get("lines", ["20"])[0])
+            except ValueError:
+                return self.reply(400, {"error": "lines must be an integer"})
             return self.reply(200, status(max(0, min(lines, 500))))
         return self.reply(404, {"error": "not found"})
 

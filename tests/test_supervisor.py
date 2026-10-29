@@ -71,26 +71,37 @@ class SupervisorTest(unittest.TestCase):
         # エージェントのスタブ (--version はすぐ終わり、それ以外は待ち続ける)
         for c in ("claude", "codex"):
             p = bindir / c
-            p.write_text(f'#!/bin/sh\n[ "$1" = --version ] && echo "{c} stub" && exit 0\necho "{c} started: $*"\nexec sleep 600\n')
+            p.write_text(f'#!/bin/sh\n[ "$1" = --version ] && echo "{c} stub" && exit 0\n'
+                         # codex login --with-api-key は標準入力のキーを記録して終わる
+                         f'[ "$1" = login ] && cat > "$HOME/.{c}-login-stub" && exit 0\n'
+                         f'echo "{c} started: $*"\nexec sleep 600\n')
             p.chmod(0o755)
-        # aws のスタブ: s3 cp の内容を保存し、シークレットは Webhook の URL を返す
+        # aws のスタブ: s3 cp の内容を保存し、シークレットは STUB_SECRETS/<名前の / を _ に> の中身を返す
         self.s3_out = t / "s3"
         self.s3_out.mkdir()
+        self.secrets = t / "secrets"
+        self.secrets.mkdir()
         aws = bindir / "aws"
         aws.write_text('#!/bin/sh\n'
                        'case "$1 $2" in\n'
-                       '  "s3 cp") cat > "$STUB_S3_OUT/$(basename "$5")" ;;\n'
-                       '  "secretsmanager get-secret-value") echo "$STUB_WEBHOOK" ;;\n'
+                       '  "s3 cp") if [ "$4" = - ]; then cat > "$STUB_S3_OUT/$(basename "$5")"; '
+                       'else cp "$4" "$STUB_S3_OUT/$(basename "$5")"; fi ;;\n'
+                       '  "secretsmanager get-secret-value")\n'
+                       '    f="$STUB_SECRETS/$(echo "$4" | tr / _)"\n'
+                       '    [ -f "$f" ] || { echo "ResourceNotFoundException: $4" >&2; exit 254; }\n'
+                       '    cat "$f" ;;\n'
                        'esac\n')
         aws.chmod(0o755)
         self.webhook = WebhookServer()
+        self.add_secret("pmva/notify-webhook", self.webhook.url)
         # tmux 内のシェルが環境の設定で PATH を上書きしても、スタブが先に見つかるようにする
         # (tmux はログインシェルで起動するので .bash_profile も用意する)
         for rc in (".bashrc", ".bash_profile"):
             (home / rc).write_text(f'export PATH="{bindir}:$PATH"\n', encoding="utf-8")
         self.home = home
         self.env = dict(os.environ, HOME=str(home), PATH=f"{bindir}:{os.environ['PATH']}", TMUX_TMPDIR=str(t),
-                        STUB_S3_OUT=str(self.s3_out), STUB_WEBHOOK=self.webhook.url)
+                        STUB_S3_OUT=str(self.s3_out), STUB_SECRETS=str(self.secrets),
+                        HISTFILE="")
         self.opt = opt
         self.env.pop("TMUX", None)
         self.proc = subprocess.Popen([sys.executable, str(opt / "supervisor.py")], env=self.env,
@@ -107,6 +118,14 @@ class SupervisorTest(unittest.TestCase):
         subprocess.run(["tmux", "kill-server"], env=self.env, capture_output=True)
         self.proc.terminate()
         self.proc.wait(10)
+        # tmux を止めた直後は、ペインのシェルやエージェントのスタブが終了処理で HOME に書き込むことがある。
+        # 消している途中に書き込まれると rmtree が失敗するので、少し待ってやり直す
+        for attempt in range(10):
+            try:
+                self.tmp.cleanup()
+                return
+            except OSError:
+                time.sleep(0.5)
         self.tmp.cleanup()
 
     def request(self, port, method, path, body=None):
@@ -117,6 +136,9 @@ class SupervisorTest(unittest.TestCase):
                 return r.status, json.loads(r.read() or b"{}")
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read() or b"{}")
+
+    def add_secret(self, name, value):
+        (self.secrets / name.replace("/", "_")).write_text(value, encoding="utf-8")
 
     def get(self, path):
         return self.request(self.api_port, "GET", path)
@@ -179,6 +201,7 @@ class SupervisorTest(unittest.TestCase):
         code, r = self.request(self.api_port, "POST", "/send", {"window": "nope", "text": "x"})
         self.assertEqual(code, 500)
         self.assertTrue(r["error"])
+        self.assertEqual(self.get("/status?lines=abc")[0], 400)
 
     def test_activity_tracking_and_status_publish(self):
         payload = {"name": "act", "agent": "none", "region": "ap-northeast-1", "snapshotBucket": "bkt"}
@@ -229,6 +252,97 @@ class SupervisorTest(unittest.TestCase):
         self.assertEqual(texts, ["[nt] Claude Code の応答が終わりました",
                                  "[nt] Claude Code: Claude needs your permission to use Bash",
                                  "[nt] Codex の応答が終わりました: テスト完了"])
+
+    # ---------------------------------------------------------------- 認証方式ごとの初期化
+
+    def run_session(self, **payload):
+        payload = dict({"name": "auth", "agent": "none"}, **payload)
+        code, _ = self.hook("run", {"microvmId": "m", "runHookPayload": json.dumps(payload)})
+        self.assertEqual(code, 200)
+        return self.wait_ready()
+
+    def env_value(self, var):
+        """bootstrap が書いた ~/.pmva/env.sh (tmux のシェルが読む) を読み込んだときの値。"""
+        script = f'source "$HOME/.pmva/env.sh"; printf %s "${{{var}:-}}"'
+        return subprocess.run(["bash", "-c", script], env=self.env, capture_output=True, text=True, check=True).stdout
+
+    def mode(self, path):
+        return oct(path.stat().st_mode & 0o777)
+
+    def test_claude_api_key_uses_key_helper(self):
+        self.add_secret("pmva/anthropic-api-key", "sk-ant-test-123")
+        st = self.run_session(claudeAuth="api-key", claudeSecret="pmva/anthropic-api-key")
+        self.assertEqual(st["bootstrap"], "ready")
+        settings = json.loads((self.home / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        helper = Path(settings["apiKeyHelper"])
+        out = subprocess.run([str(helper)], env=self.env, capture_output=True, text=True, check=True).stdout
+        self.assertEqual(out.strip(), "sk-ant-test-123")
+        self.assertEqual(self.mode(self.home / ".pmva" / "secrets" / "anthropic_api_key"), "0o600")
+        self.assertEqual(self.env_value("ANTHROPIC_API_KEY"), "", "キーは環境変数ではなく apiKeyHelper で渡す")
+
+    def test_subscription_token_codex_api_key_and_github(self):
+        self.add_secret("pmva/claude-oauth-token", "sk-ant-oat01-test")
+        self.add_secret("pmva/openai-api-key", "sk-openai-test")
+        self.add_secret("pmva/github-token", "ghp_test")
+        st = self.run_session(agent="both", claudeAuth="oauth-token", claudeSecret="pmva/claude-oauth-token",
+                              codexAuth="api-key", codexSecret="pmva/openai-api-key",
+                              githubSecret="pmva/github-token", gitUserName="山田 太郎", gitUserEmail="t@example.com")
+        self.assertEqual(st["bootstrap"], "ready")
+        self.assertEqual(self.env_value("CLAUDE_CODE_OAUTH_TOKEN"), "sk-ant-oat01-test")
+        self.assertEqual(self.env_value("OPENAI_API_KEY"), "sk-openai-test")
+        self.assertEqual((self.home / ".codex-login-stub").read_text(encoding="utf-8"), "sk-openai-test")
+        self.assertEqual(self.env_value("GH_TOKEN"), "ghp_test")
+        cred = self.home / ".git-credentials"
+        self.assertEqual(cred.read_text(encoding="utf-8"), "https://x-access-token:ghp_test@github.com\n")
+        self.assertEqual(self.mode(cred), "0o600")
+        self.assertEqual(self.mode(self.home / ".pmva" / "env.sh"), "0o600")
+        git = subprocess.run(["git", "config", "--global", "--list"], env=self.env, capture_output=True, text=True).stdout
+        self.assertIn("credential.helper=store", git)
+        self.assertIn("user.name=山田 太郎", git)
+        self.assertIn("push.autosetupremote=true", git)
+
+    def test_codex_chatgpt_auth_json_and_gateway(self):
+        auth = json.dumps({"tokens": {"access_token": "chatgpt-test"}})
+        self.add_secret("pmva/codex-auth-json", auth)
+        self.add_secret("pmva/anthropic-gateway", json.dumps({"baseUrl": "https://gw.example.com", "authToken": "gw-tok"}))
+        st = self.run_session(claudeAuth="gateway", claudeSecret="pmva/anthropic-gateway",
+                              codexAuth="chatgpt", codexSecret="pmva/codex-auth-json")
+        self.assertEqual(st["bootstrap"], "ready")
+        auth_file = self.home / ".codex" / "auth.json"
+        self.assertEqual(json.loads(auth_file.read_text(encoding="utf-8")), json.loads(auth))
+        self.assertEqual(self.mode(auth_file), "0o600")
+        self.assertEqual(self.env_value("ANTHROPIC_BASE_URL"), "https://gw.example.com")
+        self.assertEqual(self.env_value("ANTHROPIC_AUTH_TOKEN"), "gw-tok")
+
+    def test_bedrock_sets_region_and_model(self):
+        st = self.run_session(claudeAuth="bedrock", region="ap-northeast-1", bedrockRegion="us-west-2",
+                              claudeModel="us.anthropic.test-model")
+        self.assertEqual(st["bootstrap"], "ready")
+        self.assertEqual(self.env_value("CLAUDE_CODE_USE_BEDROCK"), "1")
+        self.assertEqual(self.env_value("AWS_REGION"), "us-west-2")
+        self.assertEqual(self.env_value("ANTHROPIC_MODEL"), "us.anthropic.test-model")
+
+    def test_missing_secret_fails_bootstrap(self):
+        # 登録していないシークレットを指定したら、空のトークンで「準備完了」にせず失敗にする
+        for auth, secret in (("oauth-token", "pmva/claude-oauth-token"), ("api-key", "pmva/anthropic-api-key")):
+            st = self.run_session(claudeAuth=auth, claudeSecret=secret)
+            self.assertTrue(st["bootstrap"].startswith("failed"), (auth, st["bootstrap"]))
+
+    def test_snapshot_excludes_credentials(self):
+        self.add_secret("pmva/codex-auth-json", '{"tokens": {}}')
+        self.add_secret("pmva/github-token", "ghp_test")
+        self.run_session(codexAuth="chatgpt", codexSecret="pmva/codex-auth-json", githubSecret="pmva/github-token",
+                         snapshotBucket="bkt", region="ap-northeast-1")
+        (self.home / "work" / "note.txt").write_text("作業中のファイル", encoding="utf-8")
+        (self.home / ".claude" / ".credentials.json").write_text("{}", encoding="utf-8")
+        code, r = self.request(self.api_port, "POST", "/snapshot", {})
+        self.assertEqual((code, r["ok"]), (200, True), r)
+        names = subprocess.run(["tar", "-tzf", str(self.s3_out / "latest.tar.gz")],
+                               capture_output=True, text=True, check=True).stdout.split()
+        self.assertIn("work/note.txt", names)
+        for secret in (".codex/auth.json", ".claude/.credentials.json"):
+            self.assertNotIn(secret, names)
+        self.assertFalse([n for n in names if n.startswith((".pmva", ".git-credentials"))], names)
 
 
 if __name__ == "__main__":

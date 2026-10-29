@@ -38,7 +38,24 @@ if a[:1] == ["--version"]:
     print("aws-cli/stub")
     sys.exit(0)
 if cmd == "sts get-caller-identity":
-    out({"Account": "123456789012", "Arn": "arn:aws:iam::123456789012:user/test"})
+    out({"Account": "123456789012", "Arn": os.environ.get("PMVA_STUB_ARN", "arn:aws:iam::123456789012:user/test")})
+if a[:1] == ["iam"]:  # PMVA_STUB_IAM=admin で管理者、denied で権限なし
+    mode = os.environ.get("PMVA_STUB_IAM", "")
+    if mode == "denied":
+        fail("An error occurred (AccessDenied) when calling the " + a[1] + " operation")
+    admin = [{"PolicyName": "AdministratorAccess", "PolicyArn": "arn:aws:iam::aws:policy/AdministratorAccess"}]
+    if a[1] in ("list-attached-user-policies", "list-attached-role-policies"):
+        out({"AttachedPolicies": admin if mode == "admin" else []})
+    if a[1] == "list-groups-for-user":
+        out({"Groups": []})
+    if a[1] == "list-access-keys":
+        out({"AccessKeyMetadata": [{"AccessKeyId": "AKIAOLDKEY", "Status": "Active",
+                                    "CreateDate": os.environ.get("PMVA_STUB_KEY_CREATED", "2099-01-01T00:00:00+00:00")}]})
+if cmd == "lambda get-function":  # PMVA_STUB_LAMBDA=exists / denied
+    mode = os.environ.get("PMVA_STUB_LAMBDA", "")
+    if mode == "exists":
+        out({"Configuration": {"FunctionName": opt("--function-name")}})
+    fail("AccessDeniedException" if mode == "denied" else "ResourceNotFoundException")
 if cmd == "cloudformation describe-stacks":
     out({"Stacks": [{"Outputs": [{"OutputKey": k, "OutputValue": v} for k, v in {
         "ArtifactBucketName": "pmva-bucket",
@@ -74,7 +91,14 @@ if cmd == "lambda-microvms get-microvm":
     if countdown.exists() and int(countdown.read_text()) > 0:
         countdown.write_text(str(int(countdown.read_text()) - 1))
         out({"state": "TERMINATING"})
-    out({"state": "TERMINATED" if (D / f"{vid}.term").exists() else "RUNNING"})
+    if os.environ.get("PMVA_STUB_GET_DENIED"):
+        fail("AccessDeniedException")
+    if (D / f"{vid}.term").exists():
+        out({"state": "TERMINATED"})
+    out({"state": "SUSPENDED" if (D / f"{vid}.suspended").exists() else "RUNNING"})
+if cmd == "lambda-microvms resume-microvm":
+    (D / f"{opt('--microvm-identifier')}.suspended").unlink(missing_ok=True)
+    out({})
 if cmd == "lambda-microvms terminate-microvm":
     (D / f"{opt('--microvm-identifier')}.term").touch()
     out({})
@@ -91,7 +115,21 @@ if cmd in ("secretsmanager create-secret", "secretsmanager put-secret-value"):
     value = Path(uri[len("file://"):]).read_text(encoding="utf-8")
     (D / ("secret-" + name.replace("/", "_"))).write_text(value, encoding="utf-8")
     out({"Name": name})
-if cmd in ("s3 rm", "cloudformation delete-stack", "cloudformation wait", "cloudformation deploy"):
+# PMVA_STUB_UNDELETABLE=A,B: そのリソースを --retain-resources で残すまでスタックの削除が失敗する
+UNDELETABLE = [x for x in os.environ.get("PMVA_STUB_UNDELETABLE", "").split(",") if x]
+retained_file = D / "retained.json"
+retained = json.loads(retained_file.read_text()) if retained_file.exists() else []
+if cmd == "cloudformation delete-stack":
+    retained_file.write_text(json.dumps(a[a.index("--retain-resources") + 1:] if "--retain-resources" in a else []))
+    sys.exit(0)
+if cmd == "cloudformation wait":
+    sys.exit(0 if all(u in retained for u in UNDELETABLE) else 255)
+if cmd == "cloudformation describe-stack-resources":  # 依存関係の順に 1 つずつ失敗する
+    pending = [u for u in UNDELETABLE if u not in retained]
+    out({"StackResources": [{"LogicalResourceId": u, "PhysicalResourceId": "pmva-keepalive" if "Function" in u else "perm-1",
+                             "ResourceType": "AWS::Lambda::Function" if "Function" in u else "AWS::Lambda::Permission",
+                             "ResourceStatus": "DELETE_FAILED"} for u in pending[:1]]})
+if cmd in ("s3 rm", "cloudformation deploy"):
     sys.exit(0)
 if cmd == "ce get-cost-and-usage":  # 2 ページに分けて返す
     def group(service, amount):

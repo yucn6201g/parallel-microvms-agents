@@ -180,6 +180,7 @@ class StatusApi(http.server.ThreadingHTTPServer):
     def __init__(self):
         self.received = []
         self.headers_seen = []
+        self.snapshot_ok = True
         api = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -203,7 +204,8 @@ class StatusApi(http.server.ThreadingHTTPServer):
             def do_POST(self):
                 body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
                 api.received.append((self.path, json.loads(body or b"{}")))
-                self.reply({"ok": True, "error": None, "output": "saved"})
+                ok = api.snapshot_ok or self.path != "/snapshot"
+                self.reply({"ok": ok, "error": None, "output": "saved" if ok else "tar failed"})
 
         super().__init__(("127.0.0.1", 0), Handler)
         threading.Thread(target=self.serve_forever, daemon=True).start()
@@ -598,6 +600,85 @@ class CliTest(unittest.TestCase):
         rc, out, _ = self.mvm("doctor", check=False)
         self.assertIn("2 台まで", out)
         self.assertIn("40GB", out)
+
+    def test_doctor_checks_credentials(self):
+        _, out, _ = self.mvm("doctor", check=False)
+        self.assertIn("管理者権限ではありません", out)
+        env = dict(self.env, PMVA_STUB_IAM="admin", PMVA_STUB_KEY_CREATED="2020-01-01T00:00:00+00:00")
+        _, out, _ = self.mvm("doctor", env=env, check=False)
+        self.assertIn("AdministratorAccess", out)
+        self.assertIn("AKIAOLDKEY", out)
+        _, out, _ = self.mvm("doctor", env=dict(self.env, PMVA_STUB_IAM="denied"), check=False)
+        self.assertIn("権限の確認は省略しました", out)
+        _, out, _ = self.mvm("doctor", env=dict(self.env, PMVA_STUB_ARN="arn:aws:iam::123456789012:root"), check=False)
+        self.assertIn("ルートユーザー", out)
+        arn = "arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_AdministratorAccess_x/me@example.com"
+        _, out, _ = self.mvm("doctor", env=dict(self.env, PMVA_STUB_ARN=arn, PMVA_STUB_IAM="admin"), check=False)
+        self.assertIn("管理者権限 (AdministratorAccess) のロール", out)
+        calls = (self.stub_dir / "calls.jsonl").read_text(encoding="utf-8")
+        self.assertIn('"--role-name", "AWSReservedSSO_AdministratorAccess_x"', calls)
+
+    def test_api_error_does_not_mark_session_terminated(self):
+        self.mvm("up", "u1")
+        _, out, _ = self.mvm("ls", env=dict(self.env, PMVA_STUB_GET_DENIED="1"))
+        self.assertIn("UNKNOWN", out)
+        _, out, _ = self.mvm("ls")
+        self.assertIn("RUNNING", out, "一時的なエラーで終了扱いにしない")
+        rc, _, err = self.mvm("infra", "delete", input=b"y\n", env=dict(self.env, PMVA_STUB_GET_DENIED="1"), check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("stop-all", err)
+
+    def test_renew_keeps_vm_when_save_fails(self):
+        api = StatusApi()
+        try:
+            env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}")
+            self.mvm("up", "w1", env=env)
+            api.snapshot_ok = False
+            rc, _, err = self.mvm("renew", "w1", env=env, check=False)
+            self.assertNotEqual(rc, 0)
+            self.assertIn("終了せずに止めました", err)
+            self.assertFalse((self.stub_dir / "microvm-0000.term").exists(), "保存できなければ終了しない")
+            self.assertEqual(len(self.payloads()), 1)
+            # 状態を取れないときも、保存できたか分からないので終了しない
+            rc, _, err = self.mvm("renew", "w1", env=dict(env, PMVA_STUB_GET_DENIED="1"), check=False)
+            self.assertNotEqual(rc, 0)
+            self.assertIn("UNKNOWN", err)
+            self.assertFalse((self.stub_dir / "microvm-0000.term").exists())
+            api.snapshot_ok = True
+            self.mvm("renew", "w1", env=env)
+            self.assertTrue((self.stub_dir / "microvm-0000.term").exists())
+            self.assertEqual(len(self.payloads()), 2)
+        finally:
+            api.shutdown()
+
+    def test_stop_resumes_suspended_vm_to_save(self):
+        api = StatusApi()
+        try:
+            env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}")
+            self.mvm("up", "z1", env=env)
+            (self.stub_dir / "microvm-0000.suspended").touch()
+            self.mvm("stop", "z1", env=env)
+            calls = [json.loads(l)[:2] for l in (self.stub_dir / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertIn(["lambda-microvms", "resume-microvm"], calls)
+            self.assertIn(("/snapshot", {}), api.received)
+        finally:
+            api.shutdown()
+
+    def test_infra_delete_retains_undeletable_lambda(self):
+        env = dict(self.env, PMVA_STUB_UNDELETABLE="KeepalivePermission,KeepaliveFunction")
+        rc, _, err = self.mvm("infra", "delete", input=b"y\n", env=env)
+        retained = json.loads((self.stub_dir / "retained.json").read_text())
+        self.assertEqual(retained, ["KeepalivePermission", "KeepaliveFunction"])
+        self.assertIn("aws lambda delete-function --function-name pmva-keepalive", err)
+
+    def test_deploy_stops_on_leftover_lambda(self):
+        rc, _, err = self.mvm("infra", "deploy", env=dict(self.env, PMVA_STUB_LAMBDA="exists"), check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("前回の削除で残った Lambda 関数 pmva-keepalive", err)
+        calls = (self.stub_dir / "calls.jsonl").read_text(encoding="utf-8")
+        self.assertNotIn('"cloudformation", "deploy"', calls)
+        _, _, err = self.mvm("infra", "deploy", env=dict(self.env, PMVA_STUB_LAMBDA="denied"), check=False)
+        self.assertIn("AccessDenied", err)
 
     def test_launchers(self):
         if IS_WINDOWS:

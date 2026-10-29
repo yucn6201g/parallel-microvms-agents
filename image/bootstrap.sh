@@ -6,7 +6,8 @@
 #   3. SSH over WebSocket ブリッジを起動 (公開鍵が渡された場合)
 #   4. tmux セッション "main" でエージェントを起動
 # 認証情報は実行ロール (IMDSv2) 経由で取得する。イメージには一切焼き込まない。
-set -euo pipefail
+# -E: 関数の中で失敗したときも ERR トラップで state を failed にする
+set -Eeuo pipefail
 umask 077
 
 PMVA="$HOME/.pmva"
@@ -53,7 +54,10 @@ case "$CLAUDE_AUTH" in
     ;;
   oauth-token)
     # ローカル PC で `claude setup-token` して得た長期トークン (Pro/Max サブスクリプション)
-    addenv CLAUDE_CODE_OAUTH_TOKEN "$(secret "$CLAUDE_SECRET")"
+    # addenv の引数の中で secret が失敗しても set -e では止まらないので、いったん変数に受ける
+    token="$(secret "$CLAUDE_SECRET")"
+    addenv CLAUDE_CODE_OAUTH_TOKEN "$token"
+    unset token
     ;;
   bedrock)
     # 実行ロールの認証情報 (IMDSv2) で Amazon Bedrock を呼ぶ

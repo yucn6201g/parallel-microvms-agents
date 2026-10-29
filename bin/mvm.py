@@ -159,6 +159,11 @@ def aws_env():
 
 
 THROTTLE_MARKERS = ("ThrottlingException", "TooManyRequestsException", "Rate exceeded")
+_last_aws_error = [""]  # check=False で失敗したときの stderr (「存在しない」と「一時的な失敗」を区別するため)
+
+
+def last_aws_error():
+    return _last_aws_error[0]
 
 
 def aws(*args, check=True, output="json", retries=5):
@@ -175,6 +180,7 @@ def aws(*args, check=True, output="json", retries=5):
         if p.returncode == 0 or attempt == retries or not any(m in p.stderr for m in THROTTLE_MARKERS):
             break
         time.sleep(min(2 ** attempt, 16))
+    _last_aws_error[0] = p.stderr if p.returncode != 0 else ""
     if p.returncode != 0:
         if check:
             if "ServiceQuotaExceededException" in p.stderr:
@@ -265,10 +271,20 @@ def session_names():
 
 
 def vm_state(name):
-    """MicroVM の状態。存在しなければ GONE。終了していればローカル状態にも反映する。"""
+    """MicroVM の状態。存在しなければ GONE。終了していればローカル状態にも反映する。
+
+    権限エラーや通信エラーで状態を取れなかったときは UNKNOWN を返し、終了扱いにはしない
+    (終了扱いにすると一覧から消え、infra delete も起動中の VM を見落とすため)。
+    """
     s = load_session(name)
     r = lmv("get-microvm", "--microvm-identifier", s["microvmId"], check=False)
-    state = r.get("state", "GONE") if r else "GONE"
+    if r:
+        state = r.get("state", "GONE")
+    elif "ResourceNotFound" in last_aws_error():
+        state = "GONE"
+    else:
+        debug(f"get-microvm {name} failed: {last_aws_error().strip()}")
+        return "UNKNOWN"
     if state in ("TERMINATED", "GONE") and not s.get("terminated"):
         s["terminated"] = True
         save_session(s)
@@ -596,6 +612,8 @@ def cmd_doctor(_args):
     ident = aws("sts", "get-caller-identity", check=False)
     if ident:
         print(f"  ok   AWS 認証: {ident.get('Arn')}")
+        for line in credential_findings(ident.get("Arn", "")):
+            print(line)
     else:
         print("  NG   AWS 認証情報がありません (aws configure / aws sso login)")
         ok = False
@@ -629,6 +647,59 @@ def cmd_doctor(_args):
         print("  --   SSH 公開鍵なし (mvm ssh は使えません。mvm shell かコンソールの Connect を使用)")
     print("準備 OK" if ok else "上記の NG を解消してください")
     return 0 if ok else 1
+
+
+ACCESS_KEY_MAX_AGE_DAYS = 90
+
+
+def is_admin_policy(policies):
+    return any(x.get("PolicyName") == "AdministratorAccess" or x.get("PolicyArn", "").endswith(":policy/AdministratorAccess")
+               for x in policies)
+
+
+def credential_findings(arn):
+    """使っている認証情報の注意点 (ルートユーザー、管理者権限、古いアクセスキー) を doctor 用の行で返す。
+
+    管理者権限の長期アクセスキーは、漏れたときの影響が大きく、普段と違う場所 (クラウドの開発環境など) から
+    使うと AWS の不正利用検知でアカウントが制限されることがある (PoC で発生)。
+    """
+    import datetime
+    see = "pmva-operator ポリシーだけを付けた IAM ユーザーで使ってください (docs/setup.md「操作用の IAM ユーザー」)"
+    if arn.endswith(":root"):
+        return [f"  !!   ルートユーザーの認証情報です。{see}"]
+    # arn:aws:iam::<account>:user/<path>/<name>、arn:aws:sts::<account>:assumed-role/<role>/<session>
+    kind, _, rest = (arn.split(":", 5)[5] if arn.count(":") >= 5 else "").partition("/")
+    lines = []
+    if kind == "user":
+        name = rest.rsplit("/", 1)[-1]
+        attached = aws("iam", "list-attached-user-policies", "--user-name", name, check=False)
+        groups = aws("iam", "list-groups-for-user", "--user-name", name, check=False)
+        if attached is None or groups is None:
+            return ["  --   権限の確認は省略しました (iam:List* の権限なし。権限を絞ったユーザーなら正常です)"]
+        policies = attached.get("AttachedPolicies", [])
+        for g in groups.get("Groups", []):
+            r = aws("iam", "list-attached-group-policies", "--group-name", g["GroupName"], check=False) or {}
+            policies += r.get("AttachedPolicies", [])
+        if is_admin_policy(policies):
+            lines.append("  !!   管理者権限 (AdministratorAccess) の長期アクセスキーです。漏れたときの影響が大きく、"
+                         "他の環境に渡すと AWS の不正利用検知でアカウントが制限されることがあります。"
+                         f"infra deploy 以外は {see}")
+        keys = aws("iam", "list-access-keys", "--user-name", name, check=False) or {}
+        now = datetime.datetime.now(datetime.timezone.utc)
+        for k in keys.get("AccessKeyMetadata", []):
+            created = datetime.datetime.fromisoformat(str(k.get("CreateDate", "")).replace("Z", "+00:00")) \
+                if isinstance(k.get("CreateDate"), str) else None
+            if k.get("Status") == "Active" and created and (now - created).days > ACCESS_KEY_MAX_AGE_DAYS:
+                lines.append(f"  !!   アクセスキー {k['AccessKeyId']} は作成から {(now - created).days} 日経っています。"
+                             "作り直して古いキーを削除してください")
+    elif kind == "assumed-role":
+        role = rest.split("/", 1)[0]
+        attached = aws("iam", "list-attached-role-policies", "--role-name", role, check=False)
+        if attached is None:
+            return ["  --   権限の確認は省略しました (iam:List* の権限なし。権限を絞ったロールなら正常です)"]
+        if is_admin_policy(attached.get("AttachedPolicies", [])):
+            lines.append(f"  !!   管理者権限 (AdministratorAccess) のロールです。infra deploy 以外は {see}")
+    return lines or ["  ok   認証情報: 管理者権限ではありません"]
 
 
 def cmd_infra(args):
@@ -667,10 +738,51 @@ def cmd_infra(args):
                 break
             log("スタックの削除に失敗しました。バケットを空にしてもう一度試します")
         else:
-            die(f"スタック {C['STACK_NAME']} を削除できませんでした。CloudFormation コンソールで原因を確認してください")
+            retained = delete_stack_retaining_failed()
+            if retained is None:
+                die(f"スタック {C['STACK_NAME']} を削除できませんでした。CloudFormation コンソールで原因を確認してください")
+            report_retained(retained)
         (STATE_DIR / "stack-outputs.json").unlink(missing_ok=True)
         log("削除しました。イメージは mvm image delete、シークレットは Secrets Manager で個別に削除してください")
     return 0
+
+
+def delete_stack_retaining_failed(max_rounds=5):
+    """削除に失敗したリソースだけを残して、スタックの残りを削除する。
+
+    アカウントの制限などで Lambda の API が拒否されると、Lambda 関数とその実行許可が DELETE_FAILED になり、
+    スタックごと消せなくなる (PoC で発生)。依存関係の順に 1 つずつ失敗するので、失敗したものを足しながら繰り返す。
+    成功したら残したリソースの一覧を、繰り返しても消せなければ None を返す。
+    """
+    retained = {}
+    for _ in range(max_rounds):
+        r = aws("cloudformation", "describe-stack-resources", "--stack-name", C["STACK_NAME"], check=False) or {}
+        failed = {x["LogicalResourceId"]: x for x in r.get("StackResources", [])
+                  if x.get("ResourceStatus") == "DELETE_FAILED" and x["LogicalResourceId"] not in retained}
+        if not failed:
+            return None
+        retained.update(failed)
+        log(f"削除できないリソースを残して、スタックの残りを削除します: {', '.join(retained)}")
+        aws_interactive("cloudformation", "delete-stack", "--stack-name", C["STACK_NAME"],
+                        "--retain-resources", *retained)
+        if aws_interactive("cloudformation", "wait", "stack-delete-complete", "--stack-name", C["STACK_NAME"]) == 0:
+            return list(retained.values())
+    return None
+
+
+def report_retained(resources):
+    log("次のリソースは削除できなかったため、スタックから外して残しました:")
+    for x in resources:
+        print(f"  {x.get('ResourceType')}\t{x.get('PhysicalResourceId')}", file=sys.stderr)
+    functions = [x["PhysicalResourceId"] for x in resources if x.get("ResourceType") == "AWS::Lambda::Function"]
+    for fn in functions:
+        print(f"  削除: aws lambda delete-function --function-name {fn} --region {C['AWS_REGION']}", file=sys.stderr)
+    if functions:
+        print("  (Lambda 関数の実行許可は関数と一緒に消えます。Lambda の API が使えるようになってから削除してください。"
+              "残したままだと次の mvm infra deploy が名前の重複で失敗します)", file=sys.stderr)
+    others = [x for x in resources if x.get("ResourceType") not in ("AWS::Lambda::Function", "AWS::Lambda::Permission")]
+    if others:
+        print("  上記のそれ以外のリソースは、AWS コンソールで確認して削除してください", file=sys.stderr)
 
 
 def infra_parameters():
@@ -715,6 +827,15 @@ def prepare_new_stack():
         status = None
     if status:
         return
+    # 前回の infra delete で消せずに残した Lambda 関数があると、同じ名前で作れずに失敗する
+    for fn in (f"{C['PMVA_PREFIX']}-keepalive", f"{C['PMVA_PREFIX']}-nightly-stop"):
+        if aws("lambda", "get-function", "--function-name", fn, check=False):
+            die(f"前回の削除で残った Lambda 関数 {fn} があります。先に削除してください:\n"
+                f"  aws lambda delete-function --function-name {fn} --region {C['AWS_REGION']}")
+        if "AccessDenied" in last_aws_error():
+            log(f"Lambda 関数 {fn} の有無を確認できませんでした (AccessDenied)。infra deploy は Lambda 関数を作るので、"
+                "権限か、AWS アカウントの制限 (Organizations の SCP、AWS からの利用制限) を確認してください")
+            break
     for group in (f"/aws/lambda-microvms/{C['PMVA_PREFIX']}", f"/aws/lambda/{C['PMVA_PREFIX']}-keepalive",
                   f"/aws/lambda/{C['PMVA_PREFIX']}-nightly-stop"):
         groups = aws("logs", "describe-log-groups", "--log-group-name-prefix", group, check=False) or {}
@@ -1162,16 +1283,39 @@ def save_workspace(name):
     return bool(r.get("ok"))
 
 
-def stop(name, save=True):
+def wait_running(name, timeout=60):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if vm_state(name) == "RUNNING":
+            return True
+        time.sleep(2)
+    return False
+
+
+def stop(name, save=True, require_save=False):
+    """保存してから終了する。require_save=True なら、保存に失敗したときは終了せずに止める (renew 用)。"""
     state = vm_state(name)
     if state in ("TERMINATED", "GONE"):
         log(f"{name} は既に終了しています")
         return
-    if save and state == "RUNNING":
+    if require_save and state not in ("RUNNING", "SUSPENDED"):
+        die(f"{name} の状態が {state} のため保存できません。作業内容を失わないよう、終了せずに止めました")
+    if save and state in ("RUNNING", "SUSPENDED"):
+        if state == "SUSPENDED":
+            # サスペンド中は保存できないので再開する (自動レジュームが無効でも保存できるように明示的に)
+            log(f"{name} はサスペンド中なので、保存のためにレジュームします")
+            lmv("resume-microvm", "--microvm-identifier", load_session(name)["microvmId"], check=False)
+            wait_running(name)
         try:
-            save_workspace(name)
+            saved = save_workspace(name)
         except SystemExit as e:
             print(e.code, file=sys.stderr)
+            saved = False
+        if not saved:
+            if require_save:
+                die(f"{name} の保存に失敗したので、終了せずに止めました (作業内容を失わないため)。"
+                    f"原因を確認して再実行するか、保存せずに作り直すなら mvm stop {name} --no-save → "
+                    f"mvm up {name} --restore latest (最後に保存できた時点に戻ります)")
             log("保存に失敗しました (terminate フックでもう一度試みます)")
     s = load_session(name)
     lmv("terminate-microvm", "--microvm-identifier", s["microvmId"])
@@ -1202,7 +1346,7 @@ def cmd_renew(args):
     payload = dict(s["payload"])
     payload["restore"] = f"s3://{bucket}/workspaces/{args.name}/latest.tar.gz"
     payload.pop("prompt", None)
-    stop(args.name)
+    stop(args.name, require_save=True)  # 保存できないまま作り直すと、古いスナップショットに戻ってしまう
     launch(args.name, payload, s.get("idle") or C["IDLE_MAX_SECONDS"], s.get("maxDuration") or C["MAX_DURATION_SECONDS"])
     return 0
 
@@ -1319,7 +1463,7 @@ def cmd_ssh(args):
     if command:
         return subprocess.call([ssh, *ssh_options(args.name), host, *command])
     # tmux へのアタッチは、接続が切れたら (ssh の終了コード 255) 自動でつなぎ直す。
-    # 長時間の接続が AWS 側で切られることがまれにある (PoC で確認)。作業は tmux の中で続いている
+    # 途中の通信経路 (プロキシなど) が長時間の接続を切ることがある。作業は tmux の中で続いている
     failures = 0
     while True:
         started = time.time()
