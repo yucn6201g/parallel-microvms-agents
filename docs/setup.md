@@ -301,4 +301,5 @@ VM の中で使えるコマンド:
 | エージェントが止まっている | アイドルサスペンドされていた可能性。通信すると再開する。キープアライブが無効になっていないか (`KEEPALIVE_RATE_MINUTES`) も確認 |
 | SSH が `Broken pipe` で切れる | 途中の通信経路 (社内プロキシなど) が長時間の接続を切ることがある。PoC での切断は、すべてクラウドセッションの送信用中継が再起動したとき (WebSocket の close コード 1012 `server_draining`) で、AWS 側の切断ではなかった。`mvm ssh <name>` (コマンドなし) は自動で再接続する。原因を調べるときは `PMVA_DEBUG=<ファイル>` を設定すると切断理由を記録する |
 | `up` で「メモリ上限を超えます (上限 0GB)」 | `mvm doctor` でクォータを確認。0 の場合は AWS 側でアカウントの利用が制限されている可能性がある (PoC 中に 8GB → 0GB に変わり、同時に Lambda 関数の API も拒否されるようになった)。AWS サポートに問い合わせる |
+| `infra delete` が `KeepalivePermission` などで DELETE_FAILED | Lambda 関数の API が拒否されている。`aws cloudformation delete-stack --stack-name pmva --retain-resources KeepalivePermission KeepaliveFunction` で残りを削除し、使えるようになってから `aws lambda delete-function --function-name pmva-keepalive` で関数を消す (残したままだと次の `infra deploy` が名前の重複で失敗する) |
 | `infra deploy` で `pmva-keepalive` / `pmva-nightly-stop` の作成が AccessDenied | 操作者の権限 (`lambda:CreateFunction` など) と、AWS Organizations の SCP を確認。`aws lambda list-functions` も拒否される場合はアカウント側の制限 |

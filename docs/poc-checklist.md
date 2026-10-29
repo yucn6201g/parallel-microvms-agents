@@ -158,5 +158,5 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 | 1 日あたりの実費 | `mvm cost --actual` で 2026-10-27〜28 のアカウント全体が $0.01 (PoC の VM は短時間のみ。Lambda MicroVMs の行はまだ出ていない)。10 台 × 8 時間の実費は未計測 |
 | PoC 中に直した不具合 | 10 件: gh のインストール、validate フック、/run の本文形式、mvm ssh の引数、tmux の日本語、mvm shell の制御メッセージと端末復元、mvm logs (AWS CLI v1 対応)、mvm send のオプション、`-` で始まる指示、infra delete の削除順。ほかに `mvm ls` の時刻表示 |
 | 本番前に必要な対応 | アカウント側の制限 (Lambda 関数 API の拒否、メモリのクォータ 0GB) の解除を AWS に確認。そのうえでクォータ引き上げ (40GB 以上)、Bedrock を使うならモデル利用申請 |
-| 片付け | 2026-10-28・29 とも `mvm stop-all`、`mvm infra delete`、`mvm image delete` を実施し、何も残っていないことを確認 |
+| 片付け | 2026-10-28 は `mvm stop-all`、`mvm infra delete`、`mvm image delete` で何も残っていないことを確認。2026-10-29 は Lambda 関数の API が拒否されるため、スタックの削除で `KeepalivePermission` が DELETE_FAILED になった。この 2 つ (`KeepalivePermission`、`KeepaliveFunction`) だけを残してスタックを削除し、VM・イメージ・バケット・IAM ロールとポリシー・ログ・EventBridge ルールが無いことを確認。Lambda 関数 `pmva-keepalive` が残っている (起動するルールは削除済みなので費用はかからない)。制限が解けたら `aws lambda delete-function --function-name pmva-keepalive` で削除する |
 | 自動テスト (CI) | GitHub Actions で Windows / macOS (Python 3.9・3.13)、Linux (3.13) のテストと lint が成功。端末の表示や VS Code など目で見る項目は C2 に残る |
