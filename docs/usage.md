@@ -30,10 +30,10 @@ API のレスポンスが遅いエンドポイントを調べて、原因と改�
 ```
 
 ```bash
-mvm fleet 3 --prefix task --repo https://github.com/<owner>/<repo>.git --prompts-file tasks.txt
+mvm fleet 3 --prefix task --repo https://github.com/<owner>/<repo>.git --prompts-file tasks.txt   # 台数は mvm doctor の「同時に何台まで」以内
 ```
 
-- `task-01` 〜 `task-03` が起動し、それぞれ `pmva/task-01` 〜 `pmva/task-03` のブランチで作業します。ブランチが分かれているので、お互いの変更はぶつかりません
+- `task-01` 〜 `task-03` が起動し (クォータに収まらなければ 1 台も起動せずに止まります)、それぞれ `pmva/task-01` 〜 `pmva/task-03` のブランチで作業します。ブランチが分かれているので、お互いの変更はぶつかりません
 - 進み具合は `mvm watch`、個別の確認は `mvm peek task-02`
 - 指示どおりに PR を作れるよう、GitHub トークンは Contents と Pull requests を Read and write にしておきます ([auth.md](auth.md#github))
 
@@ -108,7 +108,7 @@ scp pmva-<name>:work/<リポジトリ名>/report.md .
 | 予算アラート (`BUDGET_MONTHLY_USD` / `BUDGET_EMAIL`) | 想定外の費用に早く気付く |
 | `mvm cost --actual --days 7` | 実際にかかった金額を確認する |
 
-LLM の利用料 (サブスクリプションや API) は別です。10 台が同じ Claude のサブスクリプションを使うと、利用上限を全台で分け合います。
+LLM の利用料 (サブスクリプションや API) は別です。複数台が同じ Claude のサブスクリプションを使うと、利用上限を全台で分け合います。
 
 ## 複数の認証情報を使い分ける
 

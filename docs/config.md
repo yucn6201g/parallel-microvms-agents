@@ -18,6 +18,7 @@
 |---|---|---|---|
 | `AWS_REGION` | `ap-northeast-1` | すぐ | 使うリージョン。Lambda MicroVMs に対応しているかは `mvm doctor` で確認 |
 | `AWS_PROFILE` | (空) | すぐ | AWS CLI のプロファイル名。普段は `pmva-operator` だけを付けたユーザーのプロファイルにする ([setup.md](setup.md#操作用の-iam-ユーザー)) |
+| `INFRA_TEMPLATE` | `full` | infra deploy | `full` (標準: キープアライブ、毎晩の自動停止、予算アラートを含む) / `minimal` (最小構成: 動かすのに必要なリソースだけ) ([setup.md](setup.md#3-aws-リソースの作成)) |
 | `PMVA_PREFIX` | `pmva` | infra deploy | AWS のリソース名とシークレット名の接頭辞。変えると別の環境として扱われる |
 | `STACK_NAME` | `pmva` | すぐ | CloudFormation のスタック名。1 つのアカウントで複数の環境を分けるときは `PMVA_PREFIX` と一緒に変える |
 | `ENABLE_BEDROCK` | `true` | infra deploy | 実行ロールに Amazon Bedrock を呼ぶ権限を付ける |
@@ -36,7 +37,7 @@
 
 | 項目 | 既定 | 反映 | 説明 |
 |---|---|---|---|
-| `MAX_AGENTS` | `10` | すぐ | 同時に起動できるセッションの上限 |
+| `MAX_AGENTS` | `0` | すぐ | 同時に起動するセッションの上限。`0` なら MicroVM メモリのクォータで決まる台数まで。クォータより少なく絞りたいときだけ設定する |
 | `MAX_DURATION_SECONDS` | `28800` | 起動時 | 1 セッションの寿命 (上限 8 時間)。過ぎると終了するので、その前に `mvm renew` で作り直す |
 | `IDLE_MAX_SECONDS` | `1800` | 起動時 | 受信通信がこの秒数無いとサスペンドする。`off` で無効 |
 | `IDLE_SUSPENDED_SECONDS` | `21600` | 起動時 | サスペンドのまま放置されたら終了するまでの秒数 |
@@ -81,6 +82,14 @@ CLAUDE_MODEL=<Bedrock コンソールで確認した推論プロファイル ID>
 USE_GITHUB_TOKEN=false
 ```
 
+**最小構成で使う (キープアライブ・毎晩の自動停止・予算アラートを作らない)**
+
+```
+INFRA_TEMPLATE=minimal
+```
+
+予算アラート、キープアライブ、毎晩の自動停止の設定 (`BUDGET_*`、`KEEPALIVE_*`、`NIGHTLY_STOP_*`) は使われません。キープアライブが無いので、手元から接続していない VM は、作業中でも `IDLE_MAX_SECONDS` で一時停止します (`--idle off` で起動すれば止まりません)。
+
 **費用を抑える (小さめの VM、早めにサスペンド、毎晩止める)**
 
 ```
@@ -91,7 +100,7 @@ BUDGET_MONTHLY_USD=100
 BUDGET_EMAIL=you@example.com
 ```
 
-`MEMORY_MIB` は `mvm image build`、ほかの AWS 側の設定は `mvm infra deploy` をやり直すと効きます。
+`MEMORY_MIB` は `mvm image build`、ほかの AWS 側の設定は `mvm infra deploy` をやり直すと効きます。`MEMORY_MIB=2048` にすると、同じクォータで同時に動かせる台数が 2 倍になります。
 
 **1 つのアカウントで 2 つの環境を分ける**
 

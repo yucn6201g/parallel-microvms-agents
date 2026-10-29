@@ -55,6 +55,6 @@ jobs:
       - name: shellcheck
         run: shellcheck -S warning bin/mvm scripts/install.sh image/bootstrap.sh image/snapshot.sh image/notify.sh image/agent-attach
       - name: cfn-lint
-        run: cfn-lint infra/cloudformation.yaml
+        run: cfn-lint infra/cloudformation.yaml infra/cloudformation-minimal.yaml
       - name: Compile Python
         run: python -m py_compile bin/mvm.py image/supervisor.py scripts/estimate_cost.py tests/*.py

@@ -9,10 +9,10 @@
 Python 3.9 以上、AWS CLI v2、OpenSSH クライアント、Git の 4 つです。Windows でも WSL は要りません ([quickstart.md](quickstart.md#2-手元-pc-にツールを入れる))。
 
 **Q. 費用はどれくらいかかりますか?**
-4GB (2 vCPU) の MicroVM 1 台で 1 時間あたり約 $0.25〜0.29 です。10 台を 1 日 8 時間、月 22 日動かすと月 $450〜530 ほどです。止めている間は計算料金がかかりません。LLM の利用料 (サブスクリプションや API) は別です ([cost.md](cost.md))。
+4GB (2 vCPU) の MicroVM 1 台で 1 時間あたり約 $0.25〜0.29 です。2 台を 1 日 8 時間、月 22 日動かすと月 $93〜108 ほどです。止めている間は計算料金がかかりません。LLM の利用料 (サブスクリプションや API) は別です ([cost.md](cost.md))。
 
 **Q. 何台まで同時に動かせますか?**
-`MAX_AGENTS` (既定 10) までです。ただし AWS アカウントの MicroVM メモリのクォータ (`L-CD1C0CC4`) にも上限があり、PoC のアカウントでは 8GB (4GB の VM で 2 台) でした。`mvm doctor` で何台まで起動できるかを確認し、足りなければ引き上げを申請します ([setup.md](setup.md#クォータの確認-並列で使う場合は必須))。
+AWS アカウントの MicroVM メモリのクォータ (`L-CD1C0CC4`) で決まります。PoC のアカウントでは 8GB で、4GB の VM が 2 台 (2GB の VM なら 4 台) でした。`mvm doctor` で何台まで起動できるかを確認できます。超える起動は、1 台も起動する前に止まります。もっと増やしたいときは引き上げを申請します ([setup.md](setup.md#クォータの確認))。
 
 **Q. どのリージョンで使えますか?**
 既定は東京 (`ap-northeast-1`) です。ほかのリージョンは、`config.env` の `AWS_REGION` を変えて `mvm doctor` を実行すると、Lambda MicroVMs が使えるかを確かめられます。
@@ -20,7 +20,7 @@ Python 3.9 以上、AWS CLI v2、OpenSSH クライアント、Git の 4 つで�
 ## 認証
 
 **Q. Claude の Pro / Max のサブスクリプションで使えますか?**
-使えます。手元で `claude setup-token` を実行して発行した長期トークンを `mvm secret set claude-oauth-token` で登録します ([auth.md](auth.md#サブスクリプション-oauth-token))。10 台が同じサブスクリプションを使うと、利用上限を全台で分け合う点に注意してください。
+使えます。手元で `claude setup-token` を実行して発行した長期トークンを `mvm secret set claude-oauth-token` で登録します ([auth.md](auth.md#サブスクリプション-oauth-token))。複数台が同じサブスクリプションを使うと、利用上限を全台で分け合う点に注意してください。
 
 **Q. ChatGPT のアカウントで Codex を使えますか?**
 使えます。手元で ChatGPT にログインした Codex の `~/.codex/auth.json` を登録します ([auth.md](auth.md#chatgpt-アカウント))。

@@ -513,6 +513,20 @@ class CliTest(unittest.TestCase):
         self.assertIn("NightlyStopTimezone=Asia/Tokyo", deploy)
         self.assertIn("ImageName=pmva-agent", deploy)
 
+    def test_infra_deploy_minimal_template(self):
+        cfg = Path(self.env["PMVA_CONFIG"])
+        cfg.write_text(cfg.read_text(encoding="utf-8") + "INFRA_TEMPLATE=minimal\nNIGHTLY_STOP_TIME=23:30\n",
+                       encoding="utf-8")
+        _, _, err = self.mvm("infra", "deploy")
+        calls = [json.loads(l) for l in (self.stub_dir / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
+        deploy = next(c for c in calls if c[:2] == ["cloudformation", "deploy"])
+        self.assertTrue(deploy[deploy.index("--template-file") + 1].endswith("cloudformation-minimal.yaml"))
+        overrides = {x.split("=", 1)[0] for x in deploy if "=" in x and not x.startswith("-")}
+        self.assertEqual(overrides, {"Prefix", "EnableBedrock"}, "テンプレートに無いパラメータは渡さない")
+        self.assertIn("NIGHTLY_STOP_TIME は最小構成では使いません", err)
+        cfg.write_text(cfg.read_text(encoding="utf-8") + "INFRA_TEMPLATE=tiny\n", encoding="utf-8")
+        self.assertNotEqual(self.mvm("infra", "deploy", check=False)[0], 0)
+
     def test_notify_option(self):
         self.mvm("up", "n1", "--notify")
         self.mvm("up", "n2")
@@ -646,6 +660,20 @@ class CliTest(unittest.TestCase):
         rc, out, _ = self.mvm("doctor", check=False)
         self.assertIn("2 台まで", out)
         self.assertIn("40GB", out)
+
+    def test_agent_count_follows_quota_by_default(self):
+        """MAX_AGENTS を設定しなければ (0)、同時に動かせる台数はクォータだけで決まる。"""
+        cfg = Path(self.env["PMVA_CONFIG"])
+        cfg.write_text(cfg.read_text(encoding="utf-8").replace("MAX_AGENTS=10\n", ""), encoding="utf-8")
+        _, out, _ = self.mvm("doctor", check=False)
+        self.assertIn("ok   MicroVM のメモリ上限 8GB → 4GB の VM を同時に 2 台まで", out)
+        self.assertNotIn("MAX_AGENTS", out)
+        rc, _, err = self.mvm("fleet", "3", "--no-github", check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("あと 2 台まで", err)
+        self.assertEqual(self.payloads(), [], "クォータに収まらなければ 1 台も起動しない")
+        self.mvm("fleet", "12", "--no-github", env=dict(self.env, PMVA_STUB_QUOTA_GB="100"))
+        self.assertEqual(len(self.payloads()), 12, "MAX_AGENTS が 0 なら台数の上限はクォータだけ")
 
     def test_doctor_checks_credentials(self):
         _, out, _ = self.mvm("doctor", check=False)

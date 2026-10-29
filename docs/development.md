@@ -16,6 +16,7 @@ Claude Code / Codex などのコーディングエージェントで変更する
 | `image/bootstrap.sh` | MicroVM | 起動直後の初期化 (認証情報、clone、SSH、tmux) |
 | `image/snapshot.sh`、`image/notify.sh`、`image/agent-attach` | MicroVM | 保存、通知、tmux への接続 |
 | `infra/cloudformation.yaml` | AWS | S3、IAM ロール、操作用ポリシー、キープアライブと毎晩の停止の Lambda (コードはテンプレートに直接書いている)、予算アラート |
+| `infra/cloudformation-minimal.yaml` | AWS | 最小構成。上のうち、動かすのに必要なリソースだけ (`INFRA_TEMPLATE=minimal`) |
 | `tests/` | 手元 / CI | 自動テスト |
 | `.github/workflows/` | GitHub Actions | CI (`ci.yml`)、版の確認 (`agent-versions.yml`) |
 
@@ -37,6 +38,7 @@ python -m unittest discover -s tests -v
 |---|---|---|
 | `tests/test_mvm.py` | CLI の各コマンド、WebSocket クライアント (TLS、プロキシ、送受信の詰まり)、インストールスクリプト | すべて (PowerShell が無ければ `install.ps1` のテストは飛ばす) |
 | `tests/test_supervisor.py` | `supervisor.py` と `bootstrap.sh` などを、パスとポートを差し替えてローカルで動かす結合テスト (認証方式ごとの初期化、送信、作業の判定、通知、保存の中身) | Linux で `tmux` と `jq` があるときだけ |
+| `tests/test_templates.py` | 標準と最小構成のテンプレートで、共通のリソース・出力・パラメータが同じ内容か | すべて |
 | `tests/test_keepalive.py` | テンプレートに書いた Lambda (キープアライブ、毎晩の停止) のコードを取り出し、模擬 API で動かす | すべて |
 | `tests/aws_stub.py` | AWS CLI の代わり。テストが `PATH` の先頭に置き、呼び出しを `calls.jsonl` に記録して決まった応答を返す | — |
 
@@ -54,7 +56,7 @@ CI と同じものを手元で実行できます。
 
 ```bash
 shellcheck -S warning bin/mvm scripts/install.sh image/bootstrap.sh image/snapshot.sh image/notify.sh image/agent-attach
-pip install cfn-lint && cfn-lint infra/cloudformation.yaml
+pip install cfn-lint && cfn-lint infra/cloudformation.yaml infra/cloudformation-minimal.yaml
 python -m py_compile bin/mvm.py image/supervisor.py scripts/estimate_cost.py tests/*.py
 ```
 
@@ -75,6 +77,8 @@ python -m py_compile bin/mvm.py image/supervisor.py scripts/estimate_cost.py tes
 **`image/` のファイルを足したとき**: 実行権限が必要なファイルは、`bin/mvm.py` の `build_artifact_zip` の `executables` と `image/Dockerfile` の `chmod` の両方に名前を足します (zip にするときに権限を付けるため)。
 
 **MicroVM 内の動きを変えたとき**: 自動テストでは AWS の実際の動作 (フックの呼ばれ方、サスペンド、プロキシ) までは確かめられません。`mvm image build` で新しいイメージを作り、`mvm up <name> --agent none` などで実際に起動して確認してから main に入れます。確認した項目は [poc-checklist.md](poc-checklist.md) に記録します。
+
+**テンプレートの共通部分を変えたとき**: S3、IAM ロール、操作用ポリシーなどは 2 つのテンプレートに同じ内容で書いています。両方を同じように直してください (`tests/test_templates.py` が、ずれていないかを確かめます)。
 
 **Lambda のコードを変えたとき**: キープアライブと毎晩の停止の Lambda は `infra/cloudformation.yaml` に直接書いています。CloudFormation の制限で 4096 バイトまでなので、`tests/test_keepalive.py` が大きさも確かめます。
 

@@ -4,6 +4,14 @@
 
 ## 未リリース
 
+### 追加
+
+- 最小構成の CloudFormation テンプレート `infra/cloudformation-minimal.yaml`。`config.env` の `INFRA_TEMPLATE=minimal` で、キープアライブ・毎晩の自動停止・予算アラートを作らずに使える
+
+### 変更
+
+- 同時に動かす台数の目標を 10 台から「AWS アカウントのクォータの範囲内」に変更。`MAX_AGENTS` の既定を `0` (クォータで決まる台数まで) にし、`mvm doctor` はクォータに対して何台動かせるかを表示する。コストの試算 (`mvm cost`) の既定も 2 台にした
+
 ## [0.1.0] - 2026-10-29
 
 最初のリリースです。
@@ -11,7 +19,7 @@
 ### 追加
 
 - **手元 CLI `mvm`** (Windows / macOS / Linux。Python 標準ライブラリのみ)
-  - 起動: `up`、`fleet` (最大 `MAX_AGENTS` 台、タスクファイルで台ごとに別の指示)
+  - 起動: `up`、`fleet` (タスクファイルで台ごとに別の指示)
   - 確認・指示: `ls`、`peek`、`send`、`watch`、`logs`
   - 接続: `ssh` (SSH over WebSocket、切れたら自動で再接続)、`ssh-config` (VS Code Remote-SSH 用)、`shell`、`token`
   - 保存・停止: `save`、`suspend` / `resume`、`stop`、`stop-all`、`renew` (8 時間の寿命を越えて続ける)

@@ -6,7 +6,7 @@
 --vcpu-second / --gb-second などで上書きすること。LLM の利用料 (サブスクリプション / API トークン) は含まない。
 
 例:
-  python3 scripts/estimate_cost.py                      # 10 台 x 4GB x 8 時間/日 x 22 日
+  python3 scripts/estimate_cost.py                      # 2 台 x 4GB x 8 時間/日 x 22 日
   python3 scripts/estimate_cost.py --agents 5 --memory-gb 8 --hours-per-day 6
   python3 scripts/estimate_cost.py --suspended-ratio 0.4 # 稼働時間の 40% はアイドルでサスペンド
 """
@@ -61,7 +61,7 @@ def compute(a, rates):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--agents", type=int, default=10, help="同時稼働する MicroVM 数 (既定 10)")
+    p.add_argument("--agents", type=int, default=2, help="同時稼働する MicroVM 数 (既定 2。クォータ 8GB で 4GB の VM を動かせる台数)")
     p.add_argument("--memory-gb", type=float, default=4, help="1 台のベースラインメモリ GB (既定 4 = 2 vCPU)")
     p.add_argument("--hours-per-day", type=float, default=8, help="1 日あたりの起動時間 (既定 8、上限 8/セッション)")
     p.add_argument("--days-per-month", type=float, default=22, help="月の稼働日数 (既定 22)")

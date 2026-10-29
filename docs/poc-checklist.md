@@ -27,8 +27,8 @@ AWS の認証情報がない状態で、確認できる範囲を先に検証し�
 
 - [x] `mvm doctor` がすべて OK になる (AWS CLI のバージョン、東京リージョン対応、ベースイメージ ARN)
   - ベースイメージ ARN は `arn:aws:lambda:ap-northeast-1:aws:microvm-image:al2023-1` (既定値のままで OK)
-- [x] Service Quotas を確認した → **10 台並列には引き上げが必要**
-  - `Max allocated ARM_64 MicroVM memory` (L-CD1C0CC4) が **8GB**。4GB の VM は同時に 2 台まで。10 台 × 4GB なら 40GB 以上に引き上げを申請する
+- [x] Service Quotas を確認した → 同時に動かせる台数はクォータの範囲内
+  - `Max allocated ARM_64 MicroVM memory` (L-CD1C0CC4) が **8GB**。4GB の VM は同時に 2 台まで (2GB なら 4 台)
   - `Rate of RunMicrovm API requests` (L-535CA9B6) が **1 回/秒** (バースト 1)。`mvm fleet` は 1 台ずつ順に起動し、1 台あたり約 4 秒かかるので通常は当たらない
   - `Max Execution Duration of a MicroVM` は 8 時間、イメージ数 100、イメージあたりのバージョン数 50
 - [x] `mvm infra deploy` が成功した (操作者は管理者ユーザーだったので `pmva-operator` のアタッチは未確認)
@@ -108,7 +108,6 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
   - 修正 8: `mvm send <name> --window shell ...` のように名前の後に書いたオプションが指示文に混ざっていた → 修正
   - 修正 9: `-` で始まる指示を tmux がオプションとして解釈していた → `send-keys -l --` で修正し、AWS 上で確認
   - 修正 10: `stop-all` 直後の `infra delete` で、終了中の VM が terminate フックで S3 に保存したためバケットが空にならず、スタックの削除に失敗した → VM が終了しきるのを待ち、失敗時はもう一度バケットを空にして再試行するように修正
-- [ ] `mvm fleet 10` で 10 台が起動する (未確認: クォータの引き上げが必要)
 - [ ] `mvm watch` で全台を確認できる。手元 PC の CPU 使用率が下がったことを確認する (C2 で手元 PC から確認する)
 - [ ] 1 日運用した後、Cost Explorer の実費と [cost.md](cost.md) の試算を比べる
 
@@ -161,8 +160,8 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 | 起動時間 (run → ready) | run-microvm 約 4 秒、bootstrap ready まで 9〜10 秒。サスペンドからの自動レジュームは 1.4 秒 |
 | シェル接続時のユーザー | root (SSH は agent) |
 | SSH 接続 | OK (tmux アタッチ / デタッチ、日本語表示、5MB 転送) |
-| 1 日あたりの実費 | `mvm cost --actual` で 2026-10-27〜28 のアカウント全体が $0.01 (PoC の VM は短時間のみ。Lambda MicroVMs の行はまだ出ていない)。10 台 × 8 時間の実費は未計測 |
+| 1 日あたりの実費 | `mvm cost --actual` で 2026-10-27〜28 のアカウント全体が $0.01 (PoC の VM は短時間のみ。Lambda MicroVMs の行はまだ出ていない)。2 台 × 8 時間の実費は未計測 |
 | PoC 中に直した不具合 | 10 件: gh のインストール、validate フック、/run の本文形式、mvm ssh の引数、tmux の日本語、mvm shell の制御メッセージと端末復元、mvm logs (AWS CLI v1 対応)、mvm send のオプション、`-` で始まる指示、infra delete の削除順。ほかに `mvm ls` の時刻表示 |
-| 本番前に必要な対応 | `pmva-operator` だけを付けた IAM ユーザーの用意、クォータ引き上げ (40GB 以上)、Bedrock を使うならモデル利用申請 |
+| 本番前に必要な対応 | `pmva-operator` だけを付けた IAM ユーザーの用意、Bedrock を使うならモデル利用申請 (同時に動かす台数を増やしたい場合だけ、クォータの引き上げ) |
 | 片付け | 2026-10-28・29 とも `mvm stop-all`、`mvm infra delete`、`mvm image delete` を実施 |
 | 自動テスト (CI) | GitHub Actions で Windows / macOS (Python 3.9・3.13)、Linux (3.13) のテストと lint が成功。端末の表示や VS Code など目で見る項目は C2 に残る |
