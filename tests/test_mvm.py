@@ -611,6 +611,105 @@ class CliTest(unittest.TestCase):
         _, out, _ = self.mvm("cost", "--agents", "2")
         self.assertIn("2 台", out)
 
+    def test_cost_actual(self):
+        _, out, _ = self.mvm("cost", "--actual", "--days", "3", "--daily")
+        lines = out.splitlines()
+        self.assertIn("AWS Lambda", lines[1])  # 金額の大きい順
+        self.assertIn("3.75", lines[1])
+        self.assertNotIn("Amazon S3", out)  # 0.01 未満は省く
+        self.assertTrue(any("2026-10-28" in x and "1.25" in x for x in lines))
+        calls = [json.loads(x) for x in (self.stub_dir / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
+        ce = [c for c in calls if c[:2] == ["ce", "get-cost-and-usage"]]
+        self.assertEqual(len(ce), 2)
+        self.assertEqual(ce[0][ce[0].index("--region") + 1], "us-east-1")
+        self.assertEqual(self.mvm("cost", "--actual", "--days", "0", check=False)[0], 1)
+
+    def test_image_versions(self):
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), NpmRegistryHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        env = dict(self.env, PMVA_NPM_REGISTRY=f"http://127.0.0.1:{server.server_address[1]}",
+                   NO_PROXY="127.0.0.1", no_proxy="127.0.0.1")
+        for k in ("HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
+            env.pop(k, None)
+        _, out, _ = self.mvm("image", "versions", env=env)
+        pinned = mvm.dockerfile_versions(ROOT / "image" / "Dockerfile")
+        self.assertRegex(pinned["CLAUDE_CODE_VERSION"], r"^\d+\.\d+\.\d+$", "Dockerfile では版を固定する")
+        self.assertRegex(pinned["CODEX_VERSION"], r"^\d+\.\d+\.\d+$")
+        self.assertIn("@anthropic-ai/claude-code", out)
+        self.assertIn("99.0.1", out)
+        self.assertIn("更新あり", out)
+        self.assertEqual(sorted(NpmRegistryHandler.paths), ["/@anthropic-ai%2Fclaude-code/latest", "/@openai%2Fcodex/latest"])
+
+
+class NpmRegistryHandler(http.server.BaseHTTPRequestHandler):
+    paths = []
+
+    def do_GET(self):
+        NpmRegistryHandler.paths.append(self.path)
+        body = json.dumps({"version": "99.0.1"}).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+class DockerfileVersionsTest(unittest.TestCase):
+    def test_rewrite(self):
+        with tempfile.TemporaryDirectory() as t:
+            p = Path(t) / "Dockerfile"
+            p.write_bytes(b"FROM x\nARG CLAUDE_CODE_VERSION=1.0.0\nARG CODEX_VERSION=0.1.0\nRUN npm i\n")
+            mvm.set_dockerfile_versions(p, {"CLAUDE_CODE_VERSION": "2.0.0"})
+            self.assertEqual(p.read_bytes(), b"FROM x\nARG CLAUDE_CODE_VERSION=2.0.0\nARG CODEX_VERSION=0.1.0\nRUN npm i\n")
+            self.assertEqual(mvm.dockerfile_versions(p), {"CLAUDE_CODE_VERSION": "2.0.0", "CODEX_VERSION": "0.1.0"})
+            with self.assertRaises(SystemExit):
+                mvm.set_dockerfile_versions(p, {"CODEX_VERSION": "1.0; rm -rf /"})
+
+
+class InstallScriptTest(unittest.TestCase):
+    """scripts/install.sh / install.ps1 が config.env を作り、エイリアスを 1 行だけ登録すること。"""
+
+    def run_twice(self, cmd, rc, env):
+        for _ in range(2):
+            p = subprocess.run(cmd, capture_output=True, env=env, timeout=120)
+            self.assertEqual(p.returncode, 0, p.stdout.decode("utf-8", "replace") + p.stderr.decode("utf-8", "replace"))
+        text = rc.read_bytes()
+        lines = text.decode("utf-8-sig").splitlines()
+        self.assertEqual(lines[0], "# existing")
+        self.assertEqual(sum(1 for x in lines if "mvm" in x), 1, lines)
+        return text, lines[-1]
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.env = dict(os.environ, PMVA_CONFIG=str(self.tmp / "config.env"), HOME=str(self.tmp))
+
+    @unittest.skipIf(IS_WINDOWS, "macOS / Linux 用")
+    def test_install_sh(self):
+        rc = self.tmp / ".zshrc"
+        rc.write_text("# existing\n", encoding="utf-8")
+        _, last = self.run_twice(["sh", str(ROOT / "scripts" / "install.sh"), "--rc", str(rc)], rc, self.env)
+        self.assertEqual(last, f"alias mvm='{ROOT / 'bin' / 'mvm'}' # pmva")
+        self.assertTrue((self.tmp / "config.env").exists())
+
+    def test_install_ps1(self):
+        shell = shutil.which("powershell") if IS_WINDOWS else None
+        shell = shell or shutil.which("pwsh")
+        if not shell:
+            self.skipTest("PowerShell がありません")
+        rc = self.tmp / "profile.ps1"
+        rc.write_text("# existing\n", encoding="utf-8")
+        cmd = [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ROOT / "scripts" / "install.ps1"),
+               "-ProfilePath", str(rc)]
+        text, last = self.run_twice(cmd, rc, self.env)
+        self.assertTrue(text.startswith(b"\xef\xbb\xbf"), "Windows PowerShell 5.1 向けに BOM 付きで書く")
+        self.assertTrue(last.startswith("Set-Alias mvm '") and last.endswith("mvm.cmd' # pmva"), last)
+        self.assertTrue((self.tmp / "config.env").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

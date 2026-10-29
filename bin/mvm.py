@@ -808,7 +808,61 @@ def build_artifact_zip(dest):
             z.writestr(info, p.read_bytes().replace(b"\r\n", b"\n"))
 
 
+# Dockerfile の ARG 名 → npm パッケージ名。イメージには ARG に書いた版がそのまま入る
+AGENT_PACKAGES = {"CLAUDE_CODE_VERSION": "@anthropic-ai/claude-code", "CODEX_VERSION": "@openai/codex"}
+
+
+def dockerfile_versions(path):
+    import re
+    text = path.read_text(encoding="utf-8")
+    return {k: (re.search(rf"^ARG {k}=(\S*)", text, re.M) or [None, None])[1] for k in AGENT_PACKAGES}
+
+
+def set_dockerfile_versions(path, versions):
+    import re
+    text = path.read_text(encoding="utf-8")
+    for k, v in versions.items():
+        if not re.fullmatch(r"[0-9A-Za-z.+-]+", v):
+            die(f"バージョンの形式が正しくありません: {v}")
+        text, n = re.subn(rf"^ARG {k}=\S*$", f"ARG {k}={v}", text, flags=re.M)
+        if n != 1:
+            die(f"{path} に ARG {k}= の行が見つかりません")
+    path.write_bytes(text.encode("utf-8"))
+
+
+def npm_latest(package):
+    base = os.environ.get("PMVA_NPM_REGISTRY", "https://registry.npmjs.org").rstrip("/")
+    url = f"{base}/{urllib.parse.quote(package, safe='@')}/latest"
+    try:
+        with urllib.request.urlopen(url, timeout=30) as r:
+            return json.loads(r.read().decode("utf-8"))["version"]
+    except (OSError, ValueError, KeyError) as e:
+        die(f"npm レジストリから {package} の最新版を取得できませんでした: {e}")
+
+
+def cmd_image_versions(args):
+    dockerfile = ROOT / "image" / "Dockerfile"
+    pinned = dockerfile_versions(dockerfile)
+    wanted = {"CLAUDE_CODE_VERSION": args.claude, "CODEX_VERSION": args.codex}
+    latest = {k: wanted[k] or npm_latest(pkg) for k, pkg in AGENT_PACKAGES.items()}
+    for k, pkg in AGENT_PACKAGES.items():
+        mark = "" if pinned[k] == latest[k] else "  ← 更新あり"
+        print(f"{pkg:28} 固定 {pinned[k] or '-':12} {'指定' if wanted[k] else '最新'} {latest[k]}{mark}")
+    if args.action == "versions":
+        return 0
+    changed = {k: v for k, v in latest.items() if pinned[k] != v}
+    if not changed:
+        log("Dockerfile はすでにこの版です")
+        return 0
+    set_dockerfile_versions(dockerfile, changed)
+    log(f"{dockerfile} を書き換えました。mvm image build で新しいイメージを作り、"
+        "動作を確認してから commit してください (起動中の VM は mvm renew で新しい版に移れます)")
+    return 0
+
+
 def cmd_image(args):
+    if args.action in ("versions", "update-versions"):
+        return cmd_image_versions(args)
     if args.action == "base":
         for item in lmv("list-managed-microvm-images").get("items", []):
             print(item["imageArn"])
@@ -876,6 +930,46 @@ def cmd_image(args):
             die("ビルドが 60 分以内に完了しませんでした")
         print(".", end="", file=sys.stderr, flush=True)
         time.sleep(15)
+
+
+# ---------------------------------------------------------------- cost --actual
+
+def cmd_cost_actual(args):
+    """Cost Explorer の実績 (UnblendedCost) をサービス別に集計する。アカウント全体の金額であることに注意。"""
+    import datetime
+    if not 1 <= args.days <= 365:
+        die("--days は 1〜365 で指定してください")
+    end = datetime.datetime.now(datetime.timezone.utc).date() + datetime.timedelta(days=1)  # End は含まない
+    start = end - datetime.timedelta(days=args.days)
+    by_service, by_day, unit, token = {}, {}, "USD", None
+    while True:
+        extra = ["--next-page-token", token] if token else []
+        r = aws("ce", "get-cost-and-usage", "--region", "us-east-1",  # Cost Explorer の API は us-east-1 のみ
+                "--time-period", f"Start={start},End={end}", "--granularity", "DAILY",
+                "--metrics", "UnblendedCost", "--group-by", "Type=DIMENSION,Key=SERVICE", *extra)
+        for day in r.get("ResultsByTime", []):
+            for g in day.get("Groups", []):
+                m = g["Metrics"]["UnblendedCost"]
+                amount, unit = float(m["Amount"]), m.get("Unit", unit)
+                by_service[g["Keys"][0]] = by_service.get(g["Keys"][0], 0.0) + amount
+                d = day["TimePeriod"]["Start"]
+                by_day[d] = by_day.get(d, 0.0) + amount
+        token = r.get("NextPageToken")
+        if not token:
+            break
+    print(f"実績 {start} 〜 {end - datetime.timedelta(days=1)} (UTC、アカウント全体、{unit})")
+    rows = sorted(((v, k) for k, v in by_service.items() if round(v, 2) != 0), reverse=True)
+    for v, k in rows:
+        print(f"  {k:48} {v:10.2f}")
+    if not rows:
+        print("  (0.01 以上の請求はまだありません)")
+    print(f"  {'合計':46} {sum(by_service.values()):10.2f}")
+    if args.daily:
+        print("日ごとの合計:")
+        for d in sorted(by_day):
+            print(f"  {d}  {by_day[d]:10.2f}")
+    print("※ Cost Explorer への反映は最大 24 時間ほど遅れます。試算は mvm cost (引数なし) を使ってください")
+    return 0
 
 
 # ---------------------------------------------------------------- up / fleet
@@ -1379,9 +1473,12 @@ def build_parser():
     x.add_argument("--name", help="シークレット名 (既定 <prefix>/<kind>)")
     x.add_argument("--file", help="値をファイルから読む (省略時は入力 / 標準入力)")
     x.set_defaults(func=cmd_secret)
-    x = sub.add_parser("image", help="エージェント実行イメージをビルド / 状態確認 / ベースイメージ一覧 / 削除")
-    x.add_argument("action", choices=("build", "status", "base", "delete"))
+    x = sub.add_parser("image", help="エージェント実行イメージをビルド / 状態確認 / ベースイメージ一覧 / 削除 / "
+                                     "Claude Code・Codex の版の確認 (versions) と更新 (update-versions)")
+    x.add_argument("action", choices=("build", "status", "base", "delete", "versions", "update-versions"))
     x.add_argument("--yes", action="store_true", help="delete の確認を省略する")
+    x.add_argument("--claude", help="update-versions で使う Claude Code の版 (省略時は npm の最新)")
+    x.add_argument("--codex", help="update-versions で使う Codex の版 (省略時は npm の最新)")
     x.set_defaults(func=cmd_image)
 
     x = sub.add_parser("up", help="MicroVM を 1 台起動してエージェントを開始")
@@ -1446,7 +1543,8 @@ def build_parser():
     x = sub.add_parser("logs", help="CloudWatch Logs を表示")
     x.add_argument("--follow", action="store_true")
     x.set_defaults(func=cmd_logs)
-    x = sub.add_parser("cost", help="コスト試算 (scripts/estimate_cost.py の引数をそのまま渡す)", add_help=False)
+    x = sub.add_parser("cost", help="コスト試算 (scripts/estimate_cost.py の引数をそのまま渡す)。"
+                                    "--actual [--days N] [--daily] で Cost Explorer の実績を表示", add_help=False)
     x.add_argument("rest", nargs=argparse.REMAINDER)
     x.set_defaults(func=None)
     return p
@@ -1462,6 +1560,13 @@ def main(argv=None):
         fixed.append(f"{a}={next(it, '')}" if a in ("--claude-args", "--codex-args") else a)
     argv = fixed
     parser = build_parser()
+    if argv[:1] == ["cost"] and "--actual" in argv:
+        cp = argparse.ArgumentParser(prog="mvm cost --actual", description="Cost Explorer の実績をサービス別に表示")
+        cp.add_argument("--actual", action="store_true")
+        cp.add_argument("--days", type=int, default=7, help="さかのぼる日数 (既定 7、今日を含む)")
+        cp.add_argument("--daily", action="store_true", help="日ごとの合計も表示")
+        load_config()
+        return cmd_cost_actual(cp.parse_args(argv[1:]))
     if argv[:1] == ["cost"]:
         return subprocess.call([sys.executable, str(ROOT / "scripts" / "estimate_cost.py"), *argv[1:]])
     args = parser.parse_args(argv)

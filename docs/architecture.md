@@ -115,7 +115,16 @@ Claude Code の hooks (`Stop`、`Notification`) と Codex の `notify` から `i
 
 - 受信はすべて IAM で発行した短命トークンが必要 (アプリ用は最大 60 分、シェル用は 15 分で発行)
 - SSH は TLS (AWS のエンドポイント) の内側を通るため、ホスト鍵の検証は省略している (`StrictHostKeyChecking no`)。鍵認証のみ
-- 実行ロールが読めるのは `${PMVA_PREFIX}/*` のシークレットと、S3 の `workspaces/`・`workspace-history/`・`status/` 配下だけ
-- ただし実行ロールは全 VM で共通なので、VM 内で動くエージェント (やエージェントが実行したコード) は、自分が使わない認証情報 (`${PMVA_PREFIX}/*` の他のシークレット) や、他のセッションのワークスペーススナップショットも読み書きできる。1 人で使う前提の設計。信頼できないリポジトリを扱う場合や複数人で使う場合は、プレフィックス (= スタック) を分けるか、セッションごとに実行ロールを分ける
+- 実行ロールは使うエージェントの組み合わせごとに 4 つあり、`mvm up` が自動で選ぶ。VM 内のエージェント (やエージェントが実行したコード) が読めるのは、そのセッションで使うエージェントの認証情報だけ
+
+  | 起動するエージェント | 実行ロール | 読めるシークレット (`${PMVA_PREFIX}/` の後ろ) |
+  |---|---|---|
+  | Claude Code だけ | `ExecutionRoleClaude` | `anthropic-*`、`claude-*`、`github-*`、`notify-*` (+ Bedrock の呼び出し) |
+  | Codex だけ | `ExecutionRoleCodex` | `openai-*`、`codex-*`、`github-*`、`notify-*` |
+  | 両方 | `ExecutionRole` | 上の全部 |
+  | どちらも使わない (`--agent none`) | `ExecutionRoleNone` | `github-*`、`notify-*` |
+
+  そのため `--claude-secret` などで指定するシークレット名もこの接頭辞で始める必要がある (`mvm up` が起動前に確認する)。IAM のポリシーシミュレーターで 4 つのロールが上の表どおりに許可・拒否することを確認済み
+- S3 は全ロール共通で、`workspaces/`・`workspace-history/`・`status/` 配下を読み書きできる。つまり他のセッションのワークスペーススナップショットは読めてしまう。1 人で使う前提の設計。信頼できないリポジトリを扱う場合や複数人で使う場合は、プレフィックス (= スタック) を分ける
 - VM 内の `agent` ユーザーは sudo を使えない (コンテナに no_new_privs が付いているため。PoC で確認)。root が必要な作業は `mvm shell` (root で入る) で行うか、必要なパッケージをイメージに追加する
 - 機密性の高いリポジトリを扱う場合は、VPC egress コネクタと NAT / プロキシで送信先を制限することを検討する

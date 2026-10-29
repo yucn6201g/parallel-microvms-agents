@@ -17,7 +17,26 @@ WebSocket の中継は `mvm` に組み込まれているので、websocat など
 
 `claude setup-token` や `codex login` を手元で実行する認証方式 ([auth.md](auth.md)) を使う場合は、手元にも Claude Code / Codex をインストールしてください (トークンの発行にだけ使います)。
 
+### インストールスクリプト (おすすめ)
+
+前提ツールの確認、`config.env` の作成、`mvm` エイリアスの登録をまとめて行います。何度実行しても大丈夫です。
+
+```powershell
+# Windows (PowerShell)。エイリアスは $PROFILE (全ホスト共通のプロファイル) に書く
+powershell -ExecutionPolicy Bypass -File scripts\install.ps1
+```
+
+```bash
+# macOS / Linux。エイリアスは ~/.zshrc (zsh の場合) か ~/.bashrc に書く
+scripts/install.sh
+```
+
+登録先は `-ProfilePath <ファイル>` / `--rc <ファイル>` で変えられ、`-NoAlias` / `--no-alias` で登録しないこともできます。登録した行には `# pmva` が付いていて、再実行するとその行だけを書き換えます。
+Windows で「このシステムではスクリプトの実行が無効になっている」と出てプロファイルが読み込まれない場合は、`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` を 1 回実行します。
+
 ### mvm の呼び出し方
+
+インストールスクリプトを使わない場合は、次のように呼び出します。
 
 | OS | 実行方法 | 毎回 `mvm` と打てるようにする |
 |---|---|---|
@@ -143,7 +162,14 @@ mvm image status
 ```
 
 `image/` を zip にして S3 にアップロードし、`CreateMicrovmImage` を実行します。2 回目以降は `UpdateMicrovmImage` で新しいバージョンを作ります。
-Claude Code / Codex は自動更新を無効にしているので、更新したいときはイメージを再ビルドします。
+Claude Code / Codex の版は `image/Dockerfile` の `CLAUDE_CODE_VERSION` / `CODEX_VERSION` で固定しています (全台が同じ版で動き、VM 内の自動更新も無効)。更新するときは次の手順です。
+
+```bash
+mvm image versions             # 固定している版と npm の最新版を比べる
+mvm image update-versions      # Dockerfile を最新版に書き換える (--claude 2.1.0 --codex 0.1.0 のように版を指定することもできる)
+mvm image build                # 新しいイメージを作る。動作を確認したら Dockerfile の変更を commit する
+mvm renew <name>               # 起動中の VM は renew で新しいイメージに移れる
+```
 古いバージョンも保存料金がかかるので、不要になったら削除します (`aws lambda-microvms delete-microvm-image-version`)。
 
 ## 6. 1 台で動作確認
@@ -200,6 +226,15 @@ MicroVM は、エンドポイントへの受信通信が `IDLE_MAX_SECONDS` (既
 
 設定は `config.env` で変えられます (変更後に `mvm infra deploy`)。`KEEPALIVE_RATE_MINUTES` は `IDLE_MAX_SECONDS` より十分短くしてください。`KEEPALIVE_RATE_MINUTES=0` で無効になります。費用は Lambda がほぼ無料枠内、S3 への書き込みが 10 台 × 8 時間 × 22 日で月 $0.5 程度です。
 
+## 毎晩の自動停止 (止め忘れ防止)
+
+`config.env` の `NIGHTLY_STOP_TIME=23:00` (`NIGHTLY_STOP_TIMEZONE=Asia/Tokyo`) を設定して `mvm infra deploy` すると、毎日その時刻にすべての MicroVM のワークスペースを S3 に保存してから終了します。翌日は `mvm up <name> --restore latest ...` で続きから始められます。
+
+- EventBridge Scheduler が Lambda 関数 `pmva-nightly-stop` を呼び、このスタックのイメージから起動した VM (RUNNING / SUSPENDED) をすべて保存してから終了する (サスペンド中の VM は保存の通信で自動的にレジュームされる)
+- 保存に失敗した VM も終了する (terminate フックがもう一度保存を試みる)
+- 空にすると無効になる。費用はほぼ無料枠内
+- 自動テストのみで、AWS 上での動作は未確認 ([poc-checklist.md](poc-checklist.md) の G)
+
 ## 完了・入力待ちの通知
 
 エージェントの応答が終わったときや、許可・入力を待っているときに、Slack などの Webhook に通知できます。
@@ -230,7 +265,8 @@ MicroVM は、エンドポイントへの受信通信が `IDLE_MAX_SECONDS` (既
 | 1 日の終わり | `mvm stop-all` (各台を保存してから終了) |
 | 使わなくなったら片付ける | `mvm stop-all` → `mvm infra delete` → `mvm image delete` (イメージは置いておくと保存料金がかかる) |
 | ログを見る | `mvm logs --follow` |
-| 費用の確認 | `mvm cost`、Cost Explorer |
+| 費用の確認 | `mvm cost` (試算)、`mvm cost --actual --days 7 --daily` (Cost Explorer の実績。アカウント全体) |
+| Claude Code / Codex の更新 | `mvm image versions` → `mvm image update-versions` → `mvm image build` |
 
 VM の中で使えるコマンド:
 
@@ -263,4 +299,6 @@ VM の中で使えるコマンド:
 | `peek` が 401/403 | トークン期限切れ。`.state/tokens/<name>.*` を消して再実行 |
 | bootstrap が `failed` | シークレット名・登録の有無、実行ロールの権限を確認 |
 | エージェントが止まっている | アイドルサスペンドされていた可能性。通信すると再開する。キープアライブが無効になっていないか (`KEEPALIVE_RATE_MINUTES`) も確認 |
-| SSH が `Broken pipe` で切れる | 長時間の接続がまれに通信経路で切られる (PoC で 7 回中 3 回)。`mvm ssh <name>` (コマンドなし) は自動で再接続する。原因を調べるときは `PMVA_DEBUG=<ファイル>` を設定すると切断理由を記録する |
+| SSH が `Broken pipe` で切れる | 途中の通信経路 (社内プロキシなど) が長時間の接続を切ることがある。PoC での切断は、すべてクラウドセッションの送信用中継が再起動したとき (WebSocket の close コード 1012 `server_draining`) で、AWS 側の切断ではなかった。`mvm ssh <name>` (コマンドなし) は自動で再接続する。原因を調べるときは `PMVA_DEBUG=<ファイル>` を設定すると切断理由を記録する |
+| `up` で「メモリ上限を超えます (上限 0GB)」 | `mvm doctor` でクォータを確認。0 の場合は AWS 側でアカウントの利用が制限されている可能性がある (PoC 中に 8GB → 0GB に変わり、同時に Lambda 関数の API も拒否されるようになった)。AWS サポートに問い合わせる |
+| `infra deploy` で `pmva-keepalive` / `pmva-nightly-stop` の作成が AccessDenied | 操作者の権限 (`lambda:CreateFunction` など) と、AWS Organizations の SCP を確認。`aws lambda list-functions` も拒否される場合はアカウント側の制限 |

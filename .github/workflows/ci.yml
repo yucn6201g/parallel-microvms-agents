@@ -43,7 +43,7 @@ jobs:
       - name: Install cfn-lint
         run: pip install cfn-lint
       - name: shellcheck
-        run: shellcheck -S warning bin/mvm image/bootstrap.sh image/snapshot.sh image/notify.sh image/agent-attach
+        run: shellcheck -S warning bin/mvm scripts/install.sh image/bootstrap.sh image/snapshot.sh image/notify.sh image/agent-attach
       - name: cfn-lint
         run: cfn-lint infra/cloudformation.yaml
       - name: Compile Python

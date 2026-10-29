@@ -382,6 +382,10 @@ Resources:
             Effect: Allow
             Action: servicequotas:GetServiceQuota
             Resource: "*"
+          - Sid: ReadActualCost  # mvm cost --actual (アカウント全体の金額が見える点に注意)
+            Effect: Allow
+            Action: ce:GetCostAndUsage
+            Resource: "*"
           - Sid: ReadLogs
             Effect: Allow
             Action:

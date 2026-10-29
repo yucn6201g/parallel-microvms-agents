@@ -93,6 +93,13 @@ if cmd in ("secretsmanager create-secret", "secretsmanager put-secret-value"):
     out({"Name": name})
 if cmd in ("s3 rm", "cloudformation delete-stack", "cloudformation wait", "cloudformation deploy"):
     sys.exit(0)
+if cmd == "ce get-cost-and-usage":  # 2 ページに分けて返す
+    def group(service, amount):
+        return {"Keys": [service], "Metrics": {"UnblendedCost": {"Amount": amount, "Unit": "USD"}}}
+    if opt("--next-page-token") == "p2":
+        out({"ResultsByTime": [{"TimePeriod": {"Start": "2026-10-28"}, "Groups": [group("AWS Lambda", "1.25")]}]})
+    out({"NextPageToken": "p2", "ResultsByTime": [
+        {"TimePeriod": {"Start": "2026-10-27"}, "Groups": [group("AWS Lambda", "2.5"), group("Amazon S3", "0.001")]}]})
 if cmd == "logs describe-log-groups":
     out({"logGroups": []})
 fail("unhandled: " + cmd, 1)
