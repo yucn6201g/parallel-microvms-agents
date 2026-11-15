@@ -737,7 +737,7 @@ class CliTest(unittest.TestCase):
             self.assertEqual(out.strip(), "PR を作りました: #12")
             rc, out, _ = self.mvm("result", "a1", env=env, check=False)
             self.assertEqual(rc, 1, "応答がまだないエージェントがあれば 1")
-            self.assertIn("--- claude (done) ---\nPR を作りました: #12", out)
+            self.assertIn("--- claude (done) ---\nPR を作りました: #12", out.replace("\r\n", "\n"))  # Windows は改行が CRLF
             self.assertIn("(まだ codex の応答がありません)", out)
             _, out, _ = self.mvm("result", "a1", "--json", "--agent", "claude", env=env)
             self.assertEqual(json.loads(out)["text"], "PR を作りました: #12")
