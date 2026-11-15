@@ -35,7 +35,7 @@ flowchart LR
 | 要件 | 実現方法 |
 |---|---|
 | 複数エージェントの並列実行 | `mvm fleet <台数>` / `mvm up <name>`。同時に動かせる台数は MicroVM メモリのクォータで決まり、超える前に止める (`mvm doctor` で確認) |
-| 手元 PC から画面確認 | `mvm peek`（画面末尾を取得）、`mvm watch`（全台を一覧表示）、`mvm wait`（応答が終わるまで待つ）、`mvm result`（最後の応答を読む）、`mvm ssh`（tmux にアタッチ） |
+| 手元 PC から画面確認 | `mvm peek`（画面末尾を取得）、`mvm follow`（推論の過程を流れるように表示）、`mvm view`（画面を読み取り専用で表示）、`mvm watch`（全台を一覧表示）、`mvm wait`（応答が終わるまで待つ）、`mvm result`（最後の応答を読む）、`mvm top`（VM のメモリ）、`mvm ssh`（tmux にアタッチ） |
 | 手元 PC から指示 | `mvm send <name> "指示"`（接続せずに入力）、または `mvm ssh` で直接操作 |
 | 多様な認証方式 | Claude Code: サブスクリプション (OAuth トークン) / API キー / Amazon Bedrock / LLM ゲートウェイ / 対話ログイン<br>Codex: API キー / ChatGPT ログイン (auth.json) / 対話ログイン |
 | 8 時間制限への対応 | ワークスペースを S3 に定期保存し、`mvm renew` で新しい MicroVM に復元 |

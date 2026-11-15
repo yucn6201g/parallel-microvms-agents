@@ -50,7 +50,8 @@
 
 | 方法 | 手元の負荷 | 用途 | 仕組み |
 |---|---|---|---|
-| `mvm peek` / `watch` / `send` / `wait` / `result` | ごく小さい (定期的な HTTPS) | 進捗確認、短い指示、終わるまで待つ、最後の応答を読む | VM 内 `supervisor.py` の `:8080` API が `tmux capture-pane` / `send-keys` を実行し、エージェントの状態と最後の応答を返す |
+| `mvm peek` / `watch` / `send` / `wait` / `result` / `follow` / `top` | ごく小さい (定期的な HTTPS) | 進捗確認、短い指示、終わるまで待つ、最後の応答を読む、推論の過程を見る、メモリを見る | VM 内 `supervisor.py` の `:8080` API が `tmux capture-pane` / `send-keys` を実行し、エージェントの状態、最後の応答、会話の記録、メモリの使用量を返す |
+| `mvm view` | 小さい (ssh + mvm の中継) | エージェントの画面をそのまま見る (読み取り専用) | `mvm ssh` と同じ経路で、`agent-attach --view` が tmux の別セッション (同じウィンドウ群を共有) に読み取り専用で接続する |
 | `mvm ssh` | 小さい (ssh + mvm の中継) | 対話操作、VS Code Remote-SSH、scp、ポート転送 | ssh の ProxyCommand で `mvm _ssh-proxy` (内蔵 WebSocket クライアント) が WSS (`:7681`) に接続し、VM 内の websocat → sshd (127.0.0.1:2222) につなぐ |
 | `mvm shell` / コンソールの Connect | 小さい | SSH が使えないときの予備、障害調査 | AWS 標準の `SHELL_INGRESS` (`:8022`) |
 
@@ -77,7 +78,7 @@ MicroVM はビルド時のスナップショットを全台で共有します。
 | 状況 | 動作 |
 |---|---|
 | `mvm ssh` で接続中 | ServerAlive (30 秒ごと) の通信があるのでサスペンドされない (PoC で確認) |
-| `mvm watch` / `mvm wait` を実行中 | 定期的な `/status` 取得でサスペンドされない (`wait` は、終わった台には取得をやめる) |
+| `mvm watch` / `mvm wait` / `mvm follow` を実行中 | 定期的な `/status` や `/events` の取得でサスペンドされない (`wait` は、終わった台には取得をやめる) |
 | 何も接続していないが、エージェントが作業中 | キープアライブ (下記) が `/healthz` を送るのでサスペンドされない |
 | 何も接続しておらず、作業もしていない | `IDLE_MAX_SECONDS` (既定 30 分) 後にサスペンド。メモリごと保存され、次の通信で再開する。外向き通信は再開時に切断されるので、エージェントは API 呼び出しをリトライする |
 | 無人で長時間走らせたい | キープアライブで足りる。確実に止めたくなければ `mvm up --idle off` (8 時間で終了) |
@@ -114,6 +115,22 @@ Claude Code の hooks と Codex の `notify` から `image/notify.sh` を呼び�
 
 フックは通知の設定にかかわらず常に入れます。利用者が `~/.claude/settings.json` に書いたフックは残し、pmva のものだけを入れ直します。スナップショットの復元で設定が上書きされるので、復元の後に入れます。
 通知 (`--notify`) が有効なら、`done` と `waiting` のときに Webhook にも 1 行の通知を送ります。Webhook の URL は他の認証情報と同じく Secrets Manager に置きます。
+
+### 推論の過程を手元で見る (`mvm follow`)
+
+エージェントが自分で書いている会話の記録 (Claude Code は `~/.claude/projects/` の JSONL、Codex は `~/.codex/sessions/` の rollout) を、`supervisor.py` の `/events` が読んで、表示用の出来事 (指示・思考・ツールの実行と結果・応答) に直して返します。
+
+- 手元の `mvm` は、前回どこまで読んだか (ファイルと位置) を毎回渡し、続きだけを受け取る。書きかけの最後の行は次回に回す
+- エージェントを起動し直して記録のファイルが変わったら、新しいファイルの最初から返す
+- 長い文章は VM 側で切り詰めてから送る (`--full` なら切り詰めない) ので、通信量は小さい
+- 記録の形式はエージェントの版によって変わることがある。CI の `agents-e2e` が、`image/Dockerfile` で固定した版を実際に動かして、読めることを確かめる
+
+画面をそのまま見たいときは `mvm view` を使います。`mvm ssh` と同じ経路で、`tmux new-session -t main` で同じウィンドウ群を共有する別のセッションを作り、読み取り専用 (`attach -r`) で接続します。抜けるとそのセッションは消えます。
+
+### メモリの見える化
+
+`/status` は、`/proc/meminfo` の使用量と、`/proc/<pid>/status` の RSS をプロセス名ごとに足したものを返します (`mvm top`、`peek`)。
+メモリ不足による強制終了は `/proc/vmstat` の `oom_kill` の増加で見つけます。イメージのスナップショットを取った時点の値を引き継ぐので、セッションの開始 (run フック) で基準を取り直します。増えたら、作業判定のループが通知 (`notify.sh oom`) を送ります。
 
 ### 永続化
 

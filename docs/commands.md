@@ -7,7 +7,7 @@
 |---|---|
 | 準備 | [`doctor`](#doctor) / [`infra`](#infra) / [`secret`](#secret) / [`image`](#image) |
 | 起動 | [`up`](#up) / [`fleet`](#fleet) |
-| 確認・指示 | [`ls`](#ls) / [`peek`](#peek) / [`send`](#send) / [`wait`](#wait) / [`result`](#result) / [`watch`](#watch) / [`logs`](#logs) |
+| 確認・指示 | [`ls`](#ls) / [`peek`](#peek) / [`follow`](#follow) / [`view`](#view) / [`top`](#top) / [`send`](#send) / [`wait`](#wait) / [`result`](#result) / [`watch`](#watch) / [`logs`](#logs) |
 | 接続 | [`ssh`](#ssh) / [`ssh-config`](#ssh-config) / [`shell`](#shell) / [`token`](#token) |
 | 保存・停止 | [`save`](#save) / [`suspend` / `resume`](#suspend--resume) / [`stop`](#stop) / [`stop-all`](#stop-all) / [`renew`](#renew) |
 | 費用 | [`cost`](#cost) |
@@ -138,8 +138,66 @@ mvm ls [--all] [--json]
 mvm peek <name> [行数] [--json]
 ```
 
-エージェントの画面の末尾 (既定 30 行) と、エージェントの状態 (`claude=working` など、[wait](#wait) の表を参照)、初期化の状態 (`bootstrap=ready` / `failed: ...`)、最後に保存した時刻を表示します。接続はしないので、手元の負荷はほぼありません。
+エージェントの画面の末尾 (既定 30 行) と、エージェントの状態 (`claude=working` など、[wait](#wait) の表を参照)、VM のメモリの使用量 (`mem=1.2/3.8GiB`)、初期化の状態 (`bootstrap=ready` / `failed: ...`)、最後に保存した時刻を表示します。メモリ不足でプロセスが強制終了されていれば `!!` で知らせます。接続はしないので、手元の負荷はほぼありません。
 `--json` で、VM 内の状態 API の応答をそのまま JSON で出力します。
+
+### follow
+
+```bash
+mvm follow [<name>...] [--agent claude|codex] [--lines <件数>] [--chars <文字数>] [--full] [--once] [--json]
+```
+
+エージェントの推論の過程 (指示・思考・ツールの実行と結果・応答) を、会話の記録から流れるように表示します。名前を省略すると、動いている全セッションをまとめて表示します。Ctrl-C で終了します。
+
+```text
+[a1 claude] 指示: テストを直して
+[a1 claude] 思考: まず失敗しているテストを見る
+[a1 claude] 実行: Bash: pytest -x
+[a1 claude] 結果: FAILED tests/test_api.py::test_login
+    … (残り 12 行)
+[a1 claude] 応答: 原因はトークンの期限切れでした。直してテストが通りました。
+[a2 codex]  実行: exec_command: npm test
+```
+
+| オプション | 既定 | 説明 |
+|---|---|---|
+| `--agent claude\|codex` | 両方 | `--agent both` のセッションで片方だけ表示する |
+| `--lines <件数>` | `20` | 最初に表示する、直前の出来事の数 |
+| `--chars <文字数>` | `500` | 1 件あたりの最大の文字数。ツールの結果は、さらに先頭の 5 行だけ表示する |
+| `--full` | | 省略せずに全文を表示する |
+| `--interval <秒>` | `2` | 新しい出来事を確かめる間隔 |
+| `--once` | | 直前の出来事を表示して終わる |
+| `--json` | | 1 行に 1 件の JSON で出力する (`session`、`agent`、`kind`、`text` など) |
+
+- 読むのは、Claude Code の `~/.claude/projects/*/*.jsonl` と Codex の `~/.codex/sessions/**/rollout-*.jsonl` です。エージェントを起動し直して新しい会話になると、`--- 新しい会話 ---` と表示して続けます
+- 思考は、記録されている分だけ表示します。Claude Code は思考の本文を記録しないことがあり、Codex は思考の要約を記録します
+- 表示している間は定期的に通信するので、そのセッションはサスペンドされません。VM が終了すると、そのセッションの表示をやめます
+
+### view
+
+```bash
+mvm view <name> [--window claude|codex|shell] [--no-reconnect]
+```
+
+エージェントの画面を、そのまま読み取り専用で表示します (SSH で tmux に接続します)。キーを押してもエージェントには届かないので、うっかり入力して作業を邪魔することがありません。抜けるのは Ctrl-b → d です。
+表示するウィンドウの既定は、Codex だけのセッションなら `codex`、それ以外は `claude` です。ほかの接続 (`mvm ssh`) で表示しているウィンドウは変わりません。操作もしたいときは [`ssh`](#ssh) を使います。
+
+### top
+
+```bash
+mvm top [<name>...] [--json]
+```
+
+VM のメモリの使用量と、多く使っているプロセスをプロセス名ごとにまとめて表示します。名前を省略すると、動いている全セッションです。
+
+```text
+[a1] 使用 3.0 GiB / 4.0 GiB (空き 1.0 GiB)
+  chrome                  9 個     1800 MiB
+  node                    3 個      700 MiB
+```
+
+- プロセスごとの使用量 (RSS) を足しているので、共有しているメモリを重ねて数えます (特に Chrome)。大まかな目安として見てください
+- メモリ不足でプロセスが強制終了されると、その回数を `!!` で表示します。通知 (`--notify`) が有効なら、Webhook にも知らせます。`MEMORY_MIB` を増やすか、同時に動かすテストやブラウザを減らしてください
 
 ### send
 

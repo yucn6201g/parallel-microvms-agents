@@ -1498,11 +1498,19 @@ AGENT_STATE_LABELS = {
 }
 
 
+def gib(mib):
+    return f"{(mib or 0) / 1024:.1f}"
+
+
 def format_status(st):
     agents = st.get("agents") or {}
     states = " ".join(f"{a}={v.get('state')}" for a, v in agents.items())
-    lines = [f"[{st.get('name')}] agent={st.get('agent')} {states + ' ' if states else ''}"
+    mem = st.get("memory") or {}
+    memory = f"mem={gib(mem.get('usedMiB'))}/{gib(mem.get('totalMiB'))}GiB " if mem.get("totalMiB") else ""
+    lines = [f"[{st.get('name')}] agent={st.get('agent')} {states + ' ' if states else ''}{memory}"
              f"bootstrap={st.get('bootstrap')} lastSnapshot={st.get('lastSnapshot') or '-'}"]
+    if st.get("oomKills"):
+        lines.append(f"!! メモリ不足でプロセスが {st['oomKills']} 回強制終了されました (mvm top {st.get('name')} で内訳を確認)")
     for w in st.get("windows", []):
         if w.get("name") == "shell":
             continue
@@ -1546,6 +1554,121 @@ def cmd_result(args):
                 print(f"--- {r['agent']} ({r.get('state')}) ---")
             print(r.get("text") if r.get("text") else f"(まだ {r['agent']} の応答がありません)")
     return 0 if all(r.get("text") for r in results) else 1
+
+
+# ---------------------------------------------------------------- 会話記録の流れ (mvm follow)
+
+FOLLOW_LABELS = {"prompt": "指示", "thinking": "思考", "text": "応答", "tool": "実行", "output": "結果"}
+FOLLOW_OUTPUT_LINES = 5   # --full なしでは、ツールの結果は先頭の数行だけ表示する
+
+
+def format_event(prefix, ev, full):
+    label = FOLLOW_LABELS.get(ev.get("kind"), ev.get("kind"))
+    if ev.get("kind") == "output" and ev.get("error"):
+        label = "エラー"
+    text = (ev.get("text") or "").rstrip("\n")
+    if ev.get("kind") == "tool":
+        text = f"{ev.get('name')}: {text}"
+    lines = text.splitlines() or [""]
+    more = ""
+    if ev.get("kind") == "output" and not full and len(lines) > FOLLOW_OUTPUT_LINES:
+        more = f"… (残り {len(lines) - FOLLOW_OUTPUT_LINES} 行)"
+        lines = lines[:FOLLOW_OUTPUT_LINES]
+    if ev.get("truncated") and not more:
+        more = "… (省略。全文は --full)"
+    head = f"{prefix} {label}: "
+    out = [head + lines[0]] + ["    " + ln for ln in lines[1:]]
+    if more:
+        out.append("    " + more)
+    return "\n".join(out)
+
+
+def cmd_follow(args):
+    names = args.names or active_names()
+    if not names:
+        die("表示するセッションがありません (mvm ls で確認)")
+    streams = []   # [セッション名, エージェント, 会話記録のファイル, 読んだ位置]
+    for name in names:
+        for agent in session_agents(name, args.agent):
+            streams.append([name, agent, "", 0])
+    if not streams:
+        die("エージェントを起動していないセッションです (--agent none)")
+    limit = 0 if args.full else args.chars
+    width = max(len(f"[{n} {a}]") for n, a, _, _ in streams)
+    failing = set()
+    try:
+        while streams:
+            for st in list(streams):
+                name, agent, file, offset = st
+                query = urllib.parse.urlencode({"agent": agent, "file": file, "offset": offset,
+                                                "tail": args.lines, "max": limit})
+                try:
+                    r = vm_api(name, "GET", f"/events?{query}", timeout=30)
+                except SystemExit as e:
+                    if vm_state(name) in ("TERMINATED", "TERMINATING", "GONE"):
+                        log(f"{name} は終了しました")
+                        streams.remove(st)
+                    elif name not in failing:
+                        log(f"{name}: 会話記録を取得できません。再試行します ({e.code})")
+                        failing.add(name)
+                    continue
+                failing.discard(name)
+                if "events" not in r:
+                    die(f"{name}: 会話記録を取得できません ({r.get('error') or r})。"
+                        "イメージが古い場合は mvm image build で作り直してください")
+                prefix = f"[{name} {agent}]".ljust(width)
+                if r.get("reset") and file and file != "-":
+                    if args.json:
+                        print(json.dumps({"session": name, "agent": agent, "kind": "reset"}, ensure_ascii=False), flush=True)
+                    else:
+                        print(f"{prefix} --- 新しい会話 ---", flush=True)
+                for ev in r["events"]:
+                    if args.json:
+                        print(json.dumps(dict(ev, session=name, agent=agent), ensure_ascii=False), flush=True)
+                    else:
+                        print(format_event(prefix, ev, args.full), flush=True)
+                # まだ会話の記録がなかったときは "-" を覚えておく。記録ができたら、末尾だけでなく最初から受け取る
+                st[2], st[3] = r.get("file") or "-", r.get("offset") or 0
+            if args.once:
+                break
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+def cmd_top(args):
+    names = args.names or active_names()
+    if not names:
+        die("表示するセッションがありません (mvm ls で確認)")
+    results = []
+    for name in names:
+        vm = vm_state(name)
+        r = {"name": name, "vm": vm}
+        if vm == "RUNNING":
+            try:
+                st = vm_api(name, "GET", "/status?lines=0", timeout=15)
+                r.update(memory=st.get("memory"), oomKills=st.get("oomKills"))
+            except SystemExit as e:
+                r["error"] = str(e.code)
+        results.append(r)
+    if args.json:
+        print_json(results)
+        return 0
+    for r in results:
+        mem = r.get("memory")
+        if not mem:
+            note = r.get("error") or ("状態を返さない古いイメージです (mvm image build で作り直してください)"
+                                      if r["vm"] == "RUNNING" else "")
+            print(f"[{r['name']}] {r['vm']} {note}".rstrip())
+            continue
+        print(f"[{r['name']}] 使用 {gib(mem['usedMiB'])} GiB / {gib(mem['totalMiB'])} GiB "
+              f"(空き {gib(mem['availableMiB'])} GiB)")
+        if r.get("oomKills"):
+            print(f"  !! メモリ不足でプロセスが {r['oomKills']} 回強制終了されました")
+        for g in mem.get("top") or []:
+            print(f"  {g['name']:<20} {g['count']:>4} 個  {g['rssMiB']:>7} MiB")
+    return 0
 
 
 # mvm wait が「終わった」とみなすエージェントの状態と、まとめるときの優先順 (先にあるものを代表にする)
@@ -1704,21 +1827,39 @@ def ssh_options(name):
     ]
 
 
-def cmd_ssh(args):
+def ssh_binary(name):
     ssh = shutil.which("ssh") or die("ssh が見つかりません (Windows は「オプション機能」で OpenSSH クライアントを追加)")
-    if not load_session(args.name)["payload"].get("sshPublicKey"):
-        die(f"{args.name} は SSH 公開鍵なしで起動されています (SSH_PUBLIC_KEY_FILE を設定して mvm renew)")
+    if not load_session(name)["payload"].get("sshPublicKey"):
+        die(f"{name} は SSH 公開鍵なしで起動されています (SSH_PUBLIC_KEY_FILE を設定して mvm renew)")
+    return ssh
+
+
+def cmd_ssh(args):
+    ssh = ssh_binary(args.name)
     command = [c for c in args.remote_command if c != "--"]
-    host = f"agent@pmva-{args.name}"
     if command:
-        return subprocess.call([ssh, *ssh_options(args.name), host, *command])
+        return subprocess.call([ssh, *ssh_options(args.name), f"agent@pmva-{args.name}", *command])
+    return attach_tmux(args.name, ["agent-attach"], args.no_reconnect)
+
+
+def cmd_view(args):
+    """エージェントの画面を読み取り専用で見る。キー入力はエージェントに届かない。"""
+    ssh_binary(args.name)
+    window = args.window or ("codex" if load_session(args.name)["payload"].get("agent") == "codex" else "claude")
+    log(f"{args.name} の {window} を読み取り専用で表示します (入力はエージェントに届きません。抜けるのは Ctrl-b → d)")
+    return attach_tmux(args.name, ["agent-attach", "--view", window], args.no_reconnect)
+
+
+def attach_tmux(name, remote, no_reconnect):
+    ssh = ssh_binary(name)
+    host = f"agent@pmva-{name}"
     # tmux へのアタッチは、接続が切れたら (ssh の終了コード 255) 自動でつなぎ直す。
     # 途中の通信経路 (プロキシなど) が長時間の接続を切ることがある。作業は tmux の中で続いている
     failures = 0
     while True:
         started = time.time()
-        rc = subprocess.call([ssh, *ssh_options(args.name), "-t", host, "agent-attach"])
-        if rc != 255 or args.no_reconnect:
+        rc = subprocess.call([ssh, *ssh_options(name), "-t", host, *remote])
+        if rc != 255 or no_reconnect:
             return rc
         failures = 1 if time.time() - started > 60 else failures + 1
         if failures > 5:
@@ -1917,6 +2058,25 @@ def build_parser():
     x.add_argument("--interval", type=float, default=15, help="状態を確かめる間隔 (秒、既定 15)")
     x.add_argument("--json", action="store_true", help="JSON で出力")
     x.set_defaults(func=cmd_wait)
+    x = sub.add_parser("follow", help="エージェントの会話の記録 (指示・思考・ツールの実行と結果・応答) を流れるように表示")
+    x.add_argument("names", nargs="*", metavar="name", help="表示するセッション (省略時は動いている全セッション)")
+    x.add_argument("--agent", choices=("claude", "codex"), help="--agent both で起動したときに片方だけ表示する")
+    x.add_argument("--lines", type=int, default=20, help="最初に表示する、直前の出来事の数 (既定 20)")
+    x.add_argument("--chars", type=int, default=500, help="1 件あたりの最大の文字数 (既定 500)")
+    x.add_argument("--full", action="store_true", help="省略せずに全文を表示する")
+    x.add_argument("--interval", type=float, default=2, help="新しい出来事を確かめる間隔 (秒、既定 2)")
+    x.add_argument("--once", action="store_true", help="直前の出来事を表示して終わる")
+    x.add_argument("--json", action="store_true", help="1 行に 1 件の JSON で出力")
+    x.set_defaults(func=cmd_follow)
+    x = sub.add_parser("view", help="エージェントの画面を読み取り専用で表示 (入力はエージェントに届かない)")
+    x.add_argument("name")
+    x.add_argument("--window", help="表示するウィンドウ (claude / codex / shell)")
+    x.add_argument("--no-reconnect", action="store_true", help="接続が切れても再接続しない")
+    x.set_defaults(func=cmd_view)
+    x = sub.add_parser("top", help="VM のメモリの使用量と、多く使っているプロセスを表示")
+    x.add_argument("names", nargs="*", metavar="name", help="表示するセッション (省略時は動いている全セッション)")
+    x.add_argument("--json", action="store_true", help="JSON で出力")
+    x.set_defaults(func=cmd_top)
     x = sub.add_parser("result", help="エージェントの最後の応答を表示")
     x.add_argument("name")
     x.add_argument("--agent", choices=("claude", "codex"), help="--agent both で起動したときに片方だけ表示する")

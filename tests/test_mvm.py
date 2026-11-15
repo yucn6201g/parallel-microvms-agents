@@ -19,6 +19,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.parse
 import zipfile
 from pathlib import Path
 
@@ -195,6 +196,8 @@ class StatusApi(http.server.ThreadingHTTPServer):
                           "windows": [{"name": "shell", "command": "bash"},
                                       {"name": "claude", "command": "claude", "screen": "こんにちは"}]}]
         self.results = {}   # /result?agent=X の応答
+        self.events = {}    # /events?agent=X の応答 (エージェントごとのリスト。呼ばれるたびに先頭から返し、尽きたら 500)
+        self.event_queries = []
         self.status_calls = 0
         api = self
 
@@ -212,6 +215,16 @@ class StatusApi(http.server.ThreadingHTTPServer):
 
             def do_GET(self):
                 api.headers_seen.append({k.lower(): v for k, v in self.headers.items()})
+                if self.path.startswith("/events"):
+                    q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                    api.event_queries.append({k: v[0] for k, v in q.items()})
+                    queue = api.events.get(q["agent"][0], [])
+                    if not queue:
+                        self.send_response(500)
+                        self.send_header("Content-Length", "6")
+                        self.end_headers()
+                        return self.wfile.write(b"broken")
+                    return self.reply(queue.pop(0))
                 if self.path.startswith("/result"):
                     agent = self.path.split("agent=", 1)[-1]
                     return self.reply(api.results.get(agent, {"error": "not found"}))
@@ -753,6 +766,114 @@ class CliTest(unittest.TestCase):
             self.assertIn("claude=done codex=working", out)
         finally:
             api.shutdown()
+
+    def test_follow_prints_transcript_events(self):
+        api = StatusApi()
+        try:
+            env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}")
+            self.mvm("up", "a1", "--agent", "both", env=env)
+            api.events = {
+                "claude": [{"agent": "claude", "file": "/c/1.jsonl", "offset": 100, "events": [
+                    {"kind": "prompt", "text": "テストを直して"},
+                    {"kind": "thinking", "text": "まず失敗しているテストを見る"},
+                    {"kind": "tool", "name": "Bash", "text": "pytest -x"},
+                    {"kind": "output", "text": "\n".join(f"line{i}" for i in range(1, 8))},
+                    {"kind": "output", "text": "No such file", "error": True},
+                    {"kind": "text", "text": "直しました。\n2 行目", "truncated": True}]}],
+                "codex": [{"agent": "codex", "file": "/x/r.jsonl", "offset": 50, "events": [
+                    {"kind": "tool", "name": "exec_command", "text": "npm test"}]}],
+            }
+            _, out, _ = self.mvm("follow", "a1", "--once", env=env)
+            out = out.replace("\r\n", "\n")
+            for line in ("[a1 claude] 指示: テストを直して", "[a1 claude] 思考: まず失敗しているテストを見る",
+                         "[a1 claude] 実行: Bash: pytest -x", "[a1 claude] 結果: line1\n    line2",
+                         "    … (残り 2 行)", "[a1 claude] エラー: No such file",
+                         "[a1 claude] 応答: 直しました。\n    2 行目\n    … (省略。全文は --full)",
+                         "[a1 codex]  実行: exec_command: npm test"):
+                self.assertIn(line, out)
+            self.assertNotIn("line6", out, "--full なしではツールの結果は先頭の数行だけ")
+            q = api.event_queries[0]
+            self.assertEqual((q.get("file", ""), q["tail"], q["max"]), ("", "20", "500"))
+            # --json は 1 行に 1 件。--agent で片方だけ、--full で省略なし (max=0)
+            api.events = {"codex": [{"agent": "codex", "file": "/x/r.jsonl", "offset": 50,
+                                     "events": [{"kind": "text", "text": "完了"}]}]}
+            _, out, _ = self.mvm("follow", "a1", "--once", "--json", "--agent", "codex", "--full", "--lines", "5", env=env)
+            self.assertEqual([json.loads(l) for l in out.splitlines()],
+                             [{"kind": "text", "text": "完了", "session": "a1", "agent": "codex"}])
+            self.assertEqual((api.event_queries[-1]["max"], api.event_queries[-1]["tail"]), ("0", "5"))
+        finally:
+            api.shutdown()
+
+    def test_follow_continues_from_offset_until_vm_ends(self):
+        api = StatusApi()
+        try:
+            env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}")
+            self.mvm("up", "a1", env=env)
+            api.events = {"claude": [
+                {"agent": "claude", "file": None, "offset": 0, "events": []},
+                {"agent": "claude", "file": "/c/1.jsonl", "offset": 100, "reset": True, "events": [{"kind": "text", "text": "一つ目"}]},
+                {"agent": "claude", "file": "/c/1.jsonl", "offset": 180, "events": [{"kind": "text", "text": "二つ目"}]},
+                {"agent": "claude", "file": "/c/2.jsonl", "offset": 40, "reset": True,
+                 "events": [{"kind": "prompt", "text": "新しい指示"}]},
+            ]}
+            # 用意した応答が尽きると API が壊れた応答を返す。そのとき VM が終了していれば、表示をやめて終わる
+            (self.stub_dir / "microvm-0000.term").touch()
+            rc, out, err = self.mvm("follow", "a1", "--interval", "0.05", env=env)
+            out = out.replace("\r\n", "\n")
+            self.assertEqual(rc, 0)
+            self.assertIn("[a1 claude] 応答: 一つ目\n[a1 claude] 応答: 二つ目\n[a1 claude] --- 新しい会話 ---\n"
+                          "[a1 claude] 指示: 新しい指示", out)
+            self.assertIn("a1 は終了しました", err)
+            self.assertEqual([(q.get("file", ""), q["offset"]) for q in api.event_queries[:4]],
+                             [("", "0"), ("-", "0"), ("/c/1.jsonl", "100"), ("/c/1.jsonl", "180")], "前回の続きから読む")
+            self.assertEqual(out.count("新しい会話"), 1, "記録ができたときは「新しい会話」と表示しない")
+        finally:
+            api.shutdown()
+
+    def test_top_and_peek_show_memory(self):
+        api = StatusApi()
+        try:
+            env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}")
+            self.mvm("up", "a1", env=env)
+            st = dict(self.status(claude="working"), oomKills=2, memory={
+                "totalMiB": 4096, "availableMiB": 1024, "usedMiB": 3072,
+                "top": [{"name": "chrome", "count": 9, "rssMiB": 1800}, {"name": "node", "count": 3, "rssMiB": 700}]})
+            api.statuses = [st]
+            _, out, _ = self.mvm("top", "a1", env=env)
+            self.assertIn("[a1] 使用 3.0 GiB / 4.0 GiB (空き 1.0 GiB)", out)
+            self.assertIn("!! メモリ不足でプロセスが 2 回強制終了されました", out)
+            self.assertRegex(out, r"chrome\s+9 個\s+1800 MiB")
+            _, out, _ = self.mvm("top", "--json", env=env)
+            self.assertEqual(json.loads(out)[0]["memory"]["top"][1]["name"], "node")
+            _, out, _ = self.mvm("peek", "a1", env=env)
+            self.assertIn("mem=3.0/4.0GiB", out)
+            self.assertIn("!! メモリ不足でプロセスが 2 回強制終了されました", out)
+            api.statuses = [{"name": "a1", "agent": "claude", "bootstrap": "ready", "windows": []}]
+            _, out, _ = self.mvm("top", "a1", env=env)
+            self.assertIn("古いイメージ", out)
+        finally:
+            api.shutdown()
+
+    def test_view_attaches_read_only(self):
+        fake = Path(self.tmp.name) / "fakessh"
+        fake.mkdir()
+        record = Path(self.tmp.name) / "ssh-args.json"
+        script = fake / "fake_ssh.py"
+        script.write_text(f"import json, sys\nopen({str(record)!r}, 'w').write(json.dumps(sys.argv[1:]))\n", encoding="utf-8")
+        if IS_WINDOWS:
+            (fake / "ssh.cmd").write_text(f'@"{sys.executable}" "{script}" %*\r\n', encoding="utf-8")
+        else:
+            (fake / "ssh").write_text(f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n', encoding="utf-8")
+            (fake / "ssh").chmod(0o755)
+        env = dict(self.env, PATH=str(fake) + os.pathsep + self.env["PATH"])
+        self.mvm("up", "v1", "--agent", "codex", env=env)
+        _, _, err = self.mvm("view", "v1", env=env)
+        args = json.loads(record.read_text(encoding="utf-8"))
+        self.assertEqual(args[-4:], ["agent@pmva-v1", "agent-attach", "--view", "codex"])
+        self.assertIn("-t", args)
+        self.assertIn("読み取り専用", err)
+        self.mvm("view", "v1", "--window", "shell", env=env)
+        self.assertEqual(json.loads(record.read_text(encoding="utf-8"))[-1], "shell")
 
     def test_ssh_proxy_pipes_binary_stdio(self):
         """ssh の ProxyCommand と同じ使い方で、標準入出力がバイナリのまま中継されることを確かめる。"""
