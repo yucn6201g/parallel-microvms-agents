@@ -149,6 +149,12 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
   - `/status?lines=` に数値以外を渡すと応答が返らなかった → 400 を返す
   - 修正 21: WebSocket の送信中はロックを持ったまま待つため、双方向に大量のデータが流れると、こちらの受信が止まり、相手と互いに待ち合って止まることがあった (Windows の CI で発生。`mvm ssh` で大きなファイルを送りながら出力を受けるときにも起こり得た) → ソケットをノンブロッキングにし、ロックを持たずに待つ。送信は専用スレッドで行う。再現テストを追加
 
+## H. 司令塔から操作するための機能 (2026-11-15)
+
+- [x] `mvm wait` / `result` / `--json`: 自動テスト (状態 API の代わりのサーバー、`supervisor.py` と `notify.sh` を手元で動かす結合テスト) のみ
+- [x] `result` の会話記録の読み取り: Claude Code 2.1.325 の実際の会話記録 (JSONL) から、最後の応答を取り出せることを確認。Stop フックの入力に `last_assistant_message`、Notification フックの入力に `notification_type` (`idle_prompt` / `permission_prompt` など) があることを、同じ版のパッケージで確認
+- [ ] 実際のエージェントのフックで状態が変わること (Claude Code: `UserPromptSubmit` / `PostToolUse` / `Stop` / `Notification`、Codex: `notify`): 未確認。MicroVM で `mvm up` → `mvm wait` → `mvm result` を試す。固定している版 (Claude Code 2.1.312 / Codex 0.165.0) が `last_assistant_message` を渡さない場合は、会話記録から取り出す動きになる
+
 ## 結果
 
 | 項目 | 結果 / メモ |

@@ -50,7 +50,7 @@
 
 | 方法 | 手元の負荷 | 用途 | 仕組み |
 |---|---|---|---|
-| `mvm peek` / `watch` / `send` | ごく小さい (定期的な HTTPS) | 進捗確認、短い指示 | VM 内 `supervisor.py` の `:8080` API が `tmux capture-pane` / `send-keys` を実行 |
+| `mvm peek` / `watch` / `send` / `wait` / `result` | ごく小さい (定期的な HTTPS) | 進捗確認、短い指示、終わるまで待つ、最後の応答を読む | VM 内 `supervisor.py` の `:8080` API が `tmux capture-pane` / `send-keys` を実行し、エージェントの状態と最後の応答を返す |
 | `mvm ssh` | 小さい (ssh + mvm の中継) | 対話操作、VS Code Remote-SSH、scp、ポート転送 | ssh の ProxyCommand で `mvm _ssh-proxy` (内蔵 WebSocket クライアント) が WSS (`:7681`) に接続し、VM 内の websocat → sshd (127.0.0.1:2222) につなぐ |
 | `mvm shell` / コンソールの Connect | 小さい | SSH が使えないときの予備、障害調査 | AWS 標準の `SHELL_INGRESS` (`:8022`) |
 
@@ -77,7 +77,7 @@ MicroVM はビルド時のスナップショットを全台で共有します。
 | 状況 | 動作 |
 |---|---|
 | `mvm ssh` で接続中 | ServerAlive (30 秒ごと) の通信があるのでサスペンドされない (PoC で確認) |
-| `mvm watch` を実行中 | 定期的な `/status` 取得でサスペンドされない |
+| `mvm watch` / `mvm wait` を実行中 | 定期的な `/status` 取得でサスペンドされない (`wait` は、終わった台には取得をやめる) |
 | 何も接続していないが、エージェントが作業中 | キープアライブ (下記) が `/healthz` を送るのでサスペンドされない |
 | 何も接続しておらず、作業もしていない | `IDLE_MAX_SECONDS` (既定 30 分) 後にサスペンド。メモリごと保存され、次の通信で再開する。外向き通信は再開時に切断されるので、エージェントは API 呼び出しをリトライする |
 | 無人で長時間走らせたい | キープアライブで足りる。確実に止めたくなければ `mvm up --idle off` (8 時間で終了) |
@@ -100,9 +100,20 @@ flowchart LR
 - 一時停止中・終了済みの VM は状態が更新されない (`updatedAt` が古い) ので、Lambda は触らない (起こさない)
 - Lambda は MicroVMs の REST API を自前で署名して呼ぶ。Lambda の実行環境の boto3 が新しいサービスに対応しているかに左右されないため
 
-### 通知
+### エージェントの状態と通知
 
-Claude Code の hooks (`Stop`、`Notification`) と Codex の `notify` から `image/notify.sh` を呼び、Webhook に 1 行の通知を送ります。Webhook の URL は他の認証情報と同じく Secrets Manager に置きます。
+Claude Code の hooks と Codex の `notify` から `image/notify.sh` を呼び、エージェントの状態を `~/.pmva/agents/<claude|codex>.json` に記録します。`supervisor.py` の `/status` がそれを返し、`mvm wait` / `peek` が使います。
+
+| きっかけ | 状態 |
+|---|---|
+| `bootstrap.sh` がエージェントを起動した | 最初の指示があれば `working`、なければ `ready` |
+| `mvm send` で指示を送った (`/send`) / Claude Code の `UserPromptSubmit`、`PostToolUse` | `working` |
+| Claude Code の `Stop` / Codex の `agent-turn-complete` | `done` (最後の応答の文章も記録し、`/result` で返す) |
+| Claude Code の `Notification` (許可・入力待ち) | `waiting`。応答の後にしばらく入力がないときの通知 (`idle_prompt`) では `done` のまま |
+| tmux のウィンドウがシェルに戻った (`/status` を返すときに調べる) | `exited` |
+
+フックは通知の設定にかかわらず常に入れます。利用者が `~/.claude/settings.json` に書いたフックは残し、pmva のものだけを入れ直します。スナップショットの復元で設定が上書きされるので、復元の後に入れます。
+通知 (`--notify`) が有効なら、`done` と `waiting` のときに Webhook にも 1 行の通知を送ります。Webhook の URL は他の認証情報と同じく Secrets Manager に置きます。
 
 ### 永続化
 

@@ -190,6 +190,12 @@ class StatusApi(http.server.ThreadingHTTPServer):
         self.received = []
         self.headers_seen = []
         self.snapshot_ok = True
+        # /status の応答。複数あれば呼ばれるたびに先頭から順に返し、最後の 1 つは返し続ける
+        self.statuses = [{"name": "a1", "agent": "claude", "bootstrap": "ready", "lastSnapshot": None,
+                          "windows": [{"name": "shell", "command": "bash"},
+                                      {"name": "claude", "command": "claude", "screen": "こんにちは"}]}]
+        self.results = {}   # /result?agent=X の応答
+        self.status_calls = 0
         api = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -206,9 +212,11 @@ class StatusApi(http.server.ThreadingHTTPServer):
 
             def do_GET(self):
                 api.headers_seen.append({k.lower(): v for k, v in self.headers.items()})
-                self.reply({"name": "a1", "agent": "claude", "bootstrap": "ready", "lastSnapshot": None,
-                            "windows": [{"name": "shell", "command": "bash"},
-                                        {"name": "claude", "command": "claude", "screen": "こんにちは"}]})
+                if self.path.startswith("/result"):
+                    agent = self.path.split("agent=", 1)[-1]
+                    return self.reply(api.results.get(agent, {"error": "not found"}))
+                api.status_calls += 1
+                self.reply(api.statuses.pop(0) if len(api.statuses) > 1 else api.statuses[0])
 
             def do_POST(self):
                 body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
@@ -629,6 +637,120 @@ class CliTest(unittest.TestCase):
             self.assertEqual(api.received[-1][1], {"window": "shell", "text": "echo hi", "enter": False})
             self.mvm("send", "a1", "--", "-h", env=env)
             self.assertEqual(api.received[-1][1]["text"], "-h")
+        finally:
+            api.shutdown()
+
+    def status(self, name="a1", idle=5, **agents):
+        return {"name": name, "agent": "both" if len(agents) > 1 else "claude", "bootstrap": "ready",
+                "idleSeconds": idle, "windows": [],
+                "agents": {a: (v if isinstance(v, dict) else {"state": v}) for a, v in agents.items()}}
+
+    def test_wait_until_agent_finishes(self):
+        api = StatusApi()
+        try:
+            self.mvm("up", "a1")
+            env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}")
+            api.statuses = [self.status(claude="starting"), self.status(claude="working"), self.status(claude="done")]
+            rc, out, _ = self.mvm("wait", "a1", "--interval", "0.05", "--json", env=env)
+            r = json.loads(out)
+            self.assertEqual(rc, 0)
+            self.assertTrue(r["finished"])
+            self.assertEqual(r["sessions"][0]["state"], "done")
+            self.assertEqual(api.status_calls, 3, "終わるまで状態を確かめ続ける")
+            # 許可待ちは、その内容と一緒に返す
+            api.statuses = [self.status(claude={"state": "waiting", "message": "Claude needs your permission to use Bash"})]
+            rc, out, _ = self.mvm("wait", "a1", "--interval", "0.05", env=env)
+            self.assertIn("a1               waiting  (claude: 許可・入力待ち)", out)
+            self.assertIn("claude: Claude needs your permission to use Bash", out)
+            # 時間切れなら終了コード 2 で返る (司令塔のエージェントは呼び直す)
+            api.statuses = [self.status(claude="working")]
+            rc, _, err = self.mvm("wait", "a1", "--timeout", "0.3", "--interval", "0.05", env=env, check=False)
+            self.assertEqual(rc, 2)
+            self.assertIn("時間切れです。まだ終わっていないセッション: a1 (working)", err)
+            # 作業中のはずなのに画面も CPU も長く動かなければ、止まっているとみなして返る
+            api.statuses = [self.status(idle=400, claude="working")]
+            rc, out, _ = self.mvm("wait", "a1", "--interval", "0.05", "--json", env=env)
+            self.assertEqual(json.loads(out)["sessions"][0]["state"], "stalled")
+            rc, out, _ = self.mvm("wait", "a1", "--interval", "0.05", env=env)
+            self.assertIn("(画面と CPU が 400 秒動いていません)", out)
+            # AWS から状態を取れないときは、終わったとはみなさずに待ち続ける
+            rc, out, _ = self.mvm("wait", "a1", "--timeout", "0.3", "--interval", "0.05", "--json",
+                                  env=dict(env, PMVA_STUB_GET_DENIED="1"), check=False)
+            self.assertEqual((rc, json.loads(out)["sessions"][0]["state"]), (2, "unreachable"))
+            rc, _, _ = self.mvm("wait", "a1", "--idle", "0", "--timeout", "0.2", "--interval", "0.05", env=env, check=False)
+            self.assertEqual(rc, 2, "--idle 0 なら止まっているとはみなさない")
+        finally:
+            api.shutdown()
+
+    def test_wait_multiple_sessions(self):
+        api = StatusApi()
+        try:
+            env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}")
+            self.mvm("up", "a1", "--agent", "both", env=env)
+            self.mvm("up", "a2", env=env)
+            # --agent both は両方のエージェントが終わるまで待つ。終わり方が違えば、人の対応が要るほうを代表にする
+            api.statuses = [self.status(claude="done", codex="working"), self.status(claude="done", codex="exited")]
+            rc, out, _ = self.mvm("wait", "a1", "--interval", "0.05", "--json", env=env)
+            self.assertEqual(json.loads(out)["sessions"][0]["state"], "exited")
+            # 名前を省略すると動いている全セッション。サスペンド中の VM は作業していないので API を呼ばずに終わり扱い
+            (self.stub_dir / "microvm-0000.suspended").touch()
+            api.statuses = [self.status(claude="working")]
+            rc, out, _ = self.mvm("wait", "--any", "--interval", "0.05", "--json", env=env)
+            r = {x["name"]: x for x in json.loads(out)["sessions"]}
+            self.assertEqual(rc, 0)
+            self.assertEqual((r["a1"]["state"], r["a1"]["finished"]), ("suspended", True))
+            self.assertEqual((r["a2"]["state"], r["a2"]["finished"]), ("working", False))
+            rc, _, _ = self.mvm("wait", "--timeout", "0.3", "--interval", "0.05", env=env, check=False)
+            self.assertEqual(rc, 2, "--any がなければ全台を待つ")
+            # 終了した VM も終わり扱い
+            (self.stub_dir / "microvm-0001.term").touch()
+            rc, out, _ = self.mvm("wait", "a2", "--interval", "0.05", "--json", env=env)
+            self.assertEqual(json.loads(out)["sessions"][0]["state"], "terminated")
+        finally:
+            api.shutdown()
+
+    def test_wait_with_old_image_uses_idle_time(self):
+        """エージェントの状態を返さない古いイメージでは、画面と CPU が止まっているかだけで判断する。"""
+        api = StatusApi()
+        try:
+            self.mvm("up", "a1")
+            env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}")
+            old = {"name": "a1", "agent": "claude", "bootstrap": "ready", "windows": []}
+            api.statuses = [dict(old, idleSeconds=10), dict(old, idleSeconds=400)]
+            rc, out, _ = self.mvm("wait", "a1", "--interval", "0.05", "--json", env=env)
+            self.assertEqual(json.loads(out)["sessions"][0]["state"], "stalled")
+            self.assertEqual(api.status_calls, 2)
+            rc, _, err = self.mvm("result", "a1", env=env, check=False)
+            self.assertNotEqual(rc, 0)
+            self.assertIn("mvm image build", err)
+        finally:
+            api.shutdown()
+
+    def test_result_and_json_output(self):
+        api = StatusApi()
+        try:
+            env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}")
+            self.mvm("up", "a1", "--agent", "both", "--repo", "https://github.com/o/r.git", env=env)
+            api.results = {"claude": {"agent": "claude", "state": "done", "text": "PR を作りました: #12"},
+                           "codex": {"agent": "codex", "state": "working", "text": None}}
+            rc, out, _ = self.mvm("result", "a1", "--agent", "claude", env=env)
+            self.assertEqual(out.strip(), "PR を作りました: #12")
+            rc, out, _ = self.mvm("result", "a1", env=env, check=False)
+            self.assertEqual(rc, 1, "応答がまだないエージェントがあれば 1")
+            self.assertIn("--- claude (done) ---\nPR を作りました: #12", out)
+            self.assertIn("(まだ codex の応答がありません)", out)
+            _, out, _ = self.mvm("result", "a1", "--json", "--agent", "claude", env=env)
+            self.assertEqual(json.loads(out)["text"], "PR を作りました: #12")
+            # ls / peek も JSON で出せる (司令塔のエージェントが読み取りやすいように)
+            _, out, _ = self.mvm("ls", "--json", env=env)
+            rows = json.loads(out)
+            self.assertEqual([(r["name"], r["state"], r["agent"], r["repo"], r["branch"]) for r in rows],
+                             [("a1", "RUNNING", "both", "https://github.com/o/r.git", "pmva/a1")])
+            api.statuses = [self.status(claude="done", codex="working")]
+            _, out, _ = self.mvm("peek", "a1", "--json", env=env)
+            self.assertEqual(json.loads(out)["agents"]["codex"]["state"], "working")
+            _, out, _ = self.mvm("peek", "a1", env=env)
+            self.assertIn("claude=done codex=working", out)
         finally:
             api.shutdown()
 

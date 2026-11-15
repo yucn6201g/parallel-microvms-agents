@@ -96,24 +96,15 @@ case "$CODEX_AUTH" in
   *) warn "unknown codexAuth: $CODEX_AUTH" ;;
 esac
 
-# ---------------------------------------------------------------- 完了・入力待ちの通知
+# ---------------------------------------------------------------- 状態の記録と、完了・入力待ちの通知
+# エージェントのフックから notify.sh を呼び、作業中・完了・入力待ちを ~/.pmva/agents/ に記録する (mvm wait / mvm result が使う)。
+# 通知の Webhook が設定されていれば、完了と入力待ちを通知もする
 NOTIFY_SECRET="$(j .notifySecret)"
 if [ -n "$NOTIFY_SECRET" ]; then
   log "notify webhook: $NOTIFY_SECRET"
   secret "$NOTIFY_SECRET" > "$SECRETS_DIR/notify_webhook"
-  # Claude Code: 応答の完了 (Stop) と許可・入力待ち (Notification) でフックを呼ぶ
-  settings="$HOME/.claude/settings.json"
-  [ -s "$settings" ] || echo '{}' > "$settings"
-  jq '.hooks.Stop = [{"hooks": [{"type": "command", "command": "/opt/pmva/notify.sh claude-stop"}]}]
-      | .hooks.Notification = [{"hooks": [{"type": "command", "command": "/opt/pmva/notify.sh claude-notification"}]}]' \
-    "$settings" > "$settings.tmp" && mv "$settings.tmp" "$settings"
-  # Codex: notify はトップレベルのキーなので、テーブル ([projects...]) より前に置く
-  codex_cfg="$HOME/.codex/config.toml"
-  if ! grep -q '^notify *=' "$codex_cfg" 2>/dev/null; then
-    { echo 'notify = ["/opt/pmva/notify.sh", "codex"]'; cat "$codex_cfg" 2>/dev/null || true; } > "$codex_cfg.tmp"
-    mv "$codex_cfg.tmp" "$codex_cfg"
-  fi
 fi
+# フックの設定は、スナップショットの復元 (~/.claude と ~/.codex を上書きする) の後で入れる (ワークスペースの節)
 
 # ---------------------------------------------------------------- Git / GitHub
 GITHUB_SECRET="$(j .githubSecret)"
@@ -167,6 +158,24 @@ if [ -n "$REPO" ]; then
 fi
 addenv PMVA_WORKDIR "$WORKDIR"
 
+# エージェントのフック (状態の記録と通知)。Claude Code は、利用者が自分で書いたフックを残し、pmva のフックだけを入れ直す
+settings="$HOME/.claude/settings.json"
+[ -s "$settings" ] || echo '{}' > "$settings"
+jq 'def pmva(ev; arg):
+      .hooks[ev] = ([(.hooks[ev] // [])[] | select([.hooks[]?.command? // "" | startswith("/opt/pmva/notify.sh")] | any | not)]
+                    + [{"hooks": [{"type": "command", "command": ("/opt/pmva/notify.sh " + arg)}]}]);
+    pmva("UserPromptSubmit"; "claude-prompt") | pmva("PostToolUse"; "claude-tool")
+    | pmva("Stop"; "claude-stop") | pmva("Notification"; "claude-notification")' \
+  "$settings" > "$settings.tmp" && mv "$settings.tmp" "$settings"
+# Codex: notify はトップレベルのキーなので、テーブル ([projects...]) より前に置く
+codex_cfg="$HOME/.codex/config.toml"
+if ! grep -q '^notify *=' "$codex_cfg" 2>/dev/null; then
+  { echo 'notify = ["/opt/pmva/notify.sh", "codex"]'; cat "$codex_cfg" 2>/dev/null || true; } > "$codex_cfg.tmp"
+  mv "$codex_cfg.tmp" "$codex_cfg"
+elif ! grep -q '^notify *=.*/opt/pmva/notify.sh' "$codex_cfg"; then
+  warn "codex notify is already set in config.toml; mvm wait cannot detect when Codex finishes"
+fi
+
 # 無人で起動できるよう、初回オンボーディングと作業ディレクトリの「信頼しますか？」確認を済ませておく
 claude_json="$HOME/.claude.json"
 [ -s "$claude_json" ] || echo '{}' > "$claude_json"
@@ -217,6 +226,11 @@ start_agent() {
   local window="$1" cmd="$2"
   tmux list-windows -t main -F '#{window_name}' | grep -qx "$window" && return 0
   tmux new-window -d -t main -n "$window" -c "$WORKDIR"
+  # 最初の状態 (mvm wait 用)。最初の指示があれば作業中、なければ指示待ち。以降はエージェントのフックが書き換える
+  local initial=ready
+  [ -z "$PROMPT_TEXT" ] || initial=working
+  mkdir -p "$PMVA/agents"
+  jq -nc --arg s "$initial" '{state: $s, at: now}' > "$PMVA/agents/$window.json"
   # シェル経由で起動するので、エージェントを終了してもウィンドウはシェルとして残る
   tmux send-keys -t "main:$window" "$cmd" Enter
 }

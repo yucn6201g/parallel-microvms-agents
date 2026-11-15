@@ -253,6 +253,119 @@ class SupervisorTest(unittest.TestCase):
                                  "[nt] Claude Code: Claude needs your permission to use Bash",
                                  "[nt] Codex の応答が終わりました: テスト完了"])
 
+    # ---------------------------------------------------------------- エージェントの状態と最後の応答 (mvm wait / result)
+
+    def agents(self):
+        return {a: v["state"] for a, v in self.get("/status?lines=0")[1]["agents"].items()}
+
+    def notify(self, *args, stdin=None):
+        subprocess.run([str(self.opt / "notify.sh"), *args], input=(stdin or "").encode(), env=self.env, check=True)
+
+    def test_agent_states_follow_hooks(self):
+        # 利用者が自分で書いたフックは残す
+        (self.home / ".claude").mkdir()
+        (self.home / ".claude" / "settings.json").write_text(json.dumps(
+            {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo mine"}]}]}}), encoding="utf-8")
+        payload = {"name": "st", "agent": "both", "claudeAuth": "none", "codexAuth": "none", "prompt": "テストして"}
+        self.hook("run", {"microvmId": "m", "runHookPayload": json.dumps(payload)})
+        self.wait_ready()
+        # 2 回目の起動 (resume 後の run など) でも pmva のフックは重複しない
+        self.hook("run", {"microvmId": "m", "runHookPayload": json.dumps(payload)})
+        self.wait_ready()
+        hooks = json.loads((self.home / ".claude" / "settings.json").read_text(encoding="utf-8"))["hooks"]
+        self.assertEqual([h["hooks"][0]["command"] for h in hooks["Stop"]], ["echo mine", "/opt/pmva/notify.sh claude-stop"])
+        for event, kind in (("UserPromptSubmit", "claude-prompt"), ("PostToolUse", "claude-tool"),
+                            ("Notification", "claude-notification")):
+            self.assertEqual([h["hooks"][0]["command"] for h in hooks[event]], [f"/opt/pmva/notify.sh {kind}"])
+        codex_cfg = (self.home / ".codex" / "config.toml").read_text(encoding="utf-8")
+        self.assertEqual(codex_cfg.count("notify ="), 1)
+
+        # 最初の指示を渡して起動したので作業中
+        self.assertEqual(self.agents(), {"claude": "working", "codex": "working"})
+        self.notify("claude-stop", stdin="{}")
+        self.notify("codex", json.dumps({"type": "agent-turn-complete", "last-assistant-message": "直しました"}))
+        self.assertEqual(self.agents(), {"claude": "done", "codex": "done"})
+        # 応答の後にしばらく入力がないときの通知では「完了」のまま。許可を求める通知なら入力待ち
+        self.notify("claude-notification", stdin=json.dumps({"message": "Claude is waiting for your input",
+                                                             "notification_type": "idle_prompt"}))
+        self.assertEqual(self.agents()["claude"], "done")
+        self.notify("claude-notification", stdin=json.dumps({"message": "Claude needs your permission to use Bash",
+                                                             "notification_type": "permission_prompt"}))
+        _, st = self.get("/status?lines=0")
+        self.assertEqual(st["agents"]["claude"]["state"], "waiting")
+        self.assertEqual(st["agents"]["claude"]["message"], "Claude needs your permission to use Bash")
+        self.assertIsInstance(st["agents"]["claude"]["since"], float)
+        # 許可した後にツールが動けば作業中に戻る
+        self.notify("claude-tool", stdin="{}")
+        self.assertEqual(self.agents()["claude"], "working")
+        # mvm send で指示を送れば作業中 (Codex には指示を受け取ったときのフックがない)
+        code, _ = self.request(self.api_port, "POST", "/send", {"window": "codex", "text": "次はこれ"})
+        self.assertEqual(code, 200)
+        self.assertEqual(self.agents()["codex"], "working")
+        # Enter を送らないときや、shell ウィンドウへの送信では変えない
+        self.notify("codex", json.dumps({"type": "agent-turn-complete", "last-assistant-message": "done"}))
+        self.request(self.api_port, "POST", "/send", {"window": "codex", "text": "途中", "enter": False})
+        self.request(self.api_port, "POST", "/send", {"window": "shell", "text": "true"})
+        self.assertEqual(self.agents()["codex"], "done")
+        # エージェントが終了してシェルに戻ったら exited
+        subprocess.run(["tmux", "send-keys", "-t", "main:codex", "C-c"], env=self.env, check=True)
+        for _ in range(50):
+            if self.agents()["codex"] == "exited":
+                break
+            time.sleep(0.1)
+        self.assertEqual(self.agents()["codex"], "exited")
+
+    def test_agent_state_before_first_prompt(self):
+        self.hook("run", {"microvmId": "m", "runHookPayload": json.dumps({"name": "r", "agent": "claude"})})
+        self.wait_ready()
+        self.assertEqual(self.agents(), {"claude": "ready"}, "最初の指示がなければ指示待ち")
+        self.hook("run", {"microvmId": "m", "runHookPayload": json.dumps({"name": "n", "agent": "none"})})
+        self.wait_ready()
+        self.assertEqual(self.agents(), {}, "エージェントを起動していなければ空")
+
+    def test_result_returns_last_answer(self):
+        self.hook("run", {"microvmId": "m", "runHookPayload": json.dumps({"name": "res", "agent": "both"})})
+        self.wait_ready()
+        self.assertEqual(self.get("/result?agent=claude")[1]["text"], None, "まだ会話がなければ None")
+        # Claude Code の会話記録: 最後のツール結果より後の文章だけが最後の応答
+        records = [
+            {"type": "user", "message": {"role": "user", "content": "テストを直して"}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "調べます"}]}},
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash", "input": {}}]}},
+            {"type": "user", "message": {"content": [{"type": "tool_result", "content": "ok"}]}},
+            {"type": "assistant", "message": {"content": [{"type": "thinking", "thinking": ""}]}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "テストが通りました。"}]}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "PR も作りました。"}]}},
+            {"type": "user", "isMeta": True, "message": {"content": "<local-command-caveat>"}},
+            {"type": "system", "content": "x"},
+        ]
+        project = self.home / ".claude" / "projects" / "-home-agent-work"
+        project.mkdir(parents=True)
+        transcript = project / "s1.jsonl"
+        transcript.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n", encoding="utf-8")
+        # Stop フックが会話記録の場所を渡さなくても、いちばん新しい記録を読む
+        self.notify("claude-stop", stdin="{}")
+        _, r = self.get("/result?agent=claude")
+        self.assertEqual((r["agent"], r["state"], r["text"]), ("claude", "done", "テストが通りました。\n\nPR も作りました。"))
+        # Stop フックが渡した場所を優先する
+        other = project / "s0.jsonl"
+        other.write_text(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "別の会話"}]}},
+                                    ensure_ascii=False) + "\n", encoding="utf-8")
+        self.notify("claude-stop", stdin=json.dumps({"transcript_path": str(transcript)}))
+        self.assertEqual(self.get("/result?agent=claude")[1]["text"], "テストが通りました。\n\nPR も作りました。")
+        self.notify("claude-stop", stdin=json.dumps({"transcript_path": str(other)}))
+        self.assertEqual(self.get("/result?agent=claude")[1]["text"], "別の会話")
+        # Stop フックが最後の応答の文章を渡す版では、それをそのまま使う
+        self.notify("claude-stop", stdin=json.dumps({"transcript_path": str(other), "last_assistant_message": "フックの応答"}))
+        self.assertEqual(self.get("/result?agent=claude")[1]["text"], "フックの応答")
+        # Codex は notify で受け取った最後の応答 (切り詰めない)
+        long_answer = "変更点:\n" + "あ" * 1000
+        self.notify("codex", json.dumps({"type": "agent-turn-complete", "last-assistant-message": long_answer}))
+        self.assertEqual(self.get("/result?agent=codex")[1]["text"], long_answer)
+        _, st = self.get("/status?lines=0")
+        self.assertEqual(len(st["agents"]["codex"]["message"]), 300, "/status では短くする")
+        self.assertEqual(self.get("/result?agent=x")[0], 400)
+
     # ---------------------------------------------------------------- 認証方式ごとの初期化
 
     def run_session(self, **payload):
