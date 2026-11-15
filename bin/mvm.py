@@ -1367,9 +1367,15 @@ def cmd_fleet(args):
 
 # ---------------------------------------------------------------- 一覧 / 停止
 
+def print_json(obj):
+    print(json.dumps(obj, ensure_ascii=False, indent=2))
+
+
 def cmd_ls(args):
     fmt = "{:<16} {:<11} {:<7} {:<22} {:<22} {}"
-    print(fmt.format("NAME", "STATE", "AGENT", "AUTH", "STARTED", "MICROVM"))
+    rows = []
+    if not args.json:
+        print(fmt.format("NAME", "STATE", "AGENT", "AUTH", "STARTED", "MICROVM"))
     for name in session_names():
         s = load_session(name)
         if s.get("terminated") and not args.all:
@@ -1382,7 +1388,14 @@ def cmd_ls(args):
         started = s.get("startedAt") or "-"
         if isinstance(started, (int, float)):  # AWS CLI v1 は UNIX 秒で返す
             started = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(started))
-        print(fmt.format(name, state, p.get("agent", "-"), auth, started, s["microvmId"]))
+        if args.json:
+            rows.append({"name": name, "state": state, "agent": p.get("agent"), "claudeAuth": p.get("claudeAuth"),
+                         "codexAuth": p.get("codexAuth"), "repo": p.get("repo"), "branch": p.get("branch"),
+                         "startedAt": started if started != "-" else None, "microvmId": s["microvmId"]})
+        else:
+            print(fmt.format(name, state, p.get("agent", "-"), auth, started, s["microvmId"]))
+    if args.json:
+        print_json(rows)
     return 0
 
 
@@ -1479,9 +1492,17 @@ def cmd_save(args):
 
 # ---------------------------------------------------------------- 確認 / 操作
 
+AGENT_STATE_LABELS = {
+    "starting": "起動の準備中", "working": "作業中", "done": "応答が終わった", "waiting": "許可・入力待ち",
+    "ready": "最初の指示待ち", "exited": "エージェントが終了した", "failed": "起動の準備に失敗", "unknown": "不明",
+}
+
+
 def format_status(st):
-    lines = [f"[{st.get('name')}] agent={st.get('agent')} bootstrap={st.get('bootstrap')} "
-             f"lastSnapshot={st.get('lastSnapshot') or '-'}"]
+    agents = st.get("agents") or {}
+    states = " ".join(f"{a}={v.get('state')}" for a, v in agents.items())
+    lines = [f"[{st.get('name')}] agent={st.get('agent')} {states + ' ' if states else ''}"
+             f"bootstrap={st.get('bootstrap')} lastSnapshot={st.get('lastSnapshot') or '-'}"]
     for w in st.get("windows", []):
         if w.get("name") == "shell":
             continue
@@ -1491,8 +1512,127 @@ def format_status(st):
 
 
 def cmd_peek(args):
-    print(format_status(vm_api(args.name, "GET", f"/status?lines={args.lines}")))
+    st = vm_api(args.name, "GET", f"/status?lines={args.lines}")
+    if args.json:
+        print_json(st)
+    else:
+        print(format_status(st))
     return 0
+
+
+def session_agents(name, agent=None):
+    if agent:
+        return [agent]
+    return {"claude": ["claude"], "codex": ["codex"], "both": ["claude", "codex"]}.get(
+        load_session(name)["payload"].get("agent"), [])
+
+
+def cmd_result(args):
+    agents = session_agents(args.name, args.agent)
+    if not agents:
+        die(f"{args.name} ではエージェントを起動していません (--agent none)")
+    results = []
+    for agent in agents:
+        r = vm_api(args.name, "GET", f"/result?agent={agent}")
+        if "agent" not in r:
+            die(f"{args.name}: 最後の応答を取得できません ({r.get('error') or r})。"
+                "イメージが古い場合は mvm image build で作り直してください")
+        results.append(r)
+    if args.json:
+        print_json(results if len(results) > 1 else results[0])
+    else:
+        for r in results:
+            if len(results) > 1:
+                print(f"--- {r['agent']} ({r.get('state')}) ---")
+            print(r.get("text") if r.get("text") else f"(まだ {r['agent']} の応答がありません)")
+    return 0 if all(r.get("text") for r in results) else 1
+
+
+# mvm wait が「終わった」とみなすエージェントの状態と、まとめるときの優先順 (先にあるものを代表にする)
+WAIT_FINISHED = ("failed", "exited", "waiting", "ready", "done")
+
+
+def wait_check(name, idle_limit):
+    """1 台の状態を調べる。finished=True なら、作業が終わったか人の対応が必要で、待つのをやめてよい。"""
+    r = {"name": name, "finished": False}
+    vm = vm_state(name)
+    r["vm"] = vm
+    if vm in ("TERMINATED", "TERMINATING", "GONE"):
+        return dict(r, state="terminated", finished=True)
+    if vm == "SUSPENDED":
+        # 作業中の VM はキープアライブとアイドル判定で起きているので、サスペンドしているなら作業はしていない
+        return dict(r, state="suspended", finished=True)
+    if vm == "UNKNOWN":
+        return dict(r, state="unreachable")   # AWS から状態を取れなかった。次の確認でもう一度試す
+    if vm != "RUNNING":
+        return dict(r, state="starting")
+    try:
+        st = vm_api(name, "GET", "/status?lines=0", timeout=15)
+    except SystemExit as e:
+        return dict(r, state="unreachable", error=str(e.code))
+    agents = st.get("agents")
+    r.update(idleSeconds=st.get("idleSeconds"), bootstrap=st.get("bootstrap"))
+    boot = str(st.get("bootstrap") or "")
+    if boot.startswith("failed"):
+        return dict(r, state="failed", agents=agents or {}, finished=True)
+    if agents is None:
+        # 古いイメージ (エージェントの状態を返さない): 画面と CPU が止まっているかだけで判断する
+        idle = st.get("idleSeconds") or 0
+        if boot.startswith("ready") and idle_limit and idle >= idle_limit:
+            return dict(r, state="stalled", finished=True)
+        return dict(r, state="working" if boot.startswith("ready") else "starting")
+    r["agents"] = agents
+    if not agents:
+        return dict(r, state="ready" if boot.startswith("ready") else "starting", finished=boot.startswith("ready"))
+    states = [a.get("state") for a in agents.values()]
+    if all(x in WAIT_FINISHED for x in states):
+        return dict(r, state=min(states, key=WAIT_FINISHED.index), finished=True)
+    idle = st.get("idleSeconds") or 0
+    if boot.startswith("ready") and idle_limit and idle >= idle_limit:
+        # 作業中のはずなのに画面も CPU も動かない (Codex の承認待ちなど、フックで分からない待ち)
+        return dict(r, state="stalled", finished=True)
+    return dict(r, state="starting" if "starting" in states else "working")
+
+
+def format_wait(r):
+    line = f"{r['name']:<16} {r['state']}"
+    agents = r.get("agents") or {}
+    if agents:
+        line += "  (" + ", ".join(f"{a}: {AGENT_STATE_LABELS.get(v.get('state'), v.get('state'))}"
+                                  for a, v in agents.items()) + ")"
+    if r["state"] == "stalled":
+        line += f"  (画面と CPU が {r.get('idleSeconds')} 秒動いていません)"
+    for a, v in agents.items():
+        if v.get("state") == "waiting" and v.get("message"):
+            line += f"\n    {a}: {v['message']}"
+    return line
+
+
+def cmd_wait(args):
+    names = args.names or active_names()
+    if not names:
+        die("待つセッションがありません (mvm ls で確認)")
+    for name in names:
+        load_session(name)
+    deadline = time.time() + args.timeout if args.timeout > 0 else None
+    results, pending = {}, list(names)
+    while True:
+        for name in list(pending):
+            r = results[name] = wait_check(name, args.idle)
+            if r["finished"]:
+                pending.remove(name)
+                if not args.json:
+                    print(format_wait(r), flush=True)
+        enough = not pending or (args.any and len(pending) < len(names))
+        if enough or (deadline is not None and time.time() >= deadline):
+            break
+        time.sleep(args.interval if deadline is None else max(0.0, min(args.interval, deadline - time.time())))
+    if args.json:
+        print_json({"finished": enough, "sessions": [results[n] for n in names]})
+    elif pending:
+        log(("時間切れです。" if not enough else "") + "まだ終わっていないセッション: " +
+            ", ".join(f"{n} ({results[n]['state']})" for n in pending))
+    return 0 if enough else 2
 
 
 def cmd_send(args):
@@ -1747,6 +1887,7 @@ def build_parser():
     x.set_defaults(func=cmd_fleet)
     x = sub.add_parser("ls", help="セッション一覧")
     x.add_argument("--all", action="store_true", help="終了済みも表示")
+    x.add_argument("--json", action="store_true", help="JSON で出力")
     x.set_defaults(func=cmd_ls)
     x = sub.add_parser("stop", help="保存してから終了")
     x.add_argument("name")
@@ -1765,7 +1906,22 @@ def build_parser():
     x = sub.add_parser("peek", help="エージェント画面の末尾を表示 (接続せずに確認)")
     x.add_argument("name")
     x.add_argument("lines", nargs="?", type=int, default=30)
+    x.add_argument("--json", action="store_true", help="状態 API の応答を JSON のまま出力")
     x.set_defaults(func=cmd_peek)
+    x = sub.add_parser("wait", help="エージェントの応答が終わるか、許可・入力待ちになるまで待つ")
+    x.add_argument("names", nargs="*", metavar="name", help="待つセッション (省略時は動いている全セッション)")
+    x.add_argument("--timeout", type=float, default=0, help="最大の待ち時間 (秒)。過ぎたら終了コード 2 で返る。0 で無制限 (既定)")
+    x.add_argument("--any", action="store_true", help="どれか 1 台が終わったら返る (既定は全台)")
+    x.add_argument("--idle", type=int, default=300,
+                   help="画面も CPU もこの秒数動かなければ、止まっている (stalled) とみなして返る。0 で無効 (既定 300)")
+    x.add_argument("--interval", type=float, default=15, help="状態を確かめる間隔 (秒、既定 15)")
+    x.add_argument("--json", action="store_true", help="JSON で出力")
+    x.set_defaults(func=cmd_wait)
+    x = sub.add_parser("result", help="エージェントの最後の応答を表示")
+    x.add_argument("name")
+    x.add_argument("--agent", choices=("claude", "codex"), help="--agent both で起動したときに片方だけ表示する")
+    x.add_argument("--json", action="store_true", help="JSON で出力")
+    x.set_defaults(func=cmd_result)
     x = sub.add_parser("send", help="エージェントに指示を送る (tmux に入力)")
     x.add_argument("name")
     x.add_argument("--window", help="送信先の tmux ウィンドウ (claude / codex / shell)")

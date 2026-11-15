@@ -43,6 +43,21 @@ mvm fleet 3 --prefix task --repo https://github.com/<owner>/<repo>.git --prompts
 - **1 台に 1 つのタスク**: 関係のない作業を 1 台に詰めると、ブランチと履歴が混ざります
 - **長い指示は後から送る**: 起動時の指示は 4KB までです。長い仕様は `mvm send` で送るか、リポジトリにファイルとして置いて「docs/spec.md を読んで実装して」と書きます
 
+## 終わるまで待って、結果を読む
+
+画面を何度も見に行かなくても、終わるまで待ってから結果だけを読めます。
+
+```bash
+mvm fleet 3 --prefix task --repo <URL> --prompts-file tasks.txt
+mvm wait                          # 全台の応答が終わるか、許可・入力待ちになるまで待つ
+mvm result task-02                # task-02 の最後の応答 (報告) を読む
+mvm send task-02 "レビューの指摘を直して"
+mvm wait task-02 --timeout 600    # 10 分で打ち切る (終了コード 2)
+```
+
+`mvm wait` は、終わった台から 1 行ずつ表示します。`waiting` (許可・入力待ち) で返ったら、`mvm peek` で画面を見て、`mvm send` で答えるか、`mvm ssh` で入って操作します。
+`--json` を付けると `wait` / `result` / `ls` / `peek` の結果を JSON で受け取れるので、スクリプトや手元のエージェントから扱えます。
+
 ## Claude Code と Codex で同じ課題を比べる
 
 ```bash

@@ -4,7 +4,8 @@
 - :9000 Lambda MicroVMs のライフサイクルフック (/ready /validate /run /resume /suspend /terminate)
 - :8080 ローカル PC の mvm から呼ばれる状態/操作 API
     GET  /healthz
-    GET  /status?lines=N   セッション情報と各エージェント画面の末尾 N 行
+    GET  /status?lines=N   セッション情報、エージェントの状態 (作業中・完了・入力待ちなど)、各画面の末尾 N 行
+    GET  /result?agent=X   エージェント (claude / codex) の最後の応答の文章
     POST /send             {"window": "claude", "text": "...", "enter": true} を tmux に送る
     POST /snapshot         ワークスペースを S3 に保存 (同期)
 
@@ -12,6 +13,7 @@
 外部ライブラリに依存しないよう標準ライブラリのみで実装している。
 """
 
+import glob
 import json
 import os
 import subprocess
@@ -26,6 +28,7 @@ SESSION_FILE = os.path.join(PMVA_DIR, "session.json")
 STATE_FILE = os.path.join(PMVA_DIR, "state")
 LAST_SNAPSHOT_FILE = os.path.join(PMVA_DIR, "last_snapshot")
 BOOTSTRAP_LOG = os.path.join(PMVA_DIR, "bootstrap.log")
+AGENT_STATE_DIR = os.path.join(PMVA_DIR, "agents")   # notify.sh (エージェントのフック) と bootstrap.sh が書く
 BOOTSTRAP = "/opt/pmva/bootstrap.sh"
 SNAPSHOT = "/opt/pmva/snapshot.sh"
 HOOK_PREFIX = "/aws/lambda-microvms/runtime/v1/"
@@ -208,6 +211,113 @@ def activity_loop():
             last_publish = time.time()
 
 
+# ---------------------------------------------------------------- エージェントの状態と最後の応答
+
+AGENT_WINDOWS = {"claude": ["claude"], "codex": ["codex"], "both": ["claude", "codex"]}
+SHELLS = {"bash", "sh", "zsh", "fish", "dash"}
+TRANSCRIPT_TAIL_BYTES = 4 * 1024 * 1024
+STATUS_MESSAGE_CHARS = 300
+
+
+def read_agent_state(agent):
+    try:
+        with open(os.path.join(AGENT_STATE_DIR, f"{agent}.json"), encoding="utf-8") as f:
+            st = json.load(f)
+        return st if isinstance(st, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def write_agent_state(agent, state):
+    os.makedirs(AGENT_STATE_DIR, mode=0o700, exist_ok=True)
+    path = os.path.join(AGENT_STATE_DIR, f"{agent}.json")
+    with open(path + ".tmp", "w", encoding="utf-8") as f:
+        json.dump({"state": state, "at": time.time()}, f)
+    os.replace(path + ".tmp", path)
+
+
+def agent_states(session, windows):
+    """エージェントごとの状態。
+
+    starting  起動の準備中         working  作業中         done     応答が終わった
+    waiting   許可・入力待ち       ready    最初の指示待ち  exited   エージェントが終了した (シェルに戻った)
+    failed    起動の準備に失敗     unknown  記録がない
+    """
+    boot = read_text(STATE_FILE, "not-started")
+    commands = {w["name"]: w.get("command") for w in windows}
+    result = {}
+    for agent in AGENT_WINDOWS.get(session.get("agent"), []):
+        st = read_agent_state(agent)
+        state = st.get("state") or "unknown"
+        if boot.startswith("failed"):
+            state = "failed"
+        elif not boot.startswith("ready"):
+            state = "starting"
+        elif commands.get(agent) is None or commands.get(agent) in SHELLS:
+            state = "exited"
+        info = {"state": state, "since": st.get("at")}
+        message = st.get("message")
+        if isinstance(message, str) and message:
+            info["message"] = message[:STATUS_MESSAGE_CHARS]
+        result[agent] = info
+    return result
+
+
+def read_tail_lines(path, limit=TRANSCRIPT_TAIL_BYTES):
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        f.seek(max(0, size - limit))
+        data = f.read()
+    lines = data.decode("utf-8", "replace").splitlines()
+    return lines[1:] if size > limit else lines  # 途中から読んだときは、最初の行は切れているので捨てる
+
+
+def last_claude_text(transcript):
+    """Claude Code の会話記録 (JSONL) から、最後のツール結果・指示より後の応答の文章を取り出す。"""
+    texts = []
+    for line in reversed(read_tail_lines(transcript)):
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        if rec.get("type") == "assistant":
+            content = (rec.get("message") or {}).get("content")
+            if isinstance(content, str):
+                content = [{"type": "text", "text": content}]
+            blocks = [b.get("text") or "" for b in content or [] if isinstance(b, dict) and b.get("type") == "text"]
+            texts[:0] = [t for t in blocks if t.strip()]
+        elif rec.get("type") == "user" and not rec.get("isMeta"):
+            break
+    return "\n\n".join(texts) or None
+
+
+def claude_transcript(state):
+    path = state.get("transcript")
+    if isinstance(path, str) and path.endswith(".jsonl") and os.path.isfile(path):
+        return path
+    files = glob.glob(os.path.join(HOME, ".claude", "projects", "*", "*.jsonl"))
+    return max(files, key=os.path.getmtime) if files else None
+
+
+def agent_result(agent):
+    st = read_agent_state(agent)
+    # Claude Code は Stop フックの last_assistant_message、Codex は notify (agent-turn-complete) の
+    # last-assistant-message を notify.sh が記録している
+    text = st.get("message") or None
+    if agent == "claude" and not text:
+        # Stop フックが最後の応答を渡さない版では、会話記録から取り出す
+        transcript = claude_transcript(st)
+        if transcript:
+            try:
+                text = last_claude_text(transcript)
+            except OSError as e:
+                log(f"read transcript failed: {e}")
+    return {"agent": agent, "state": st.get("state") or "unknown", "since": st.get("at"), "text": text}
+
+
 def status(lines):
     s = load_session()
     windows = tmux_windows()
@@ -225,6 +335,7 @@ def status(lines):
         "lastSnapshot": read_text(LAST_SNAPSHOT_FILE) or None,
         "uptimeSeconds": int(float(read_text("/proc/uptime", "0").split()[0])),
         "idleSeconds": int(time.time() - activity["last"]),
+        "agents": agent_states(s, windows),
         "windows": windows,
     }
 
@@ -322,6 +433,11 @@ class ApiHandler(Handler):
             except ValueError:
                 return self.reply(400, {"error": "lines must be an integer"})
             return self.reply(200, status(max(0, min(lines, 500))))
+        if url.path == "/result":
+            agent = parse_qs(url.query).get("agent", [""])[0]
+            if agent not in ("claude", "codex"):
+                return self.reply(400, {"error": "agent must be claude or codex"})
+            return self.reply(200, agent_result(agent))
         return self.reply(404, {"error": "not found"})
 
     def do_POST(self):
@@ -331,7 +447,11 @@ class ApiHandler(Handler):
                 req = json.loads(self.body() or b"{}")
             except ValueError:
                 return self.reply(400, {"error": "invalid json"})
-            ok, err = send_keys(req.get("window") or "claude", req.get("text") or "", bool(req.get("enter", True)))
+            window, text, enter = req.get("window") or "claude", req.get("text") or "", bool(req.get("enter", True))
+            ok, err = send_keys(window, text, enter)
+            if ok and text and enter and window in ("claude", "codex"):
+                # 指示を送ったら作業中にする (Codex には指示を受け取ったときのフックがないため。mvm wait の判定に使う)
+                write_agent_state(window, "working")
             return self.reply(200 if ok else 500, {"ok": ok, "error": err or None})
         if url.path == "/snapshot":
             ok, out = snapshot("manual", timeout=900)

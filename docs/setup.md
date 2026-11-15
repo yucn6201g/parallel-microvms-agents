@@ -287,6 +287,7 @@ MicroVM は、エンドポイントへの受信通信が `IDLE_MAX_SECONDS` (既
 | Codex | 応答の完了 (`agent-turn-complete`) | `~/.codex/config.toml` の `notify` から呼ぶ |
 
 通知は `[<セッション名>] Claude Code の応答が終わりました` のような 1 行です。通知に失敗してもエージェントは止まりません。
+同じフックでエージェントの状態も記録しているので、通知を使わなくても `mvm wait` で終わるまで待てます ([commands.md](commands.md#wait))。
 
 ## 予算アラート
 

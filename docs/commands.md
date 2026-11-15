@@ -7,7 +7,7 @@
 |---|---|
 | 準備 | [`doctor`](#doctor) / [`infra`](#infra) / [`secret`](#secret) / [`image`](#image) |
 | 起動 | [`up`](#up) / [`fleet`](#fleet) |
-| 確認・指示 | [`ls`](#ls) / [`peek`](#peek) / [`send`](#send) / [`watch`](#watch) / [`logs`](#logs) |
+| 確認・指示 | [`ls`](#ls) / [`peek`](#peek) / [`send`](#send) / [`wait`](#wait) / [`result`](#result) / [`watch`](#watch) / [`logs`](#logs) |
 | 接続 | [`ssh`](#ssh) / [`ssh-config`](#ssh-config) / [`shell`](#shell) / [`token`](#token) |
 | 保存・停止 | [`save`](#save) / [`suspend` / `resume`](#suspend--resume) / [`stop`](#stop) / [`stop-all`](#stop-all) / [`renew`](#renew) |
 | 費用 | [`cost`](#cost) |
@@ -126,18 +126,20 @@ mvm fleet <台数> [--prefix <接頭辞>] [--prompts-file <ファイル>] [up �
 ### ls
 
 ```bash
-mvm ls [--all]
+mvm ls [--all] [--json]
 ```
 
 セッションの一覧 (名前、状態、エージェント、認証方式、起動時刻、MicroVM の ID) です。`--all` で終了済みも表示します。状態は `RUNNING` / `SUSPENDED` / `TERMINATED` などで、AWS から状態を取れなかったときは `UNKNOWN` と表示します (終了扱いにはしません)。
+`--json` で、リポジトリと作業ブランチも含めて JSON の配列で出力します (スクリプトや、手元のエージェントから読むとき)。
 
 ### peek
 
 ```bash
-mvm peek <name> [行数]
+mvm peek <name> [行数] [--json]
 ```
 
-エージェントの画面の末尾 (既定 30 行) と、初期化の状態 (`bootstrap=ready` / `failed: ...`)、最後に保存した時刻を表示します。接続はしないので、手元の負荷はほぼありません。
+エージェントの画面の末尾 (既定 30 行) と、エージェントの状態 (`claude=working` など、[wait](#wait) の表を参照)、初期化の状態 (`bootstrap=ready` / `failed: ...`)、最後に保存した時刻を表示します。接続はしないので、手元の負荷はほぼありません。
+`--json` で、VM 内の状態 API の応答をそのまま JSON で出力します。
 
 ### send
 
@@ -147,6 +149,56 @@ mvm send <name> "<指示>" [--window claude|codex|shell] [--no-enter]
 
 指示を tmux に入力して Enter を押します。送り先の既定は、Codex だけのセッションなら `codex`、それ以外は `claude` です。
 `-` で始まる文字列を送るときは `mvm send <name> -- -h` のように `--` の後に書きます。`--no-enter` で Enter を押さずに入力だけします。
+`claude` / `codex` ウィンドウに Enter 付きで送ると、そのエージェントの状態を「作業中」にします ([wait](#wait) が送った直後に返ってしまわないように)。
+
+### wait
+
+```bash
+mvm wait [<name>...] [--timeout <秒>] [--any] [--idle <秒>] [--interval <秒>] [--json]
+```
+
+エージェントの応答が終わるか、許可・入力を待つ状態になるまで待ちます。名前を省略すると、動いている全セッションを待ちます。終わった台から 1 行ずつ表示します。
+
+| オプション | 既定 | 説明 |
+|---|---|---|
+| `--timeout <秒>` | `0` (無制限) | 最大の待ち時間。過ぎたら、まだ終わっていない台を表示して終了コード 2 で返る |
+| `--any` | | どれか 1 台が終わったら返る (既定は全台が終わるまで待つ) |
+| `--idle <秒>` | `300` | 作業中のはずなのに、画面も CPU もこの秒数動かなければ、止まっている (`stalled`) とみなして返る。`0` で無効 |
+| `--interval <秒>` | `15` | 状態を確かめる間隔 |
+| `--json` | | 全台の結果を JSON でまとめて出力する |
+
+終了コードは、待ち終わったら 0、時間切れなら 2 です。
+
+エージェントの状態は、VM の中でエージェントのフック (Claude Code の hooks、Codex の `notify`) が記録します。
+
+| 状態 | 意味 | wait |
+|---|---|---|
+| `starting` | 起動の準備中 | 待つ |
+| `working` | 作業中 (指示を受け取ってから、応答が終わるまで) | 待つ |
+| `done` | 応答が終わった | 返る |
+| `waiting` | 許可・入力を待っている (Claude Code のみ。何を待っているかも表示する) | 返る |
+| `ready` | 最初の指示を待っている (`--prompt` なしで起動した) | 返る |
+| `exited` | エージェントが終了して、シェルに戻った | 返る |
+| `failed` | 起動の準備 (bootstrap) に失敗した | 返る |
+
+ほかに、セッション全体として `stalled` (上の `--idle`)、`suspended` (VM がサスペンド中。作業中の VM はサスペンドしないので、作業していない)、`terminated` (VM が終了した) でも返ります。`--agent both` のセッションは、両方のエージェントが終わるまで待ちます。
+
+- Codex は、許可・入力待ちを知らせる仕組みがないため、`waiting` になりません。承認待ちで止まったときは `--idle` の秒数が過ぎてから `stalled` で返ります。無人で動かすなら、承認を求めない設定 (`--codex-args "--dangerously-bypass-approvals-and-sandbox"` など) にしておきます
+- 待っている間は状態を確かめる通信をするので、そのセッションはサスペンドされません (終わった台は確かめるのをやめます)
+- 手元のエージェントから呼ぶときは、ツールの実行時間の上限 (10 分ほど) より短い `--timeout` を付け、終了コード 2 なら呼び直します
+- このコマンドより前に作ったイメージは、エージェントの状態を返しません。その場合は画面と CPU が `--idle` の秒数止まったときだけ返ります。`mvm image build` で作り直してください
+
+### result
+
+```bash
+mvm result <name> [--agent claude|codex] [--json]
+```
+
+エージェントの最後の応答の文章を表示します。画面ではなく応答そのものなので、長い報告も途中で切れません。`--agent both` のセッションは両方を表示します (片方だけなら `--agent`)。
+まだ応答がないエージェントがあれば、終了コード 1 です。
+
+- Claude Code: 応答の終わり (`Stop` フック) で渡される最後の応答。渡されない版では、会話の記録 (`~/.claude/projects/` の JSONL) から、最後のツール実行より後の文章を取り出します
+- Codex: 応答の終わり (`notify` の `agent-turn-complete`) で渡される最後の応答
 
 ### watch
 
@@ -154,7 +206,7 @@ mvm send <name> "<指示>" [--window claude|codex|shell] [--no-enter]
 mvm watch [秒]
 ```
 
-全セッションの状態と画面の末尾を、指定した秒数 (既定 60) ごとに表示し直します。Ctrl-C で終了します。表示している間は定期的に通信するので、そのセッションはサスペンドされません。
+全セッションの状態 (エージェントの状態を含む) と画面の末尾を、指定した秒数 (既定 60) ごとに表示し直します。Ctrl-C で終了します。表示している間は定期的に通信するので、そのセッションはサスペンドされません。
 
 ### logs
 

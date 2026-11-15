@@ -7,9 +7,13 @@
 ### 追加
 
 - 最小構成の CloudFormation テンプレート `infra/cloudformation-minimal.yaml`。`config.env` の `INFRA_TEMPLATE=minimal` で、キープアライブ・毎晩の自動停止・予算アラートを作らずに使える
+- `mvm wait`: エージェントの応答が終わるか、許可・入力待ちになるまで待つ (`--timeout`、`--any`、`--json`)。エージェントの状態 (作業中・完了・入力待ち・終了など) は、VM の中でエージェントのフックが記録する
+- `mvm result`: エージェントの最後の応答の文章を表示する
+- `mvm ls` / `mvm peek` の `--json`。`peek` と `watch` にエージェントの状態を表示
 
 ### 変更
 
+- Claude Code の hooks と Codex の `notify` を、通知 (`--notify`) を使わないときも常に設定するようにした (状態の記録のため)。`~/.claude/settings.json` に利用者が書いたフックは残す。新しいイメージ (`mvm image build`) が必要
 - 同時に動かす台数の目標を 10 台から「AWS アカウントのクォータの範囲内」に変更。`MAX_AGENTS` の既定を `0` (クォータで決まる台数まで) にし、`mvm doctor` はクォータに対して何台動かせるかを表示する。コストの試算 (`mvm cost`) の既定も 2 台にした
 
 ## [0.1.0] - 2026-10-29
