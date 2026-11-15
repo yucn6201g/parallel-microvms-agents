@@ -6,6 +6,8 @@
     GET  /healthz
     GET  /status?lines=N   セッション情報、エージェントの状態 (作業中・完了・入力待ちなど)、各画面の末尾 N 行
     GET  /result?agent=X   エージェント (claude / codex) の最後の応答の文章
+    GET  /events?agent=X&file=F&offset=N&tail=N&max=N
+                           会話記録 (指示・思考・ツールの実行と結果・応答) を、前回の続きから返す (mvm follow)
     POST /send             {"window": "claude", "text": "...", "enter": true} を tmux に送る
     POST /snapshot         ワークスペースを S3 に保存 (同期)
 
@@ -206,6 +208,7 @@ def activity_loop():
         if not read_text(STATE_FILE).startswith("ready"):
             continue
         check_activity()
+        check_oom()
         if time.time() - last_publish >= PUBLISH_INTERVAL:
             publish_status()
             last_publish = time.time()
@@ -294,12 +297,33 @@ def last_claude_text(transcript):
     return "\n\n".join(texts) or None
 
 
+def newest(pattern):
+    files = glob.glob(pattern, recursive=True)
+    return max(files, key=os.path.getmtime) if files else None
+
+
+def codex_transcript():
+    return newest(os.path.join(HOME, ".codex", "sessions", "**", "rollout-*.jsonl"))
+
+
+def last_codex_text(transcript):
+    """Codex の会話記録から、最後に完了した応答 (task_complete の last_agent_message) を取り出す。"""
+    for line in reversed(read_tail_lines(transcript)):
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        payload = rec.get("payload") if isinstance(rec, dict) else None
+        if rec.get("type") == "event_msg" and isinstance(payload, dict) and payload.get("type") == "task_complete":
+            return payload.get("last_agent_message") or None
+    return None
+
+
 def claude_transcript(state):
     path = state.get("transcript")
     if isinstance(path, str) and path.endswith(".jsonl") and os.path.isfile(path):
         return path
-    files = glob.glob(os.path.join(HOME, ".claude", "projects", "*", "*.jsonl"))
-    return max(files, key=os.path.getmtime) if files else None
+    return newest(os.path.join(HOME, ".claude", "projects", "*", "*.jsonl"))
 
 
 def agent_result(agent):
@@ -307,15 +331,238 @@ def agent_result(agent):
     # Claude Code は Stop フックの last_assistant_message、Codex は notify (agent-turn-complete) の
     # last-assistant-message を notify.sh が記録している
     text = st.get("message") or None
-    if agent == "claude" and not text:
-        # Stop フックが最後の応答を渡さない版では、会話記録から取り出す
-        transcript = claude_transcript(st)
+    if not text:
+        # フックが最後の応答を渡さない版や、notify の設定がないときは、会話記録から取り出す
+        transcript = claude_transcript(st) if agent == "claude" else codex_transcript()
         if transcript:
             try:
-                text = last_claude_text(transcript)
+                text = (last_claude_text if agent == "claude" else last_codex_text)(transcript)
             except OSError as e:
                 log(f"read transcript failed: {e}")
     return {"agent": agent, "state": st.get("state") or "unknown", "since": st.get("at"), "text": text}
+
+
+# ---------------------------------------------------------------- 会話記録の流れ (mvm follow)
+
+EVENTS_READ_BYTES = 1024 * 1024     # 1 回に読む最大の大きさ
+EVENTS_MAX_CHARS = 100000           # max=0 (省略しない) でも、1 件をこれより長くはしない
+TOOL_INPUT_KEYS = ("command", "cmd", "file_path", "path", "pattern", "url", "query", "prompt", "description")
+
+
+def clip(text, limit):
+    text = text if isinstance(text, str) else json.dumps(text, ensure_ascii=False)
+    limit = limit if limit > 0 else EVENTS_MAX_CHARS
+    return (text[:limit], True) if len(text) > limit else (text, False)
+
+
+def tool_summary(name, args):
+    """ツールの入力を 1 行にまとめる (Bash ならコマンド、Read ならファイル名)。"""
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            return args
+    if isinstance(args, dict):
+        for key in TOOL_INPUT_KEYS:
+            value = args.get(key)
+            if isinstance(value, list):
+                value = " ".join(str(v) for v in value)
+            if isinstance(value, str) and value:
+                return value
+    return json.dumps(args, ensure_ascii=False)
+
+
+def block_text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(b.get("text") or "" for b in content if isinstance(b, dict) and b.get("type") in ("text", "input_text", "output_text"))
+    return ""
+
+
+def claude_events(rec):
+    """Claude Code の会話記録 1 行を、表示用の出来事に直す。"""
+    kind, msg = rec.get("type"), rec.get("message") or {}
+    content = msg.get("content")
+    out = []
+    if kind == "user" and not rec.get("isMeta"):
+        if isinstance(content, str):
+            content = [{"type": "text", "text": content}]
+        for b in content or []:
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "text" and b.get("text", "").strip() and not b["text"].lstrip().startswith("<"):
+                out.append({"kind": "prompt", "text": b["text"]})
+            elif b.get("type") == "tool_result":
+                out.append({"kind": "output", "text": block_text(b.get("content")), "error": bool(b.get("is_error"))})
+    elif kind == "assistant":
+        for b in content or []:
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "text" and b.get("text", "").strip():
+                out.append({"kind": "text", "text": b["text"]})
+            elif b.get("type") == "thinking" and b.get("thinking", "").strip():
+                out.append({"kind": "thinking", "text": b["thinking"]})
+            elif b.get("type") == "tool_use":
+                out.append({"kind": "tool", "name": b.get("name"), "text": tool_summary(b.get("name"), b.get("input"))})
+    return out
+
+
+def codex_output(text):
+    # exec_command の結果は「Chunk ID / Wall time / ... / Output:」の後に本文が続く
+    head, sep, body = text.partition("\nOutput:\n")
+    return body if sep and "Wall time" in head else text
+
+
+def codex_events(rec):
+    """Codex の会話記録 (rollout) 1 行を、表示用の出来事に直す。"""
+    p = rec.get("payload")
+    if rec.get("type") != "response_item" or not isinstance(p, dict):
+        return []
+    kind = p.get("type")
+    if kind == "message":
+        text = block_text(p.get("content"))
+        if p.get("role") == "assistant" and text.strip():
+            return [{"kind": "text", "text": text}]
+        if p.get("role") == "user" and text.strip() and not text.lstrip().startswith("<"):
+            return [{"kind": "prompt", "text": text}]
+    elif kind == "reasoning":
+        text = "\n".join(x.get("text") or "" for x in p.get("summary") or [] if isinstance(x, dict))
+        if text.strip():
+            return [{"kind": "thinking", "text": text}]
+    elif kind in ("function_call", "custom_tool_call"):
+        return [{"kind": "tool", "name": p.get("name"), "text": tool_summary(p.get("name"), p.get("arguments", p.get("input")))}]
+    elif kind == "local_shell_call":
+        return [{"kind": "tool", "name": "shell", "text": tool_summary("shell", (p.get("action") or {}))}]
+    elif kind == "web_search_call":
+        return [{"kind": "tool", "name": "web_search", "text": tool_summary("web_search", p.get("action") or {})}]
+    elif kind in ("function_call_output", "custom_tool_call_output"):
+        output = p.get("output")
+        if isinstance(output, dict):
+            output = output.get("content") or json.dumps(output, ensure_ascii=False)
+        return [{"kind": "output", "text": codex_output(output if isinstance(output, str) else block_text(output))}]
+    return []
+
+
+def transcript_path(agent):
+    return claude_transcript(read_agent_state("claude")) if agent == "claude" else codex_transcript()
+
+
+def parse_events(agent, lines, limit):
+    parse = claude_events if agent == "claude" else codex_events
+    events = []
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        for ev in parse(rec):
+            ev["text"], truncated = clip(ev.get("text") or "", limit)
+            if truncated:
+                ev["truncated"] = True
+            ev["ts"] = rec.get("timestamp")
+            events.append(ev)
+    return events
+
+
+def agent_events(agent, file, offset, tail, limit):
+    """会話記録の出来事を、前回の続き (file と offset) から返す。
+
+    file が今の会話記録と違えば (初回、エージェントの再起動で新しい会話になったなど)、
+    初回は末尾の tail 件、それ以外は新しい会話の最初から返す。
+    """
+    current = transcript_path(agent)
+    if not current:
+        return {"agent": agent, "file": None, "offset": 0, "events": []}
+    size = os.path.getsize(current)
+    if not file:
+        lines = read_tail_lines(current, EVENTS_READ_BYTES)
+        return {"agent": agent, "file": current, "offset": size, "events": parse_events(agent, lines, limit)[-tail:] if tail > 0 else []}
+    reset = file != current or offset > size
+    if reset:
+        offset = 0
+    with open(current, "rb") as f:
+        f.seek(offset)
+        data = f.read(EVENTS_READ_BYTES)
+    # 書きかけの最後の行は次回に回す
+    end = data.rfind(b"\n") + 1
+    lines = data[:end].decode("utf-8", "replace").splitlines()
+    return {"agent": agent, "file": current, "offset": offset + end, "reset": reset,
+            "events": parse_events(agent, lines, limit)}
+
+
+# ---------------------------------------------------------------- メモリ
+
+def read_proc_status(pid):
+    info = {}
+    try:
+        with open(f"/proc/{pid}/status", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                key, _, value = line.partition(":")
+                if key in ("Name", "VmRSS"):
+                    info[key] = value.strip()
+    except OSError:
+        pass
+    return info
+
+
+def memory_info(top=6):
+    """VM 全体のメモリと、プロセス名ごとの使用量 (RSS の合計。共有分を重複して数えるので目安)。"""
+    mem = {}
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as f:
+            for line in f:
+                key, _, value = line.partition(":")
+                mem[key] = int(value.split()[0]) if value.split() else 0
+    except (OSError, ValueError):
+        return None
+    groups = {}
+    for d in os.listdir("/proc"):
+        if not d.isdigit():
+            continue
+        st = read_proc_status(d)
+        rss = st.get("VmRSS", "").split()
+        if not rss:
+            continue  # カーネルのスレッド
+        g = groups.setdefault(st.get("Name") or "?", {"name": st.get("Name") or "?", "count": 0, "rssMiB": 0.0})
+        g["count"] += 1
+        g["rssMiB"] += int(rss[0]) / 1024
+    ranked = sorted(groups.values(), key=lambda g: -g["rssMiB"])[:top]
+    for g in ranked:
+        g["rssMiB"] = round(g["rssMiB"])
+    total, available = mem.get("MemTotal", 0) // 1024, mem.get("MemAvailable", 0) // 1024
+    return {"totalMiB": total, "availableMiB": available, "usedMiB": total - available, "top": ranked}
+
+
+def oom_kill_count():
+    """メモリ不足でカーネルがプロセスを強制終了した回数 (起動してからの合計)。"""
+    try:
+        with open("/proc/vmstat", encoding="utf-8") as f:
+            for line in f:
+                key, _, value = line.partition(" ")
+                if key == "oom_kill":
+                    return int(value)
+    except (OSError, ValueError):
+        pass
+    return 0
+
+
+# イメージのスナップショットを取った時点の回数を引き継ぐので、セッションの開始 (run フック) で基準を取り直す
+oom = {"base": oom_kill_count(), "seen": 0}
+
+
+def session_oom_kills():
+    return max(0, oom_kill_count() - oom["base"])
+
+
+def check_oom():
+    kills = session_oom_kills()
+    if kills > oom["seen"]:
+        oom["seen"] = kills
+        log(f"oom kill detected (total {kills} in this session)")
+        run(["/opt/pmva/notify.sh", "oom", str(kills)], timeout=30)
 
 
 def status(lines):
@@ -336,6 +583,8 @@ def status(lines):
         "uptimeSeconds": int(float(read_text("/proc/uptime", "0").split()[0])),
         "idleSeconds": int(time.time() - activity["last"]),
         "agents": agent_states(s, windows),
+        "memory": memory_info(),
+        "oomKills": session_oom_kills(),
         "windows": windows,
     }
 
@@ -407,6 +656,7 @@ class HookHandler(Handler):
             session["microvmId"] = body.get("microvmId")
             # 作業判定はイメージのスナップショット時点の値を引き継いでいるので、セッション開始時にリセットする
             activity.update(last=time.time(), cpu=None, screens=None)
+            oom.update(base=oom_kill_count(), seen=0)
             os.makedirs(PMVA_DIR, mode=0o700, exist_ok=True)
             tmp = SESSION_FILE + ".tmp"
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -433,6 +683,19 @@ class ApiHandler(Handler):
             except ValueError:
                 return self.reply(400, {"error": "lines must be an integer"})
             return self.reply(200, status(max(0, min(lines, 500))))
+        if url.path == "/events":
+            q = parse_qs(url.query)
+            agent = q.get("agent", [""])[0]
+            if agent not in ("claude", "codex"):
+                return self.reply(400, {"error": "agent must be claude or codex"})
+            try:
+                offset, tail, limit = (int(q.get(k, [d])[0]) for k, d in (("offset", "0"), ("tail", "20"), ("max", "2000")))
+            except ValueError:
+                return self.reply(400, {"error": "offset, tail and max must be integers"})
+            try:
+                return self.reply(200, agent_events(agent, q.get("file", [""])[0], max(0, offset), max(0, min(tail, 500)), max(0, limit)))
+            except OSError as e:
+                return self.reply(500, {"error": str(e)})
         if url.path == "/result":
             agent = parse_qs(url.query).get("agent", [""])[0]
             if agent not in ("claude", "codex"):

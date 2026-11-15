@@ -153,7 +153,14 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 
 - [x] `mvm wait` / `result` / `--json`: 自動テスト (状態 API の代わりのサーバー、`supervisor.py` と `notify.sh` を手元で動かす結合テスト) のみ
 - [x] `result` の会話記録の読み取り: Claude Code 2.1.325 の実際の会話記録 (JSONL) から、最後の応答を取り出せることを確認。Stop フックの入力に `last_assistant_message`、Notification フックの入力に `notification_type` (`idle_prompt` / `permission_prompt` など) があることを、同じ版のパッケージで確認
-- [ ] 実際のエージェントのフックで状態が変わること (Claude Code: `UserPromptSubmit` / `PostToolUse` / `Stop` / `Notification`、Codex: `notify`): 未確認。MicroVM で `mvm up` → `mvm wait` → `mvm result` を試す。固定している版 (Claude Code 2.1.312 / Codex 0.165.0) が `last_assistant_message` を渡さない場合は、会話記録から取り出す動きになる
+- [x] 実際のエージェントのフックで状態が変わること: 固定している版 (Claude Code 2.1.312 / Codex 0.165.0) を LLM API の代わりにつないで確認した (`tests/test_agents_e2e.py`、CI の `agents-e2e`)
+  - Claude Code: `Stop` で完了と最後の応答 (`last_assistant_message`)。tmux の中の対話モードで、許可を求める画面で `Notification` → 入力待ち、許可するとツールが動いて完了。応答の後に 70 秒入力しなくても完了のまま
+  - Codex: `codex exec` で `notify` が `agent-turn-complete` と最後の応答を渡し、完了になる
+  - 2.1.312 の既定の許可モードは auto で、`echo` などの安全なコマンドは許可を求めない
+- [x] `mvm follow` の会話記録の読み取り: 上の 2 つの版 (と Claude Code 2.1.325) が実際に書いた記録で、指示・思考・ツールの実行と結果・応答を取り出せることを確認 (`tests/fixtures/`)
+- [x] `mvm view`: tmux 3.4 で、読み取り専用の接続になること、キー入力がエージェントに届かないこと、ほかの接続の表示中のウィンドウが変わらないこと、抜けるとセッションが消えることを確認
+- [ ] MicroVM の上での `mvm wait` / `result` / `follow` / `view` / `top`: 未確認 (イメージの作り直しが必要)。Codex の対話モード (tmux の中) での `notify` も未確認 (`codex exec` では確認済み)
+- [ ] メモリ不足による強制終了の検出 (`/proc/vmstat` の `oom_kill`): 自動テストでファイルを差し替えて確認したのみ。MicroVM のカーネルでこの値が使えるかは未確認
 
 ## 結果
 

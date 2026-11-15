@@ -6,6 +6,21 @@ fi
 # SSH 経由ではロケールが引き継がれず、tmux が日本語を _ に置き換えるため UTF-8 を明示する
 export LANG="${LANG:-C.UTF-8}"
 cd "$HOME" || exit 1
+# --view [ウィンドウ]: 読み取り専用で見る (mvm view)。入力はエージェントに届かない。
+# 同じウィンドウ群を共有する別のセッションを作るので、他の接続 (mvm ssh) の表示中のウィンドウは変わらない
+if [ "${1:-}" = "--view" ]; then
+  if ! tmux has-session -t main 2>/dev/null; then
+    echo "tmux セッション 'main' がまだありません (初期化状態: $(cat "$HOME/.pmva/state" 2>/dev/null || echo unknown))"
+    exit 1
+  fi
+  view="view-$$"
+  tmux new-session -d -t main -s "$view" || exit 1
+  if [ -n "${2:-}" ] && ! tmux select-window -t "$view:$2" 2>/dev/null; then
+    echo "ウィンドウ $2 がありません" >&2
+  fi
+  # 抜けたら (Ctrl-b → d や切断) このセッションを消す。接続する前に設定すると、その場で消えてしまう
+  exec tmux -u attach -r -t "$view" \; set-option -t "$view" destroy-unattached on
+fi
 if tmux has-session -t main 2>/dev/null; then
   exec tmux -u attach -t main "$@"
 fi

@@ -40,6 +40,8 @@ python -m unittest discover -s tests -v
 | `tests/test_supervisor.py` | `supervisor.py` と `bootstrap.sh` などを、パスとポートを差し替えてローカルで動かす結合テスト (認証方式ごとの初期化、送信、作業の判定、通知、保存の中身) | Linux で `tmux` と `jq` があるときだけ |
 | `tests/test_templates.py` | 標準と最小構成のテンプレートで、共通のリソース・出力・パラメータが同じ内容か | すべて |
 | `tests/test_keepalive.py` | テンプレートに書いた Lambda (キープアライブ、毎晩の停止) のコードを取り出し、模擬 API で動かす | すべて |
+| `tests/test_agents_e2e.py` | 本物の Claude Code / Codex を LLM API の代わり (`tests/mock_llm.py`) につないで動かし、フックによる状態の記録と、会話の記録の読み取りを確かめる | Linux で、エージェントの実行ファイルを `PMVA_E2E_CLAUDE` / `PMVA_E2E_CODEX` で指定したときだけ (CI の `agents-e2e`) |
+| `tests/fixtures/` | 本物のエージェントが書いた会話の記録 (個人情報を除いたもの)。`mvm follow` / `result` の読み取りのテストに使う | — |
 | `tests/aws_stub.py` | AWS CLI の代わり。テストが `PATH` の先頭に置き、呼び出しを `calls.jsonl` に記録して決まった応答を返す | — |
 
 AWS には一切つながりません。AWS の応答を変えたいテストは、環境変数でスタブの動きを切り替えます (例: `PMVA_STUB_QUOTA_GB`、`PMVA_STUB_IAM=admin`、`PMVA_STUB_UNDELETABLE`。一覧は `tests/aws_stub.py` の冒頭とコード)。
@@ -48,6 +50,14 @@ Linux で `test_supervisor.py` を動かすには:
 
 ```bash
 sudo apt-get install -y tmux jq   # Debian / Ubuntu
+```
+
+`test_agents_e2e.py` を手元で動かすには、`image/Dockerfile` で固定した版のエージェントを入れて、場所を指定します (LLM の API にはつながず、認証情報も要りません)。
+
+```bash
+npm install --prefix /tmp/agents @anthropic-ai/claude-code@<版> @openai/codex@<版>
+PMVA_E2E_CLAUDE=/tmp/agents/node_modules/.bin/claude PMVA_E2E_CODEX=/tmp/agents/node_modules/.bin/codex \
+  python -m unittest tests.test_agents_e2e -v
 ```
 
 ## lint
@@ -68,6 +78,7 @@ python -m py_compile bin/mvm.py image/supervisor.py scripts/estimate_cost.py tes
 
 - テスト: Windows / macOS (Python 3.9 と 3.13)、Linux (3.13)
 - lint: shellcheck、cfn-lint、Python の構文チェック
+- agents-e2e: `image/Dockerfile` で固定した版の Claude Code / Codex を入れて `tests/test_agents_e2e.py` を動かす。`mvm image update-versions` で版を上げたときに、フックや会話の記録の形式が変わっていないかが分かる
 
 `.github/workflows/agent-versions.yml` は毎週月曜に Claude Code / Codex の新しい版を確認し、あれば Issue を立てます (Actions タブから手動でも実行できます)。
 `.github/dependabot.yml` は、CI で使う GitHub Actions の部品 (`actions/checkout` など) に新しい版が出ると、更新のプルリクエストを作ります。

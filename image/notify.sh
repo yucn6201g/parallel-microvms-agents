@@ -7,6 +7,8 @@
 #     notify.sh claude-notification  許可待ち・入力待ち (Notification)       → 入力待ち
 #   Codex: config.toml の notify から呼ばれ、イベントの JSON を最後の引数で受け取る
 #     notify.sh codex '<json>'       応答が終わった (agent-turn-complete)    → 完了
+#   supervisor.py から呼ばれる
+#     notify.sh oom <回数>            メモリ不足でプロセスが強制終了された (通知だけ)
 # 状態は ~/.pmva/agents/<claude|codex>.json に書き、supervisor.py の /status と /result が読む (mvm wait / mvm result)。
 # 失敗してもエージェントの動作を止めないよう、常に 0 で終わる。
 set -u
@@ -54,6 +56,9 @@ case "$kind" in
     # 文字単位で切り詰める (head -c だと日本語の途中で切れて文字化けする)
     last="$(jq -r '(."last-assistant-message" // "")[0:300]' <<<"$event" 2>/dev/null)"
     msg="Codex の応答が終わりました${last:+: $last}"
+    ;;
+  oom)
+    msg="メモリ不足でプロセスが強制終了されました (このセッションで ${2:-?} 回目)。MEMORY_MIB を増やすか、同時に動かすテストやブラウザを減らしてください"
     ;;
   *)
     exit 0

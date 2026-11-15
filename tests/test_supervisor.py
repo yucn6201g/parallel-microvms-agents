@@ -15,10 +15,12 @@ import threading
 import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+FIXTURES = ROOT / "tests" / "fixtures"
 HOOK = "/aws/lambda-microvms/runtime/v1/"
 
 
@@ -62,6 +64,10 @@ class SupervisorTest(unittest.TestCase):
         src = (ROOT / "image" / "supervisor.py").read_text(encoding="utf-8")
         src = src.replace("/opt/pmva", str(opt)).replace("HOOK_PORT = 9000", f"HOOK_PORT = {self.hook_port}")
         src = src.replace("API_PORT = 8080", f"API_PORT = {self.api_port}")
+        # メモリ不足による強制終了の回数は、テストでは書き換えられるファイルから読む
+        self.vmstat = t / "vmstat"
+        self.vmstat.write_text("nr_free_pages 1\noom_kill 3\n", encoding="utf-8")
+        src = src.replace('"/proc/vmstat"', repr(str(self.vmstat)))
         # テストでは作業判定と状態の書き出しを 1 秒ごとにする
         src = src.replace("ACTIVITY_INTERVAL = 30", "ACTIVITY_INTERVAL = 1").replace("PUBLISH_INTERVAL = 60", "PUBLISH_INTERVAL = 1")
         (opt / "supervisor.py").write_text(src, encoding="utf-8")
@@ -365,6 +371,96 @@ class SupervisorTest(unittest.TestCase):
         _, st = self.get("/status?lines=0")
         self.assertEqual(len(st["agents"]["codex"]["message"]), 300, "/status では短くする")
         self.assertEqual(self.get("/result?agent=x")[0], 400)
+
+    # ---------------------------------------------------------------- 会話記録の流れ (mvm follow) とメモリ
+
+    def place(self, fixture, dest):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(FIXTURES / fixture, dest)
+        return dest
+
+    def events(self, agent, **q):
+        query = "&".join(f"{k}={urllib.parse.quote(str(v))}" for k, v in dict(agent=agent, **q).items())
+        code, r = self.get(f"/events?{query}")
+        self.assertEqual(code, 200, r)
+        return r
+
+    def test_events_follow_real_transcripts(self):
+        self.hook("run", {"microvmId": "m", "runHookPayload": json.dumps({"name": "ev", "agent": "both"})})
+        self.wait_ready()
+        self.assertEqual(self.events("claude")["events"], [], "まだ会話がなければ空")
+        self.assertEqual(self.events("claude", file="-")["file"], None)
+        # 実際の Claude Code 2.1.325 / Codex 0.165.0 が書いた会話記録 (tests/fixtures)
+        claude = self.place("claude-2.1.325-transcript.jsonl", self.home / ".claude" / "projects" / "-home-agent-work-repo" / "a.jsonl")
+        codex = self.place("codex-0.165.0-rollout.jsonl", self.home / ".codex" / "sessions" / "2026" / "11" / "15" / "rollout-x.jsonl")
+        expected = [("prompt", None, "テストして"), ("thinking", None, "まずコマンドを実行する"), ("text", None, "確認します。"),
+                    ("tool", "Bash", "echo hello-from-tool"), ("output", None, "hello-from-tool"), ("text", None, "完了しました。")]
+        r = self.events("claude", tail=50)
+        self.assertEqual([(e["kind"], e.get("name"), e["text"]) for e in r["events"]], expected)
+        self.assertEqual((r["file"], r["offset"]), (str(claude), claude.stat().st_size))
+        self.assertTrue(r["events"][0]["ts"].startswith("2026-"))
+        r = self.events("codex", tail=50)
+        self.assertEqual([(e["kind"], e.get("name"), e["text"].rstrip("\n")) for e in r["events"]],
+                         [("prompt", None, "テストして"), ("thinking", None, "**手順を考える** ファイルを確認する"),
+                          ("text", None, "確認します。"), ("tool", "exec_command", "echo hello-from-tool"),
+                          ("output", None, "hello-from-tool"), ("text", None, "完了しました。")])
+        # 初回は直前の tail 件だけ
+        self.assertEqual([e["text"] for e in self.events("claude", tail=2)["events"]], ["hello-from-tool", "完了しました。"])
+        # 前回はまだ記録がなかった (file="-") なら、tail に関係なく最初から
+        self.assertEqual(len(self.events("claude", file="-", tail=2)["events"]), 6)
+
+        # 続きから: 追記された行だけを返す。書きかけの行 (改行なし) は次回に回す
+        size = claude.stat().st_size
+        line = json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "追加の応答"}]}}, ensure_ascii=False)
+        with open(claude, "a", encoding="utf-8") as f:
+            f.write(line + "\n" + line[:10])
+        r = self.events("claude", file=str(claude), offset=size)
+        self.assertEqual(([e["text"] for e in r["events"]], r["reset"]), (["追加の応答"], False))
+        self.assertEqual(r["offset"], size + len((line + "\n").encode("utf-8")))
+        # 長い文章は max で切り詰め、その印を付ける (max=0 なら省略しない)
+        with open(claude, "a", encoding="utf-8") as f:
+            f.write(line[10:].replace("追加の応答", "あ" * 50) + "\n")
+        r2 = self.events("claude", file=str(claude), offset=r["offset"], max=10)
+        self.assertEqual((r2["events"][0]["text"], r2["events"][0]["truncated"]), ("あ" * 10, True))
+        self.assertEqual(self.events("claude", file=str(claude), offset=r["offset"], max=0)["events"][0]["text"], "あ" * 50)
+        # エージェントを起動し直して新しい会話になったら、新しい会話の最初から返す
+        time.sleep(0.05)
+        newer = self.place("claude-2.1.325-transcript.jsonl", claude.parent / "b.jsonl")
+        r = self.events("claude", file=str(claude), offset=r2["offset"])
+        self.assertEqual((r["file"], r["reset"], len(r["events"])), (str(newer), True, 6))
+        self.assertEqual(self.get("/events?agent=claude&offset=x")[0], 400)
+        self.assertEqual(self.get("/events?agent=bad")[0], 400)
+
+    def test_codex_result_falls_back_to_transcript(self):
+        """notify が呼ばれなかったとき (設定が利用者のものに置き換わっているなど) は、会話記録の最後の応答を返す。"""
+        self.hook("run", {"microvmId": "m", "runHookPayload": json.dumps({"name": "cr", "agent": "codex"})})
+        self.wait_ready()
+        self.place("codex-0.165.0-rollout.jsonl", self.home / ".codex" / "sessions" / "2026" / "11" / "15" / "rollout-x.jsonl")
+        self.assertEqual(self.get("/result?agent=codex")[1]["text"], "完了しました。")
+
+    def test_memory_and_oom_kills(self):
+        payload = {"name": "mem", "agent": "none", "notifySecret": "pmva/notify-webhook"}
+        self.hook("run", {"microvmId": "m", "runHookPayload": json.dumps(payload)})
+        self.wait_ready()
+        _, st = self.get("/status?lines=0")
+        mem = st["memory"]
+        self.assertGreater(mem["totalMiB"], 0)
+        self.assertEqual(mem["usedMiB"], mem["totalMiB"] - mem["availableMiB"])
+        self.assertTrue(mem["top"] and all({"name", "count", "rssMiB"} <= set(g) for g in mem["top"]))
+        # イメージを作ったときからの回数 (3) は数えず、セッションが始まってからの回数を返す
+        self.assertEqual(st["oomKills"], 0)
+        self.vmstat.write_text("nr_free_pages 1\noom_kill 5\n", encoding="utf-8")
+        self.assertEqual(self.get("/status?lines=0")[1]["oomKills"], 2)
+        # 作業判定のループが見つけて、通知を送る
+        for _ in range(50):
+            if self.webhook.bodies:
+                break
+            time.sleep(0.1)
+        self.assertEqual([b["text"] for b in self.webhook.bodies],
+                         ["[mem] メモリ不足でプロセスが強制終了されました (このセッションで 2 回目)。"
+                          "MEMORY_MIB を増やすか、同時に動かすテストやブラウザを減らしてください"])
+        time.sleep(2)
+        self.assertEqual(len(self.webhook.bodies), 1, "同じ回数では何度も通知しない")
 
     # ---------------------------------------------------------------- 認証方式ごとの初期化
 

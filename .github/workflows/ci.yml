@@ -58,3 +58,28 @@ jobs:
         run: cfn-lint infra/cloudformation.yaml infra/cloudformation-minimal.yaml
       - name: Compile Python
         run: python -m py_compile bin/mvm.py image/supervisor.py scripts/estimate_cost.py tests/*.py
+
+  agents-e2e:
+    # 本物の Claude Code / Codex (image/Dockerfile で固定した版) を LLM API の代わり (tests/mock_llm.py) につないで、
+    # フックによる状態の記録 (mvm wait) と、会話記録の読み取り (mvm follow / result) を確かめる。MicroVM と AWS は使わない
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Install tmux and jq
+        run: sudo apt-get update && sudo apt-get install -y tmux jq
+      - name: Install the pinned Claude Code and Codex
+        run: |
+          claude=$(sed -n 's/^ARG CLAUDE_CODE_VERSION=//p' image/Dockerfile)
+          codex=$(sed -n 's/^ARG CODEX_VERSION=//p' image/Dockerfile)
+          npm install --no-audit --no-fund --prefix "$RUNNER_TEMP/agents" "@anthropic-ai/claude-code@$claude" "@openai/codex@$codex"
+          bin="$RUNNER_TEMP/agents/node_modules/.bin"
+          "$bin/claude" --version
+          "$bin/codex" --version
+          echo "PMVA_E2E_CLAUDE=$bin/claude" >> "$GITHUB_ENV"
+          echo "PMVA_E2E_CODEX=$bin/codex" >> "$GITHUB_ENV"
+      - name: Agent end-to-end tests
+        run: python -m unittest tests.test_agents_e2e -v
