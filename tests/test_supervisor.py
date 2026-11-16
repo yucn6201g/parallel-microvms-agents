@@ -85,12 +85,16 @@ class SupervisorTest(unittest.TestCase):
         # aws のスタブ: s3 cp の内容を保存し、シークレットは STUB_SECRETS/<名前の / を _ に> の中身を返す
         self.s3_out = t / "s3"
         self.s3_out.mkdir()
+        self.s3_in = t / "s3-in"
+        self.s3_in.mkdir()
         self.secrets = t / "secrets"
         self.secrets.mkdir()
         aws = bindir / "aws"
         aws.write_text('#!/bin/sh\n'
                        'case "$1 $2" in\n'
                        '  "s3 cp") if [ "$4" = - ]; then cat > "$STUB_S3_OUT/$(basename "$5")"; '
+                       # S3 → VM (設定のまとまりなど) は STUB_S3_IN/<ファイル名> から読む
+                       'elif [ "${4#s3://}" != "$4" ]; then cp "$STUB_S3_IN/$(basename "$4")" "$5"; '
                        'else cp "$4" "$STUB_S3_OUT/$(basename "$5")"; fi ;;\n'
                        '  "secretsmanager get-secret-value")\n'
                        '    f="$STUB_SECRETS/$(echo "$4" | tr / _)"\n'
@@ -106,7 +110,7 @@ class SupervisorTest(unittest.TestCase):
             (home / rc).write_text(f'export PATH="{bindir}:$PATH"\n', encoding="utf-8")
         self.home = home
         self.env = dict(os.environ, HOME=str(home), PATH=f"{bindir}:{os.environ['PATH']}", TMUX_TMPDIR=str(t),
-                        STUB_S3_OUT=str(self.s3_out), STUB_SECRETS=str(self.secrets),
+                        STUB_S3_OUT=str(self.s3_out), STUB_S3_IN=str(self.s3_in), STUB_SECRETS=str(self.secrets),
                         HISTFILE="")
         self.opt = opt
         self.env.pop("TMUX", None)
@@ -520,6 +524,41 @@ class SupervisorTest(unittest.TestCase):
         st = self.wait_ready()
         self.assertEqual(st["bootstrap"], "ready")
         self.assertFalse((self.home / "setup-started").exists(), "--no-setup なら実行しない")
+
+    # ---------------------------------------------------------------- 手元の設定 (mvm profile push)
+
+    def test_profile_is_applied(self):
+        import io
+        import tarfile
+        with tarfile.open(self.s3_in / "default.tar.gz", "w:gz") as tar:
+            for name, data in (("claude/CLAUDE.md", "手元のルール"), ("claude/skills/review/SKILL.md", "新しい review"),
+                               ("claude/agents/tester.md", "tester"), ("codex/AGENTS.md", "codex のルール"),
+                               ("codex/skills/fix/SKILL.md", "fix")):
+                raw = data.encode("utf-8")
+                info = tarfile.TarInfo(name)
+                info.size = len(raw)
+                tar.addfile(info, io.BytesIO(raw))
+        # VM の中にすでにあるもの (スナップショットから復元したものなど)
+        claude = self.home / ".claude"
+        (claude / "skills" / "review").mkdir(parents=True)
+        (claude / "skills" / "review" / "old.md").write_text("手元で消したファイル", encoding="utf-8")
+        (claude / "skills" / "vm-made").mkdir(parents=True)
+        (claude / "skills" / "vm-made" / "SKILL.md").write_text("VM で作った skill", encoding="utf-8")
+        st = self.run_session(profile="s3://bkt/profiles/default.tar.gz")
+        self.assertEqual(st["bootstrap"], "ready")
+        self.assertEqual((claude / "CLAUDE.md").read_text(encoding="utf-8"), "手元のルール")
+        self.assertEqual((claude / "skills" / "review" / "SKILL.md").read_text(encoding="utf-8"), "新しい review")
+        self.assertFalse((claude / "skills" / "review" / "old.md").exists(), "skill は丸ごと置き換える")
+        self.assertTrue((claude / "skills" / "vm-made" / "SKILL.md").exists(), "VM で作った別の skill は残す")
+        self.assertTrue((claude / "agents" / "tester.md").exists())
+        self.assertEqual((self.home / ".codex" / "AGENTS.md").read_text(encoding="utf-8"), "codex のルール")
+        self.assertTrue((self.home / ".codex" / "skills" / "fix" / "SKILL.md").exists())
+        # pmva のフックは、設定を置いた後でも入っている
+        hooks = json.loads((claude / "settings.json").read_text(encoding="utf-8"))["hooks"]
+        self.assertIn("Stop", hooks)
+        # 見つからないときは警告して、そのまま起動する
+        st = self.run_session(profile="s3://bkt/profiles/missing.tar.gz")
+        self.assertEqual(st["bootstrap"], "ready (warnings: profile could not be applied: s3://bkt/profiles/missing.tar.gz)")
 
     # ---------------------------------------------------------------- 認証方式ごとの初期化
 

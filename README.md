@@ -37,6 +37,7 @@ flowchart LR
 | 複数エージェントの並列実行 | `mvm fleet <台数>` / `mvm up <name>`。同時に動かせる台数は MicroVM メモリのクォータで決まり、超える前に止める (`mvm doctor` で確認) |
 | 手元 PC から画面確認 | `mvm peek`（画面末尾を取得）、`mvm follow`（推論の過程を流れるように表示）、`mvm view`（画面を読み取り専用で表示）、`mvm watch`（全台を一覧表示）、`mvm wait`（応答が終わるまで待つ）、`mvm result`（最後の応答を読む）、`mvm top`（VM のメモリ）、`mvm ssh`（tmux にアタッチ） |
 | 手元 PC から指示 | `mvm send <name> "指示"`（接続せずに入力）、または `mvm ssh` で直接操作 |
+| 手元の設定を VM でも使う | `mvm profile push` で、手元の Claude Code / Codex のルール・skill・サブエージェント・コマンドを VM のエージェントにも置く（認証情報らしいものは送らない） |
 | 手元のエージェントを司令塔にする | `mvm orchestrator install claude\|codex` で、手元の Claude Code / Codex に MicroVM へ作業を任せる skill を入れる。重い処理は MicroVM で動き、手元の RAM を使わない（[docs/orchestrator.md](docs/orchestrator.md)） |
 | 多様な認証方式 | Claude Code: サブスクリプション (OAuth トークン) / API キー / Amazon Bedrock / LLM ゲートウェイ / 対話ログイン<br>Codex: API キー / ChatGPT ログイン (auth.json) / 対話ログイン |
 | 8 時間制限への対応 | ワークスペースを S3 に定期保存し、`mvm renew` で新しい MicroVM に復元 |

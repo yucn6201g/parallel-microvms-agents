@@ -46,6 +46,7 @@
 | `IDLE_AUTO_RESUME` | `true` | 起動時 | 通信が来たら自動で再開する |
 | `INGRESS_CONNECTORS` | `"HTTP_INGRESS SHELL_INGRESS"` | 起動時 | 受信の接続口。`SHELL_INGRESS` を外すと `mvm shell` とコンソールの Connect が使えなくなる |
 | `SNAPSHOT_INTERVAL_SECONDS` | `1800` | 起動時 | ワークスペースを S3 に保存する間隔。`0` で定期保存しない |
+| `PROFILE` | (空) | 起動時 | `mvm profile push` で送った手元の設定のまとまりの名前 (例: `default`)。VM の Claude Code / Codex に、手元のルール・skill・サブエージェント・コマンドを置く ([commands.md](commands.md#profile))。`mvm up --profile` / `--no-profile` で 1 回だけ変えられる |
 | `SETUP_TIMEOUT_SECONDS` | `1800` | 起動時 | リポジトリの `.pmva/setup.sh` を打ち切るまでの秒数 ([setup.md](setup.md#リポジトリごとの準備-pmvasetupsh)) |
 | `KEEPALIVE_RATE_MINUTES` | `5` | infra deploy | 作業中の VM を AWS 側から起こし続ける間隔 (分)。`0` で無効。`IDLE_MAX_SECONDS` より十分短くする |
 | `KEEPALIVE_ACTIVE_SECONDS` | `900` | infra deploy | 最後の作業 (画面の変化や CPU の使用) からこの秒数以内なら作業中とみなす |

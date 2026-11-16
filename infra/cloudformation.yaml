@@ -197,6 +197,11 @@ Resources:
                 s3:prefix:
                   - "workspaces/*"
                   - "workspace-history/*"
+          # 手元の Claude Code / Codex の設定 (mvm profile push)。VM からは読むだけで、書き換えられない
+          - Sid: ReadAgentProfiles
+            Effect: Allow
+            Action: s3:GetObject
+            Resource: !Sub "${ArtifactBucket.Arn}/profiles/*"
 
   # Claude Code と Codex の両方
   ExecutionRole:

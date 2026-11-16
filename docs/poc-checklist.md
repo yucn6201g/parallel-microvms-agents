@@ -165,6 +165,8 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 - [x] イメージ (`image/Dockerfile`): 公開されているベースイメージで、Docker でビルドして動かした (amd64 は開発環境、ARM64 は CI の `image` ワークフロー)。headless の Chromium (Playwright 1.64.1) が日本語フォントで表示できること、uv で Python 3.12、`pmva-node` で Node.js 20、run フックから `.pmva/setup.sh` → エージェントの起動まで通ることを確認
   - Chromium のライブラリは GTK なしで足りる (headless の Chromium は GTK を使わない)。外すとイメージが約 290MB 小さくなった
 - [ ] Lambda MicroVMs の上でのイメージのビルド (`mvm image build`) と、ブラウザ・`setup.sh` の動作: 未確認
+- [x] 手元の設定 (`mvm profile push`): 送るものの選び方と除外、VM での置き方 (自動テスト)。固定した版の Claude Code / Codex が `~/.claude/CLAUDE.md` / `~/.codex/AGENTS.md` を読むことを確認 (`tests/test_agents_e2e.py`)
+- [ ] S3 経由での `mvm profile push` → VM での取得: 未確認 (実行ロールの `profiles/*` の読み取りを含む)
 - [ ] MicroVM の上での `mvm wait` / `result` / `follow` / `view` / `top`: 未確認 (イメージの作り直しが必要)。Codex の対話モード (tmux の中) での `notify` も未確認 (`codex exec` では確認済み)
 - [ ] メモリ不足による強制終了の検出 (`/proc/vmstat` の `oom_kill`): 自動テストでファイルを差し替えて確認したのみ。MicroVM のカーネルでこの値が使えるかは未確認
 

@@ -421,11 +421,19 @@ def codex_events(rec):
         return []
     kind = p.get("type")
     if kind == "message":
-        text = block_text(p.get("content"))
+        content = p.get("content")
+        if p.get("role") == "user":
+            # Codex は AGENTS.md や環境の情報も user の発言として記録する。種類の情報があれば、利用者の入力 (user.text) だけを残す
+            kinds = (p.get("internal_chat_message_metadata_passthrough") or {}).get("content_item_kinds")
+            if isinstance(kinds, list) and isinstance(content, list) and len(kinds) == len(content):
+                content = [c for c, k in zip(content, kinds) if k == "user.text"]
+            text = block_text(content)
+            if text.strip() and not text.lstrip().startswith(("<", "# AGENTS.md instructions")):
+                return [{"kind": "prompt", "text": text}]
+            return []
+        text = block_text(content)
         if p.get("role") == "assistant" and text.strip():
             return [{"kind": "text", "text": text}]
-        if p.get("role") == "user" and text.strip() and not text.lstrip().startswith("<"):
-            return [{"kind": "prompt", "text": text}]
     elif kind == "reasoning":
         text = "\n".join(x.get("text") or "" for x in p.get("summary") or [] if isinstance(x, dict))
         if text.strip():

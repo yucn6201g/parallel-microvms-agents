@@ -15,6 +15,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -935,6 +936,78 @@ class CliTest(unittest.TestCase):
         self.assertIn("読み取り専用", err)
         self.mvm("view", "v1", "--window", "shell", env=env)
         self.assertEqual(json.loads(record.read_text(encoding="utf-8"))[-1], "shell")
+
+    def make_local_agent_config(self):
+        claude = self.home / ".claude"
+        codex = Path(self.tmp.name) / "codex-home"
+        files = {
+            claude / "CLAUDE.md": b"# \xe6\x89\x8b\xe5\x85\x83\xe3\x81\xae\xe3\x83\xab\xe3\x83\xbc\xe3\x83\xab\r\n",
+            claude / "skills" / "review" / "SKILL.md": b"---\nname: review\n---\n",
+            claude / "skills" / "review" / "run.sh": b"#!/bin/bash\r\necho ok\r\n",
+            claude / "agents" / "tester.md": b"tester",
+            claude / "commands" / "ship.md": b"ship",
+            claude / "settings.json": b'{"env": {"X": "1"}}',
+            claude / ".credentials.json": b"{}",
+            claude / "skills" / "mvm-orchestrator" / "SKILL.md": b"orchestrator",
+            claude / "skills" / "leaky" / "SKILL.md": b"token: sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
+            claude / "skills" / "big" / "data.bin": b"x" * (1024 * 1024 + 1),
+            claude / "skills" / "local" / "SKILL.md": str(self.home).encode() + b"/notes.md",
+            codex / "AGENTS.md": b"codex rules",
+            codex / "prompts" / "fix.md": b"fix",
+            codex / "skills" / ".system" / "imagegen" / "SKILL.md": b"system",
+            codex / "config.toml": b'model = "x"',
+        }
+        for path, data in files.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        return dict(self.env, CODEX_HOME=str(codex))
+
+    def test_profile_push(self):
+        env = self.make_local_agent_config()
+        _, out, _ = self.mvm("profile", "show", env=env)
+        out = out.replace("\r\n", "\n")
+        self.assertIn("認証情報 (API キー、トークン、秘密鍵など) らしい文字列を含む", out)
+        self.assertIn("大きすぎる", out)
+        self.assertIn("手元のパスを含む", out)
+        self.assertIn("8 ファイルを渡します (まだ送っていません)", out)
+        self.assertFalse((self.stub_dir / "s3").exists(), "show では送らない")
+        self.mvm("profile", "push", "--dry-run", env=env)
+        self.assertFalse((self.stub_dir / "s3").exists(), "--dry-run では送らない")
+        _, _, err = self.mvm("profile", "push", env=env)
+        self.assertIn("PROFILE=default", err)
+        obj = self.stub_dir / "s3" / "pmva-bucket" / "profiles" / "default.tar.gz"
+        with tarfile.open(obj) as tar:
+            members = {m.name: m for m in tar.getmembers()}
+            self.assertEqual(sorted(members), [
+                "claude/CLAUDE.md", "claude/agents/tester.md", "claude/commands/ship.md", "claude/skills/local/SKILL.md",
+                "claude/skills/review/SKILL.md", "claude/skills/review/run.sh", "codex/AGENTS.md", "codex/prompts/fix.md"])
+            run_sh = tar.extractfile("claude/skills/review/run.sh").read()
+            self.assertEqual(run_sh, b"#!/bin/bash\necho ok\n", "Windows の改行は LF にする")
+            self.assertEqual(members["claude/skills/review/run.sh"].mode, 0o755)
+            self.assertEqual(members["claude/CLAUDE.md"].mode, 0o644)
+        # 名前を付けて、Claude Code だけ
+        self.mvm("profile", "push", "--name", "team", "--agent", "claude", env=env)
+        with tarfile.open(self.stub_dir / "s3" / "pmva-bucket" / "profiles" / "team.tar.gz") as tar:
+            self.assertTrue(all(n.startswith("claude/") for n in tar.getnames()))
+        rc, _, err = self.mvm("profile", "push", "--name", "Bad_Name", env=env, check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("英小文字・数字・ハイフン", err)
+
+    def test_up_uses_profile(self):
+        env = dict(self.make_local_agent_config(), PMVA_STUB_QUOTA_GB="100")
+        rc, _, err = self.mvm("up", "p1", "--profile", "default", env=env, check=False)
+        self.assertNotEqual(rc, 0, "送っていない設定のまとまりは使えない")
+        self.assertIn("mvm profile push --name default", err)
+        self.mvm("profile", "push", env=env)
+        self.mvm("up", "p1", "--profile", "default", env=env)
+        cfg = Path(self.env["PMVA_CONFIG"])
+        cfg.write_text(cfg.read_text(encoding="utf-8") + "PROFILE=default\n", encoding="utf-8")
+        self.mvm("up", "p2", env=env)
+        self.mvm("up", "p3", "--no-profile", env=env)
+        p1, p2, p3 = self.payloads()
+        self.assertEqual(p1["profile"], "s3://pmva-bucket/profiles/default.tar.gz")
+        self.assertEqual(p2["profile"], "s3://pmva-bucket/profiles/default.tar.gz", "config.env の PROFILE")
+        self.assertNotIn("profile", p3)
 
     def test_orchestrator_install_for_claude(self):
         env = dict(self.env, PMVA_CONFIG=str(Path(self.tmp.name) / "none.env"))  # config.env がなくても使える
