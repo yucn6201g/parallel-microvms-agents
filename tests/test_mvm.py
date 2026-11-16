@@ -928,12 +928,14 @@ class CliTest(unittest.TestCase):
         finally:
             api.shutdown()
 
-    def fake_ssh(self):
+    def fake_ssh(self, output=""):
+        """引数を記録し、output を標準エラーに出して終わる ssh の代わり。"""
         fake = Path(self.tmp.name) / "fakessh"
         fake.mkdir(exist_ok=True)
         record = Path(self.tmp.name) / "ssh-args.json"
         script = fake / "fake_ssh.py"
-        script.write_text(f"import json, sys\nopen({str(record)!r}, 'w').write(json.dumps(sys.argv[1:]))\n", encoding="utf-8")
+        script.write_text(f"import json, sys\nopen({str(record)!r}, 'w').write(json.dumps(sys.argv[1:]))\n"
+                          f"sys.stderr.write({output!r})\n", encoding="utf-8")
         if IS_WINDOWS:
             (fake / "ssh.cmd").write_text(f'@"{sys.executable}" "{script}" %*\r\n', encoding="utf-8")
         else:
@@ -960,6 +962,89 @@ class CliTest(unittest.TestCase):
             rc, _, err = self.mvm("forward", "f1", f"{port}:3000", env=env, check=False)
         self.assertNotEqual(rc, 0)
         self.assertIn(f"手元のポート {port} は使われています", err)
+
+    LOGIN_URL = "https://auth.openai.com/oauth/authorize?response_type=code&redirect_uri=http%3A%2F%2F127.0.0.1%3A1455%2Fauth%2Fcallback"
+
+    def test_login_codex_forwards_callback_port_and_opens_browser(self):
+        with socket.socket() as probe:
+            if not IS_WINDOWS:
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                probe.bind(("127.0.0.1", 1455))
+            except OSError:
+                self.skipTest("この PC では 1455 番が使われている")
+        env, record = self.fake_ssh(output=f"Starting local login server on http://localhost:1455.\n\n{self.LOGIN_URL}\n")
+        opened = Path(self.tmp.name) / "opened-url.txt"
+        if not IS_WINDOWS:   # webbrowser は BROWSER のコマンドに URL を渡す
+            browser = Path(self.tmp.name) / "browser.sh"
+            browser.write_text(f'#!/bin/sh\nprintf %s "$1" > "{opened}"\n', encoding="utf-8")
+            browser.chmod(0o755)
+            env["BROWSER"] = f"{browser} %s"
+        self.mvm("up", "l1", "--agent", "codex", "--codex-auth", "interactive", env=env)
+        _, out, err = self.mvm("login", "l1", env=env)
+        args = json.loads(record.read_text(encoding="utf-8"))
+        self.assertIn("127.0.0.1:1455:127.0.0.1:1455", args)
+        self.assertIn("ExitOnForwardFailure=yes", args)
+        self.assertEqual(args[-2], "agent@pmva-l1")
+        self.assertIn("codex login", args[-1])
+        self.assertNotIn("--device-auth", args[-1])
+        self.assertIn(self.LOGIN_URL, out, "Codex の出力をそのまま見せる")
+        if not IS_WINDOWS:
+            for _ in range(50):
+                if opened.exists():
+                    break
+                time.sleep(0.1)
+            self.assertEqual(opened.read_text(encoding="utf-8"), self.LOGIN_URL)
+        self.assertIn("codex を起動し直して", err)
+        # --no-browser では開かない。--device ではポートをつながない
+        if not IS_WINDOWS:
+            opened.unlink()
+        self.mvm("login", "l1", "codex", "--device", "--no-browser", env=env)
+        args = json.loads(record.read_text(encoding="utf-8"))
+        self.assertIn("codex login --device-auth", args[-1])
+        self.assertFalse([a for a in args if ":1455:" in a])
+        self.assertFalse(opened.exists())
+
+    def test_login_checks_port_and_agent(self):
+        env, record = self.fake_ssh()
+        self.mvm("up", "l2", "--agent", "both", env=env)
+        rc, _, err = self.mvm("login", "l2", env=env, check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("claude か codex", err)
+        self.mvm("login", "l2", "claude", "--console", env=env)
+        args = json.loads(record.read_text(encoding="utf-8"))
+        self.assertIn("-t", args)
+        self.assertIn("claude auth login --console", args[-1])
+        with socket.socket() as busy:
+            if not IS_WINDOWS:
+                busy.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                busy.bind(("127.0.0.1", 1455))
+            except OSError:
+                self.skipTest("この PC では 1455 番が使われている")
+            busy.listen()
+            rc, _, err = self.mvm("login", "l2", "codex", env=env, check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("1455", err)
+
+    def test_codex_access_token_and_gateway(self):
+        self.mvm("up", "t1", "--agent", "codex", "--codex-auth", "access-token")
+        self.mvm("up", "g1", "--agent", "codex", "--codex-auth", "gateway")
+        t1, g1 = self.payloads()
+        self.assertEqual(t1["codexSecret"], "pmva/codex-access-token")
+        self.assertEqual(g1["codexSecret"], "pmva/codex-gateway")
+        for bad in ('{"apiKey": "k"}', '{"baseUrl": "ftp://x"}', '{"baseUrl": "https://x", "headers": ["a"]}',
+                    '{"baseUrl": "https://x", "apiKeyHeader": "bad header"}', "[]"):
+            rc, _, err = self.mvm("secret", "set", "codex-gateway", input=bad.encode(), check=False)
+            self.assertNotEqual(rc, 0, bad)
+            self.assertIn("baseUrl", err)
+        self.mvm("secret", "set", "codex-gateway", input=json.dumps({
+            "baseUrl": "https://gw.example.com/v1", "apiKey": "k", "apiKeyHeader": "api-key",
+            "queryParams": {"api-version": "2025-04-01"}, "headers": {"X-Team": "a"}}).encode())
+        rc, _, err = self.mvm("secret", "set", "codex-access-token", input=b"not-a-token", check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("at-", err)
+        self.mvm("secret", "set", "codex-access-token", input=b"at-test")
 
     def test_setup_options_in_payload(self):
         self.mvm("up", "s1")

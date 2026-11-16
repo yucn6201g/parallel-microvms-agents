@@ -31,6 +31,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import webbrowser
 import zipfile
 from pathlib import Path
 
@@ -72,7 +73,7 @@ INFRA_TEMPLATES = {"full": "cloudformation.yaml", "minimal": "cloudformation-min
 AGENTS = ("claude", "codex", "both", "none")
 CLAUDE_AUTHS = ("api-key", "oauth-token", "bedrock", "bedrock-api-key", "mantle", "anthropic-aws",
                 "anthropic-aws-api-key", "gateway", "interactive", "none")
-CODEX_AUTHS = ("api-key", "chatgpt", "bedrock", "bedrock-api-key", "interactive", "none")
+CODEX_AUTHS = ("api-key", "chatgpt", "access-token", "bedrock", "bedrock-api-key", "gateway", "interactive", "none")
 # 実行ロールはエージェントごとに分かれており、読めるシークレットを名前の接頭辞で区別する
 # (infra/cloudformation.yaml)。別名で登録するときも、この接頭辞で始める必要がある
 SECRET_NAME_PREFIXES = {
@@ -80,11 +81,12 @@ SECRET_NAME_PREFIXES = {
     "anthropic-gateway": ("anthropic-", "claude-"), "openai-api-key": ("openai-", "codex-"),
     "codex-auth-json": ("openai-", "codex-"), "github-token": ("github-",), "notify-webhook": ("notify-",),
     "claude-bedrock-api-key": ("anthropic-", "claude-"), "anthropic-aws-api-key": ("anthropic-", "claude-"),
-    "codex-bedrock-api-key": ("openai-", "codex-"),
+    "codex-bedrock-api-key": ("openai-", "codex-"), "codex-access-token": ("openai-", "codex-"),
+    "codex-gateway": ("openai-", "codex-"),
 }
 SECRET_KINDS = ("anthropic-api-key", "claude-oauth-token", "anthropic-gateway", "claude-bedrock-api-key",
-                "anthropic-aws-api-key", "openai-api-key", "codex-auth-json", "codex-bedrock-api-key",
-                "github-token", "notify-webhook")
+                "anthropic-aws-api-key", "openai-api-key", "codex-auth-json", "codex-access-token",
+                "codex-bedrock-api-key", "codex-gateway", "github-token", "notify-webhook")
 
 C = {}  # 読み込んだ設定
 
@@ -976,6 +978,30 @@ def wait_until_terminated(timeout=300):
             time.sleep(5)
 
 
+HEADER_NAME = re.compile(r"[A-Za-z0-9!#$%&'*+.^_`|~-]+")
+
+
+def check_codex_gateway(value):
+    """--codex-auth gateway のシークレット (Codex から使う、OpenAI の Responses API と同じ形の接続先)。"""
+    usage = ('{"baseUrl":"https://.../v1","apiKey":"...(任意)","apiKeyHeader":"api-key (任意)",'
+             '"queryParams":{...(任意)},"headers":{...(任意。秘密の値は入れない)}} 形式の JSON を渡してください')
+    try:
+        v = json.loads(value)
+    except ValueError:
+        die(usage)
+    if not isinstance(v, dict) or not re.match(r"https?://\S+$", str(v.get("baseUrl", ""))):
+        die(usage)
+    for key in ("apiKey", "apiKeyHeader"):
+        if key in v and not isinstance(v[key], str):
+            die(usage)
+    if "apiKeyHeader" in v and not HEADER_NAME.fullmatch(v["apiKeyHeader"]):
+        die(usage)
+    for key in ("queryParams", "headers"):
+        if key in v and not (isinstance(v[key], dict) and all(isinstance(x, str) for x in v[key].values())
+                             and (key != "headers" or all(HEADER_NAME.fullmatch(h) for h in v[key]))):
+            die(usage)
+
+
 def cmd_secret(args):
     prefix = C["PMVA_PREFIX"]
     if args.action == "ls":
@@ -1008,6 +1034,10 @@ def cmd_secret(args):
             die('{"baseUrl":"...","authToken":"..."} 形式の JSON を渡してください')
     if kind == "notify-webhook" and not value.startswith("https://"):
         die("Webhook の URL (https://...) を渡してください")
+    if kind == "codex-gateway":
+        check_codex_gateway(value)
+    if kind == "codex-access-token" and not re.fullmatch(r"at-\S+|[\w-]+\.[\w-]+\.[\w-]+", value):
+        die("Codex のアクセストークン (at- で始まる個人用のトークン、またはエージェント用の JWT) を渡してください")
     if kind == "codex-auth-json":
         try:
             json.loads(value)
@@ -1281,6 +1311,8 @@ def build_payload(name, a):
         "api-key": f"{prefix}/openai-api-key",
         "chatgpt": f"{prefix}/codex-auth-json",
         "bedrock-api-key": f"{prefix}/codex-bedrock-api-key",
+        "access-token": f"{prefix}/codex-access-token",
+        "gateway": f"{prefix}/codex-gateway",
     }.get(codex_auth, "")
     # Claude Platform on AWS はワークスペース ID が必須 (リクエストごとに送る)
     anthropic_aws = {}
@@ -2165,11 +2197,8 @@ def cmd_forward(args):
     """VM の中のポート (開発サーバーなど) を、手元の PC のポートにつなぐ。"""
     pairs = [parse_forward(spec) for spec in args.ports]
     for local, remote in pairs:
-        with socket.socket() as sock:
-            try:
-                sock.bind(("127.0.0.1", local))
-            except OSError:
-                die(f"手元のポート {local} は使われています。別のポートを指定してください (例: {local + 1}:{remote})")
+        if not port_free(local):
+            die(f"手元のポート {local} は使われています。別のポートを指定してください (例: {local + 1}:{remote})")
     forwards = []
     for local, remote in pairs:
         forwards += ["-L", f"127.0.0.1:{local}:127.0.0.1:{remote}"]
@@ -2180,6 +2209,76 @@ def cmd_forward(args):
                            extra=["-N", "-o", "ExitOnForwardFailure=yes", *forwards])
     except KeyboardInterrupt:
         return 0
+
+
+CODEX_LOGIN_PORTS = (1455, 1457)   # codex login (ブラウザ) が VM の中で戻り先を待つポート (1455 が使えないときは 1457)
+LOGIN_URL = re.compile(r"https://auth\.openai\.com/\S+")
+VM_SHELL = ". ~/.bashrc.pmva 2>/dev/null; cd \"${PMVA_WORKDIR:-$HOME}\"; "   # tmux のシェルと同じ環境で動かす
+
+
+def port_free(port):
+    """手元のポートで待ち受けられるか。ssh -L と同じく、直前の接続の後始末 (TIME_WAIT) が残っていても使えるとみなす。"""
+    with socket.socket() as sock:
+        if os.name != "nt":   # Windows の SO_REUSEADDR は使用中のポートも奪えてしまうので付けない
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("127.0.0.1", port))
+            return True
+        except OSError:
+            return False
+
+
+def cmd_login(args):
+    """VM の中のエージェントに、手元のブラウザでログインする。"""
+    ssh = ssh_binary(args.name)
+    agent = args.agent or {"claude": "claude", "codex": "codex"}.get(load_session(args.name)["payload"].get("agent"))
+    if not agent:
+        die("ログインするエージェント (claude か codex) を指定してください。例: mvm login " + args.name + " codex")
+    host = f"agent@pmva-{args.name}"
+    if agent == "claude":
+        # Claude Code は URL を表示し、ブラウザに表示されたコードを貼り付ける方式 (端末が要る)
+        log("表示される URL を手元のブラウザで開き、ログイン後に表示されるコードを貼り付けてください")
+        rc = subprocess.call([ssh, *ssh_options(args.name), "-t", host,
+                              VM_SHELL + "exec claude auth login" + (" --console" if args.console else "")])
+        if rc == 0:
+            log("ログインしました。claude のウィンドウで動いている Claude Code は、起動し直すと新しいログインを使います")
+        return rc
+    forwards = []
+    if args.device:
+        remote = "exec codex login --device-auth"
+    else:
+        # codex login は VM の中の 127.0.0.1:1455 で、ブラウザからの戻り (ログイン結果) を待つ。
+        # 手元の同じポートを VM につなぐと、手元のブラウザでログインした結果が VM の Codex に届く
+        if not port_free(CODEX_LOGIN_PORTS[0]):
+            die(f"手元のポート {CODEX_LOGIN_PORTS[0]} が使われています (手元で codex login を実行中など)。"
+                "終わらせてからやり直すか、--device (コードを入力する方式) を使ってください")
+        forwards = ["-o", "ExitOnForwardFailure=yes"]
+        for port in CODEX_LOGIN_PORTS:
+            if port_free(port):
+                forwards += ["-L", f"127.0.0.1:{port}:127.0.0.1:{port}"]
+        remote = "exec codex login"
+    log(f"{args.name} の Codex にログインします (中止は Ctrl-C)")
+    proc = subprocess.Popen([ssh, *ssh_options(args.name), *forwards, host, VM_SHELL + remote],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    opened = args.no_browser
+    try:
+        for raw in proc.stdout:
+            line = raw.decode("utf-8", "replace")
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            m = LOGIN_URL.search(line)
+            if m and not opened:
+                opened = True
+                if webbrowser.open(m.group(0)):
+                    log("手元のブラウザで開きました。開かないときは上の URL をブラウザに貼り付けてください")
+        rc = proc.wait()
+    except KeyboardInterrupt:
+        proc.terminate()
+        return 130
+    if rc == 0:
+        log("ログインしました。codex のウィンドウでログインを待っている Codex は、終了して codex を起動し直してください "
+            "(mvm ssh で接続)")
+    return rc
 
 
 def attach_tmux(name, remote, no_reconnect, extra=None):
@@ -2410,6 +2509,13 @@ def build_parser():
     x.add_argument("ports", nargs="+", metavar="port", help="VM のポート (例: 3000)。手元のポートを変えるときは 8080:3000")
     x.add_argument("--no-reconnect", action="store_true", help="接続が切れても再接続しない")
     x.set_defaults(func=cmd_forward)
+    x = sub.add_parser("login", help="VM の中のエージェントに、手元のブラウザでログインする")
+    x.add_argument("name")
+    x.add_argument("agent", nargs="?", choices=("claude", "codex"), help="省略時はセッションのエージェント")
+    x.add_argument("--device", action="store_true", help="Codex: コードを入力する方式 (codex login --device-auth)")
+    x.add_argument("--no-browser", action="store_true", help="Codex: 手元のブラウザを自動で開かない")
+    x.add_argument("--console", action="store_true", help="Claude Code: Anthropic Console (API の従量課金) でログイン")
+    x.set_defaults(func=cmd_login)
     x = sub.add_parser("view", help="エージェントの画面を読み取り専用で表示 (入力はエージェントに届かない)")
     x.add_argument("name")
     x.add_argument("--window", help="表示するウィンドウ (claude / codex / shell)")

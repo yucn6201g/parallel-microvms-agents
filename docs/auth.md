@@ -16,11 +16,12 @@ mvm up a3 --agent both   --claude-auth oauth-token --codex-auth api-key   # 1 �
 
 | したいこと | Claude Code | Codex |
 |---|---|---|
-| サブスクリプション (定額) で使う | `oauth-token` | `chatgpt` |
+| サブスクリプション (定額) で使う | `oauth-token` | `chatgpt` / `access-token` / `interactive` + `mvm login` |
 | キーを管理せず、費用を AWS の請求にまとめる | `bedrock` / `mantle` / `anthropic-aws` | `bedrock` |
 | 別の AWS アカウントの Bedrock を使う | `bedrock-api-key` | `bedrock-api-key` |
 | API キー (従量) で使う | `api-key` / `anthropic-aws-api-key` | `api-key` |
-| 社内の LLM ゲートウェイを通す | `gateway` | (未対応) |
+| 社内の LLM ゲートウェイ、LiteLLM、Azure OpenAI などを通す | `gateway` | `gateway` |
+| VM の中で、手元のブラウザを使ってログインする | `interactive` + `mvm login` | `interactive` + `mvm login` |
 
 `bedrock`、`mantle`、`anthropic-aws`、Codex の `bedrock` は、MicroVM の実行ロールの権限で呼びます。シークレットの登録は要りません。
 
@@ -36,7 +37,7 @@ mvm up a3 --agent both   --claude-auth oauth-token --codex-auth api-key   # 1 �
 | `anthropic-aws` | Claude Platform on AWS (AWS Marketplace 請求) | 不要 (実行ロールを使用) | `CLAUDE_CODE_USE_ANTHROPIC_AWS=1`、`ANTHROPIC_AWS_WORKSPACE_ID` |
 | `anthropic-aws-api-key` | Claude Platform on AWS | `anthropic-aws-api-key` | 上に加えて `ANTHROPIC_AWS_API_KEY` |
 | `gateway` | 社内 LLM ゲートウェイ / プロキシ | `anthropic-gateway` (JSON) | `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN` |
-| `interactive` | 任意 | 不要 | 接続後に `claude` を起動して `/login` |
+| `interactive` | 任意 | 不要 | 起動後に手元から `mvm login <name> claude` ([下記](#vm-の中でログインする-mvm-login)) |
 
 ### サブスクリプション (oauth-token)
 
@@ -140,9 +141,11 @@ mvm secret set anthropic-gateway --file gateway.json
 |---|---|---|---|
 | `api-key` | OpenAI API (従量) | `openai-api-key` | `codex login --with-api-key`、`OPENAI_API_KEY` |
 | `chatgpt` | ChatGPT Plus / Pro / Business など | `codex-auth-json` | `~/.codex/auth.json` を配置 |
+| `access-token` | ChatGPT のアカウント | `codex-access-token` | `codex login --with-access-token`、`CODEX_ACCESS_TOKEN` |
 | `bedrock` | Amazon Bedrock の OpenAI のモデル (AWS 請求) | 不要 (実行ロールを使用) | `~/.codex/config.toml` の `model_provider = "amazon-bedrock"` |
 | `bedrock-api-key` | Amazon Bedrock (キーを発行した AWS アカウントに請求) | `codex-bedrock-api-key` | 上に加えて、キーをファイルから読む設定 |
-| `interactive` | 任意 | 不要 | 接続後に `codex login --device-auth` |
+| `gateway` | 接続先による (LiteLLM、Azure OpenAI、社内ゲートウェイなど) | `codex-gateway` (JSON) | `~/.codex/config.toml` の `model_provider = "pmva-gateway"` |
+| `interactive` | 任意 | 不要 | 起動後に手元から `mvm login <name> codex` ([下記](#vm-の中でログインする-mvm-login)) |
 
 ### API キー
 
@@ -161,8 +164,62 @@ mvm secret set codex-auth-json --file ~/.codex/auth.json
 
 `--file` の `~` は Windows でも `%USERPROFILE%` (`C:\Users\<名前>`) に展開されるので、上のコマンドはどちらの OS でも同じです。
 
-注意: 同じ `auth.json` を複数の VM で同時に使うと、トークン更新のタイミングでログインが切れることがあります。その場合は VM ごとに `interactive` (デバイスコード認証) でログインするか、API キーを使ってください。
-`codex login --device-auth` が使えるかどうかは、イメージに入っている Codex のバージョンで `codex login --help` を実行して確認してください。
+注意: 同じ `auth.json` を複数の VM で同時に使うと、トークン更新のタイミングでログインが切れることがあります。その場合は VM ごとにログインする (`--codex-auth interactive` で起動して `mvm login`、[下記](#vm-の中でログインする-mvm-login))、アクセストークンを使う、API キーを使う、のどれかにしてください。
+
+### アクセストークン (access-token)
+
+ChatGPT のアカウントで発行した Codex のアクセストークン (`at-` で始まる個人用のトークン) を登録します。エージェント用の JWT も使えます。`auth.json` と違って Codex がトークンを書き換えないので、複数の VM で同時に使ってもログインが切れません。
+
+```bash
+mvm secret set codex-access-token
+mvm up c1 --agent codex --codex-auth access-token
+```
+
+VM の中では `codex login --with-access-token` で保存し、環境変数 `CODEX_ACCESS_TOKEN` にも入れます (保存に失敗しても使えるように)。
+トークンの発行のしかたと、使えるワークスペースの条件は ChatGPT 側の設定によります。発行できない場合は、`mvm login` でログインしてください。
+
+### ゲートウェイ (gateway)
+
+OpenAI の Responses API と同じ形で受け付ける接続先 (LiteLLM、Azure OpenAI の v1 API、社内ゲートウェイなど) を使います。次の形の JSON をファイルに書いて登録し、登録後はファイルを消してください。
+
+```json
+{"baseUrl": "https://llm-gateway.example.com/v1", "apiKey": "..."}
+```
+
+| 項目 | 必須 | 意味 |
+|---|---|---|
+| `baseUrl` | 必須 | 接続先 (`/responses` の手前まで) |
+| `apiKey` | 任意 | キー。既定では `Authorization: Bearer` で送る |
+| `apiKeyHeader` | 任意 | キーを別のヘッダーで送るときのヘッダー名 (Azure OpenAI なら `api-key`) |
+| `queryParams` | 任意 | URL に付けるパラメータ (例: `{"api-version": "2025-04-01-preview"}`) |
+| `headers` | 任意 | いつも付けるヘッダー。`config.toml` にそのまま書くので、秘密の値は入れない |
+
+```bash
+mvm secret set codex-gateway --file gateway.json
+mvm up c1 --agent codex --codex-auth gateway --codex-args "--model <接続先のモデル名>"
+```
+
+- VM の中では、`~/.codex/config.toml` の先頭の `# pmva:provider begin` 〜 `end` に接続先 (`pmva-gateway`) を書きます。キーは `config.toml` に書かず、`Authorization: Bearer` なら `~/.pmva/secrets/` のファイルから、`apiKeyHeader` なら環境変数 `PMVA_CODEX_GATEWAY_KEY` から渡します
+- 接続先が Responses API に対応している必要があります (Codex 0.165.0 は Chat Completions API には対応していません)
+
+## VM の中でログインする (mvm login)
+
+`--claude-auth interactive` / `--codex-auth interactive` で起動した VM に、手元のブラウザを使ってログインします。VM ごとに別のログインになるので、1 つの `auth.json` を複数の VM で使い回したときのようにログインが切れることがありません。
+
+```bash
+mvm up c1 --agent codex --codex-auth interactive
+mvm login c1                 # Codex: 手元のブラウザが開く。ChatGPT にログインすると VM の Codex に届く
+mvm login c1 --device        # Codex: コードを入力する方式 (ブラウザの戻り先をつながない)
+mvm login a1 claude          # Claude Code: URL を開いてログインし、表示されたコードを貼り付ける
+mvm login a1 claude --console   # Claude Code: Anthropic Console (API の従量課金) でログイン
+```
+
+- Codex (ブラウザ): VM の中で `codex login` を動かし、手元の 1455 番ポート (ログインの戻り先) を VM につなぎます。表示された URL を手元のブラウザで自動で開きます (開かなければ URL を貼り付ける)。手元で `codex login` を実行中などで 1455 番が使われているときは止まるので、`--device` を使ってください
+- Codex (`--device`): 表示された URL を開き、表示されたコードを入力します。ChatGPT のワークスペースの設定で、デバイスコードでのログインが許可されている必要があります
+- Claude Code: VM の中で `claude auth login` を動かします。ブラウザでログインした後に表示されるコードを、端末に貼り付けてください
+- `mvm ssh` と同じ経路を使うので、SSH 公開鍵を付けて起動したセッションが対象です
+- ログインしたときに、エージェントがすでにログイン画面で待っている場合は、そのウィンドウでエージェントを終了して起動し直してください (`mvm ssh` で接続)
+- ログイン情報 (`~/.claude/.credentials.json`、`~/.codex/auth.json`) はスナップショットに含めないので、`mvm renew` や `--restore` で VM を作り直したら、もう一度ログインします
 
 ### Amazon Bedrock (bedrock)
 
