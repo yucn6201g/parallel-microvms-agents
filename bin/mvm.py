@@ -64,23 +64,27 @@ DEFAULTS = {
     "BUDGET_MONTHLY_USD": "0", "BUDGET_EMAIL": "", "KEEPALIVE_RATE_MINUTES": "5", "KEEPALIVE_ACTIVE_SECONDS": "900",
     "NOTIFY_WEBHOOK": "false", "NIGHTLY_STOP_TIME": "", "NIGHTLY_STOP_TIMEZONE": "Asia/Tokyo",
     "INFRA_TEMPLATE": "full", "SETUP_TIMEOUT_SECONDS": "1800", "IMAGE_BROWSER_DEPS": "true", "IMAGE_EXTRA_PACKAGES": "",
-    "PROFILE": "",
+    "PROFILE": "", "ANTHROPIC_AWS_WORKSPACE_ID": "", "ANTHROPIC_AWS_REGION": "", "ENABLE_ANTHROPIC_AWS": "false",
 }
 # mvm infra deploy で使う CloudFormation テンプレート。minimal は mvm の動作に必要なリソースだけ
 # (キープアライブ、毎晩の自動停止、予算アラートを含まない)
 INFRA_TEMPLATES = {"full": "cloudformation.yaml", "minimal": "cloudformation-minimal.yaml"}
 AGENTS = ("claude", "codex", "both", "none")
-CLAUDE_AUTHS = ("api-key", "oauth-token", "bedrock", "gateway", "interactive", "none")
-CODEX_AUTHS = ("api-key", "chatgpt", "interactive", "none")
+CLAUDE_AUTHS = ("api-key", "oauth-token", "bedrock", "bedrock-api-key", "mantle", "anthropic-aws",
+                "anthropic-aws-api-key", "gateway", "interactive", "none")
+CODEX_AUTHS = ("api-key", "chatgpt", "bedrock", "bedrock-api-key", "interactive", "none")
 # 実行ロールはエージェントごとに分かれており、読めるシークレットを名前の接頭辞で区別する
 # (infra/cloudformation.yaml)。別名で登録するときも、この接頭辞で始める必要がある
 SECRET_NAME_PREFIXES = {
     "anthropic-api-key": ("anthropic-", "claude-"), "claude-oauth-token": ("anthropic-", "claude-"),
     "anthropic-gateway": ("anthropic-", "claude-"), "openai-api-key": ("openai-", "codex-"),
     "codex-auth-json": ("openai-", "codex-"), "github-token": ("github-",), "notify-webhook": ("notify-",),
+    "claude-bedrock-api-key": ("anthropic-", "claude-"), "anthropic-aws-api-key": ("anthropic-", "claude-"),
+    "codex-bedrock-api-key": ("openai-", "codex-"),
 }
-SECRET_KINDS = ("anthropic-api-key", "claude-oauth-token", "anthropic-gateway",
-                "openai-api-key", "codex-auth-json", "github-token", "notify-webhook")
+SECRET_KINDS = ("anthropic-api-key", "claude-oauth-token", "anthropic-gateway", "claude-bedrock-api-key",
+                "anthropic-aws-api-key", "openai-api-key", "codex-auth-json", "codex-bedrock-api-key",
+                "github-token", "notify-webhook")
 
 C = {}  # 読み込んだ設定
 
@@ -136,6 +140,7 @@ def load_config():
     C.update(parse_env_file(CONFIG_FILE))
     C["BASE_IMAGE_ARN"] = C["BASE_IMAGE_ARN"] or f"arn:aws:lambda:{C['AWS_REGION']}:aws:microvm-image:al2023-1"
     C["BEDROCK_REGION"] = C["BEDROCK_REGION"] or C["AWS_REGION"]
+    C["ANTHROPIC_AWS_REGION"] = C["ANTHROPIC_AWS_REGION"] or C["AWS_REGION"]
     (STATE_DIR / "sessions").mkdir(parents=True, exist_ok=True)
     (STATE_DIR / "tokens").mkdir(parents=True, exist_ok=True)
     for p in (STATE_DIR, STATE_DIR / "tokens"):
@@ -902,6 +907,7 @@ def infra_parameters():
     params = [
         f"Prefix={C['PMVA_PREFIX']}",
         f"EnableBedrock={str(as_bool(C['ENABLE_BEDROCK'])).lower()}",
+        f"EnableAnthropicAws={str(as_bool(C['ENABLE_ANTHROPIC_AWS'])).lower()}",
         f"KeepaliveRateMinutes={int(C['KEEPALIVE_RATE_MINUTES'])}",
         f"KeepaliveActiveSeconds={int(C['KEEPALIVE_ACTIVE_SECONDS'])}",
         f"BudgetMonthlyUsd={float(C['BUDGET_MONTHLY_USD']):g}",
@@ -1268,11 +1274,24 @@ def build_payload(name, a):
         "api-key": f"{prefix}/anthropic-api-key",
         "oauth-token": f"{prefix}/claude-oauth-token",
         "gateway": f"{prefix}/anthropic-gateway",
+        "bedrock-api-key": f"{prefix}/claude-bedrock-api-key",
+        "anthropic-aws-api-key": f"{prefix}/anthropic-aws-api-key",
     }.get(claude_auth, "")
     codex_secret = a.codex_secret or {
         "api-key": f"{prefix}/openai-api-key",
         "chatgpt": f"{prefix}/codex-auth-json",
+        "bedrock-api-key": f"{prefix}/codex-bedrock-api-key",
     }.get(codex_auth, "")
+    # Claude Platform on AWS はワークスペース ID が必須 (リクエストごとに送る)
+    anthropic_aws = {}
+    if claude_auth.startswith("anthropic-aws"):
+        workspace = C["ANTHROPIC_AWS_WORKSPACE_ID"]
+        if not workspace:
+            die("--claude-auth anthropic-aws には、config.env の ANTHROPIC_AWS_WORKSPACE_ID "
+                "(Claude Platform on AWS のワークスペース ID、wrkspc_...) が必要です")
+        if not re.fullmatch(r"wrkspc_[A-Za-z0-9]+", workspace):
+            die(f"ANTHROPIC_AWS_WORKSPACE_ID は wrkspc_ で始まるワークスペース ID にしてください: {workspace}")
+        anthropic_aws = {"anthropicAwsWorkspaceId": workspace, "anthropicAwsRegion": C["ANTHROPIC_AWS_REGION"]}
     if a.no_github:
         github_secret = ""
     else:
@@ -1312,6 +1331,7 @@ def build_payload(name, a):
         "setupTimeoutSeconds": int(C["SETUP_TIMEOUT_SECONDS"]),
         "skipSetup": "true" if a.no_setup else "",
         "profile": profile_uri,
+        **anthropic_aws,
     }
     return {k: v for k, v in payload.items() if v != ""}
 

@@ -17,6 +17,10 @@
 - リポジトリの `.pmva/setup.sh` を VM の起動時 (エージェントを起動する前) に実行する。依存関係のインストールやブラウザの用意に使う。`SETUP_TIMEOUT_SECONDS`、`mvm up --no-setup`
 - イメージに Chromium (Playwright / Puppeteer) の実行に必要なライブラリと日本語フォント (`IMAGE_BROWSER_DEPS`)、uv、`pmva-node` (リポジトリが求める版の Node.js を入れる) を追加。`IMAGE_EXTRA_PACKAGES` で OS のパッケージを追加できる
 - `mvm profile push` / `show`: 手元の Claude Code / Codex のルール (`CLAUDE.md` / `AGENTS.md`)、skill、サブエージェント、コマンドを VM に渡す。認証情報らしい文字列を含むファイルや設定ファイルは送らない。`config.env` の `PROFILE`、`mvm up --profile` / `--no-profile`。実行ロールに `profiles/*` の読み取りを追加 (`mvm infra deploy` が必要)
+- AWS で使える認証方式を追加 ([docs/auth.md](docs/auth.md))。実行ロールの方式はキーの登録が要らない
+  - Claude Code: `--claude-auth bedrock-api-key` (Bedrock の API キー)、`mantle` (Bedrock の Mantle)、`anthropic-aws` / `anthropic-aws-api-key` (Claude Platform on AWS。`ANTHROPIC_AWS_WORKSPACE_ID`、`ANTHROPIC_AWS_REGION`)
+  - Codex: `--codex-auth bedrock` (Bedrock の OpenAI のモデル)、`bedrock-api-key`
+  - 実行ロールに Bedrock の Mantle の呼び出し権限を追加し、Codex 用の実行ロールにも Bedrock の権限を付けた。Claude Platform on AWS の権限は `ENABLE_ANTHROPIC_AWS=true` のときだけ付ける (どちらも `mvm infra deploy` が必要)
 - `mvm forward <name> <port>`: VM の中のポート (開発サーバーなど) を手元の PC のポートにつなぐ
 - CI の `image` ワークフロー: 本物のイメージを ARM64 でビルドし、ツール、headless の Chromium、起動時の初期化を確かめる
 - CI の `agents-e2e`: 固定した版の Claude Code / Codex を LLM API の代わりにつないで動かし、フックと会話の記録の読み取りを確かめる

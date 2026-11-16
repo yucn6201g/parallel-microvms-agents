@@ -21,6 +21,7 @@ class MockServer(http.server.ThreadingHTTPServer):
     def __init__(self, command):
         self.command = command   # エージェントに実行させるシェルのコマンド
         self.requests = []
+        self.headers = []        # requests と同じ順の、要求ヘッダー (認証の確かめ用。名前は小文字)
         srv = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -40,6 +41,7 @@ class MockServer(http.server.ThreadingHTTPServer):
 
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+                srv.headers.append({k.lower(): v for k, v in self.headers.items()})
                 srv.requests.append((self.path, body))
                 srv.handle_post(self, body)
 

@@ -53,8 +53,11 @@ mvm secret ls
 | `claude-oauth-token` | `claude setup-token` で発行した長期トークン | `--claude-auth oauth-token` (Pro / Max) |
 | `anthropic-api-key` | Anthropic の API キー | `--claude-auth api-key` |
 | `anthropic-gateway` | `{"baseUrl":"...","authToken":"..."}` 形式の JSON | `--claude-auth gateway` |
+| `claude-bedrock-api-key` | Amazon Bedrock の API キー (Claude Code 用) | `--claude-auth bedrock-api-key` |
+| `anthropic-aws-api-key` | Claude Platform on AWS のワークスペースの API キー | `--claude-auth anthropic-aws-api-key` |
 | `openai-api-key` | OpenAI の API キー | `--codex-auth api-key` |
 | `codex-auth-json` | ChatGPT でログイン済みの `~/.codex/auth.json` の中身 | `--codex-auth chatgpt` |
+| `codex-bedrock-api-key` | Amazon Bedrock の API キー (Codex 用) | `--codex-auth bedrock-api-key` |
 | `github-token` | GitHub の personal access token | clone / push (`USE_GITHUB_TOKEN=true`) |
 | `notify-webhook` | Slack などの Webhook URL (`https://...`) | `--notify` |
 
@@ -110,8 +113,8 @@ MicroVM を 1 台起動し、エージェントを tmux の中で開始します
 | オプション | 既定 | 説明 |
 |---|---|---|
 | `--agent claude\|codex\|both\|none` | `DEFAULT_AGENT` | 起動するエージェント。`none` はエージェントなし (シェルだけ) |
-| `--claude-auth api-key\|oauth-token\|bedrock\|gateway\|interactive\|none` | `DEFAULT_CLAUDE_AUTH` | Claude Code の認証方式 ([auth.md](auth.md)) |
-| `--codex-auth api-key\|chatgpt\|interactive\|none` | `DEFAULT_CODEX_AUTH` | Codex の認証方式 |
+| `--claude-auth api-key\|oauth-token\|bedrock\|bedrock-api-key\|mantle\|anthropic-aws\|anthropic-aws-api-key\|gateway\|interactive\|none` | `DEFAULT_CLAUDE_AUTH` | Claude Code の認証方式 ([auth.md](auth.md)) |
+| `--codex-auth api-key\|chatgpt\|bedrock\|bedrock-api-key\|interactive\|none` | `DEFAULT_CODEX_AUTH` | Codex の認証方式 |
 | `--claude-secret` / `--codex-secret` / `--github-secret <名前>` | 認証方式から決まる | 既定と別名で登録したシークレットを使う |
 | `--no-github` | | GitHub トークンを使わない |
 | `--repo <URL>` | | clone するリポジトリ |
@@ -121,7 +124,7 @@ MicroVM を 1 台起動し、エージェントを tmux の中で開始します
 | `--restore latest\|s3://...` | | 保存したワークスペースから復元する |
 | `--claude-args` / `--codex-args "<引数>"` | `DEFAULT_CLAUDE_ARGS` など | エージェントの追加引数 (例: `--claude-args "--dangerously-skip-permissions"`) |
 | `--model <ID>` | `CLAUDE_MODEL` | Claude のモデル / Bedrock の推論プロファイル ID |
-| `--bedrock-region <リージョン>` | `BEDROCK_REGION` | Bedrock を呼ぶリージョン |
+| `--bedrock-region <リージョン>` | `BEDROCK_REGION` | Bedrock (Mantle を含む) を呼ぶリージョン。Claude Code と Codex の両方に効く |
 | `--idle <秒>\|off` | `IDLE_MAX_SECONDS` | 受信通信がこの秒数無いとサスペンド |
 | `--max-duration <秒>` | `MAX_DURATION_SECONDS` | 寿命 (上限 28800 = 8 時間) |
 | `--notify` / `--no-notify` | `NOTIFY_WEBHOOK` | 完了・入力待ちを Webhook に通知する |

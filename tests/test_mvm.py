@@ -525,6 +525,52 @@ class CliTest(unittest.TestCase):
         args = json.loads(sorted(self.stub_dir.glob("microvm-*.args"))[1].read_text(encoding="utf-8"))
         self.assertNotIn("--idle-policy", args)
 
+    def test_aws_auth_methods(self):
+        # Bedrock の API キー / Mantle / Codex の Bedrock
+        self.env["PMVA_STUB_QUOTA_GB"] = "100"
+        self.mvm("up", "k1", "--claude-auth", "bedrock-api-key", "--bedrock-region", "us-east-1")
+        self.mvm("up", "m1", "--claude-auth", "mantle")
+        self.mvm("up", "c1", "--agent", "codex", "--codex-auth", "bedrock")
+        self.mvm("up", "c2", "--agent", "codex", "--codex-auth", "bedrock-api-key")
+        k1, m1, c1, c2 = self.payloads()
+        self.assertEqual((k1["claudeAuth"], k1["claudeSecret"], k1["bedrockRegion"]),
+                         ("bedrock-api-key", "pmva/claude-bedrock-api-key", "us-east-1"))
+        self.assertEqual(m1["claudeAuth"], "mantle")
+        self.assertNotIn("claudeSecret", m1)
+        self.assertEqual((c1["codexAuth"], c1["bedrockRegion"]), ("bedrock", "ap-northeast-1"))
+        self.assertNotIn("codexSecret", c1)
+        self.assertEqual(c2["codexSecret"], "pmva/codex-bedrock-api-key")
+        for p in (k1, m1, c1, c2):
+            self.assertNotIn("anthropicAwsWorkspaceId", p)
+
+    def test_claude_platform_on_aws_needs_workspace(self):
+        rc, _, err = self.mvm("up", "w1", "--claude-auth", "anthropic-aws", check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("ANTHROPIC_AWS_WORKSPACE_ID", err)
+        cfg = Path(self.env["PMVA_CONFIG"])
+        cfg.write_text(cfg.read_text(encoding="utf-8") + "ANTHROPIC_AWS_WORKSPACE_ID=bad id\n", encoding="utf-8")
+        rc, _, err = self.mvm("up", "w1", "--claude-auth", "anthropic-aws", check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("wrkspc_", err)
+        cfg.write_text(cfg.read_text(encoding="utf-8") + "ANTHROPIC_AWS_WORKSPACE_ID=wrkspc_01Test\n", encoding="utf-8")
+        self.mvm("up", "w2", "--claude-auth", "anthropic-aws")
+        cfg.write_text(cfg.read_text(encoding="utf-8") + "ANTHROPIC_AWS_REGION=us-east-1\n", encoding="utf-8")
+        self.mvm("up", "w3", "--claude-auth", "anthropic-aws-api-key")
+        w2, w3 = self.payloads()
+        self.assertEqual((w2["anthropicAwsWorkspaceId"], w2["anthropicAwsRegion"]), ("wrkspc_01Test", "ap-northeast-1"))
+        self.assertNotIn("claudeSecret", w2)
+        self.assertEqual((w3["anthropicAwsRegion"], w3["claudeSecret"]), ("us-east-1", "pmva/anthropic-aws-api-key"))
+
+    def test_bedrock_api_key_secrets_follow_role_prefixes(self):
+        rc, _, _ = self.mvm("secret", "set", "codex-bedrock-api-key", "--name", "pmva/claude-x", input=b"k", check=False)
+        self.assertNotEqual(rc, 0)
+        self.mvm("secret", "set", "codex-bedrock-api-key", input=b"k")
+        self.mvm("secret", "set", "claude-bedrock-api-key", input=b"k")
+        self.mvm("secret", "set", "anthropic-aws-api-key", input=b"k")
+        calls = [json.loads(l) for l in (self.stub_dir / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
+        created = [c[c.index("--name") + 1] for c in calls if c[:2] == ["secretsmanager", "create-secret"]]
+        self.assertEqual(created, ["pmva/codex-bedrock-api-key", "pmva/claude-bedrock-api-key", "pmva/anthropic-aws-api-key"])
+
     def test_execution_role_matches_agents(self):
         self.env["PMVA_STUB_QUOTA_GB"] = "100"
         self.mvm("up", "r-claude")
@@ -555,6 +601,12 @@ class CliTest(unittest.TestCase):
         self.assertIn("NightlyStopCron=cron(30 23 * * ? *)", deploy)
         self.assertIn("NightlyStopTimezone=Asia/Tokyo", deploy)
         self.assertIn("ImageName=pmva-agent", deploy)
+        self.assertIn("EnableAnthropicAws=false", deploy, "Claude Platform on AWS の権限は既定では付けない")
+        cfg.write_text(cfg.read_text(encoding="utf-8") + "ENABLE_ANTHROPIC_AWS=true\n", encoding="utf-8")
+        self.mvm("infra", "deploy", check=False)
+        calls = [json.loads(l) for l in (self.stub_dir / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
+        deploy = [c for c in calls if c[:2] == ["cloudformation", "deploy"]][-1]
+        self.assertIn("EnableAnthropicAws=true", deploy)
 
     def test_infra_deploy_minimal_template(self):
         cfg = Path(self.env["PMVA_CONFIG"])
@@ -565,7 +617,7 @@ class CliTest(unittest.TestCase):
         deploy = next(c for c in calls if c[:2] == ["cloudformation", "deploy"])
         self.assertTrue(deploy[deploy.index("--template-file") + 1].endswith("cloudformation-minimal.yaml"))
         overrides = {x.split("=", 1)[0] for x in deploy if "=" in x and not x.startswith("-")}
-        self.assertEqual(overrides, {"Prefix", "EnableBedrock"}, "テンプレートに無いパラメータは渡さない")
+        self.assertEqual(overrides, {"Prefix", "EnableBedrock", "EnableAnthropicAws"}, "テンプレートに無いパラメータは渡さない")
         self.assertIn("NIGHTLY_STOP_TIME は最小構成では使いません", err)
         cfg.write_text(cfg.read_text(encoding="utf-8") + "INFRA_TEMPLATE=tiny\n", encoding="utf-8")
         self.assertNotEqual(self.mvm("infra", "deploy", check=False)[0], 0)

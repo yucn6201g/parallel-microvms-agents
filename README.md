@@ -39,7 +39,7 @@ flowchart LR
 | 手元 PC から指示 | `mvm send <name> "指示"`（接続せずに入力）、または `mvm ssh` で直接操作 |
 | 手元の設定を VM でも使う | `mvm profile push` で、手元の Claude Code / Codex のルール・skill・サブエージェント・コマンドを VM のエージェントにも置く（認証情報らしいものは送らない） |
 | 手元のエージェントを司令塔にする | `mvm orchestrator install claude\|codex` で、手元の Claude Code / Codex に MicroVM へ作業を任せる skill を入れる。重い処理は MicroVM で動き、手元の RAM を使わない（[docs/orchestrator.md](docs/orchestrator.md)） |
-| 多様な認証方式 | Claude Code: サブスクリプション (OAuth トークン) / API キー / Amazon Bedrock / LLM ゲートウェイ / 対話ログイン<br>Codex: API キー / ChatGPT ログイン (auth.json) / 対話ログイン |
+| 多様な認証方式 | Claude Code: サブスクリプション (OAuth トークン) / API キー / Amazon Bedrock (実行ロール・API キー・Mantle) / Claude Platform on AWS / LLM ゲートウェイ / 対話ログイン<br>Codex: API キー / ChatGPT ログイン / Amazon Bedrock (実行ロール・API キー) (auth.json) / 対話ログイン |
 | 8 時間制限への対応 | ワークスペースを S3 に定期保存し、`mvm renew` で新しい MicroVM に復元 |
 | PC を閉じても作業を続ける | AWS 側のキープアライブが、作業中の VM だけを一時停止させない（作業が終われば止まる） |
 | 止め忘れ防止 | 毎晩決まった時刻に全台を保存してから終了（`NIGHTLY_STOP_TIME=23:00`） |

@@ -33,6 +33,9 @@ export AWS_DEFAULT_REGION="$AWS_REGION"
 
 secret() { aws secretsmanager get-secret-value --secret-id "$1" --query SecretString --output text; }
 addenv() { printf 'export %s=%q\n' "$1" "$2" >> "$ENV_FILE"; }
+# AWS のリージョン名 (設定ファイルに書くので、形を確かめてから使う)
+valid_region() { [[ "$1" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]+$ ]]; }
+BEDROCK_REGION="$(j .bedrockRegion)"; BEDROCK_REGION="${BEDROCK_REGION:-$AWS_REGION}"
 
 mkdir -p "$PMVA" "$SECRETS_DIR" "$HOME/.claude" "$HOME/.codex" "$HOME/work"
 : > "$ENV_FILE"
@@ -62,8 +65,34 @@ case "$CLAUDE_AUTH" in
   bedrock)
     # 実行ロールの認証情報 (IMDSv2) で Amazon Bedrock を呼ぶ
     addenv CLAUDE_CODE_USE_BEDROCK 1
-    bedrock_region="$(j .bedrockRegion)"
-    addenv AWS_REGION "${bedrock_region:-$AWS_REGION}"
+    addenv AWS_REGION "$BEDROCK_REGION"
+    ;;
+  bedrock-api-key)
+    # Amazon Bedrock の API キー (別の AWS アカウントの Bedrock を使うときなど)。実行ロールより優先される
+    key="$(secret "$CLAUDE_SECRET")"
+    addenv CLAUDE_CODE_USE_BEDROCK 1
+    addenv AWS_BEARER_TOKEN_BEDROCK "$key"
+    addenv AWS_REGION "$BEDROCK_REGION"
+    unset key
+    ;;
+  mantle)
+    # Bedrock の Mantle (Anthropic の API と同じ形の入口)。実行ロールで署名する
+    addenv CLAUDE_CODE_USE_MANTLE 1
+    addenv AWS_REGION "$BEDROCK_REGION"
+    ;;
+  anthropic-aws|anthropic-aws-api-key)
+    # Claude Platform on AWS: 実行ロールで署名するか、ワークスペースの API キーを使う
+    addenv CLAUDE_CODE_USE_ANTHROPIC_AWS 1
+    workspace="$(j .anthropicAwsWorkspaceId)"
+    [ -n "$workspace" ] || warn "anthropicAwsWorkspaceId is empty; Claude Platform on AWS needs a workspace ID"
+    addenv ANTHROPIC_AWS_WORKSPACE_ID "$workspace"
+    anthropic_aws_region="$(j .anthropicAwsRegion)"
+    addenv AWS_REGION "${anthropic_aws_region:-$AWS_REGION}"
+    if [ "$CLAUDE_AUTH" = anthropic-aws-api-key ]; then
+      key="$(secret "$CLAUDE_SECRET")"
+      addenv ANTHROPIC_AWS_API_KEY "$key"
+      unset key
+    fi
     ;;
   gateway)
     # LLM ゲートウェイ / プロキシ経由: シークレットは {"baseUrl": "...", "authToken": "..."}
@@ -80,6 +109,7 @@ CLAUDE_MODEL="$(j .claudeModel)"
 # ---------------------------------------------------------------- Codex
 CODEX_AUTH="$(j .codexAuth)"; CODEX_AUTH="${CODEX_AUTH:-none}"
 CODEX_SECRET="$(j .codexSecret)"
+CODEX_PROVIDER=""   # ~/.codex/config.toml に書く接続先の設定 (トップレベルのキー)
 log "codex auth: $CODEX_AUTH"
 case "$CODEX_AUTH" in
   api-key)
@@ -91,6 +121,24 @@ case "$CODEX_AUTH" in
   chatgpt)
     # ローカル PC で ChatGPT ログイン済みの ~/.codex/auth.json をそのまま配置
     secret "$CODEX_SECRET" > "$HOME/.codex/auth.json"
+    ;;
+  bedrock|bedrock-api-key)
+    # Amazon Bedrock (Mantle) の OpenAI のモデル。接続先の設定は ~/.codex/config.toml に書く (フックの節で、復元の後に)
+    if ! valid_region "$BEDROCK_REGION"; then
+      warn "invalid Bedrock region for Codex: $BEDROCK_REGION"
+    elif [ "$CODEX_AUTH" = bedrock ]; then
+      # 実行ロールで署名する
+      CODEX_PROVIDER="model_providers.amazon-bedrock.aws.region = \"$BEDROCK_REGION\""
+    else
+      # API キーは環境変数に出さず、ファイルから読ませる (Claude Code の Bedrock のキーと混ざらないように)。
+      # キーを使うときは aws (リージョン) を書けないので、接続先の URL でリージョンを決める
+      secret "$CODEX_SECRET" > "$SECRETS_DIR/codex_bedrock_api_key"
+      CODEX_PROVIDER="model_providers.amazon-bedrock.base_url = \"https://bedrock-mantle.$BEDROCK_REGION.api.aws/openai/v1\"
+model_providers.amazon-bedrock.auth = { command = \"cat\", args = [$(jq -rn --arg p "$SECRETS_DIR/codex_bedrock_api_key" '$p | @json')] }"
+    fi
+    if [ "$CLAUDE_AUTH" = bedrock-api-key ] && [ "$CODEX_AUTH" = bedrock ]; then
+      warn "Codex also uses the Claude Bedrock API key (AWS_BEARER_TOKEN_BEDROCK); use --codex-auth bedrock-api-key or --claude-auth bedrock"
+    fi
     ;;
   interactive|none) ;;  # interactive: 接続後に `codex login --device-auth`
   *) warn "unknown codexAuth: $CODEX_AUTH" ;;
@@ -209,6 +257,20 @@ if ! grep -q '^notify *=' "$codex_cfg" 2>/dev/null; then
   mv "$codex_cfg.tmp" "$codex_cfg"
 elif ! grep -q '^notify *=.*/opt/pmva/notify.sh' "$codex_cfg"; then
   warn "codex notify is already set in config.toml; mvm wait cannot detect when Codex finishes"
+fi
+# Codex の接続先 (--codex-auth bedrock など)。前回の起動で書いたもの (スナップショットから戻る) を消してから書き直す
+sed -i '/^# pmva:provider begin/,/^# pmva:provider end/d' "$codex_cfg"
+if [ -n "$CODEX_PROVIDER" ]; then
+  if grep -qE '^(model_provider *=|\[model_providers\.amazon-bedrock)' "$codex_cfg"; then
+    warn "codex model_provider is already set in config.toml; --codex-auth $CODEX_AUTH was not applied"
+  else
+    { echo "# pmva:provider begin (mvm up --codex-auth $CODEX_AUTH が起動のたびに書き直す)"
+      echo 'model_provider = "amazon-bedrock"'
+      echo "$CODEX_PROVIDER"
+      echo "# pmva:provider end"
+      cat "$codex_cfg"; } > "$codex_cfg.tmp"
+    mv "$codex_cfg.tmp" "$codex_cfg"
+  fi
 fi
 
 # 無人で起動できるよう、初回オンボーディングと作業ディレクトリの「信頼しますか？」確認を済ませておく

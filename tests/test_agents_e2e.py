@@ -140,6 +140,108 @@ class AgentE2ETest(unittest.TestCase):
         self.assertEqual(st["message"], "完了しました。")
         self.assertTrue((self.work / "made-by-claude.txt").exists())
 
+    # ---------------------------------------------------------------- AWS の認証方式 (bootstrap.sh と同じ設定)
+    # 接続先だけを偽の API に差し替え、エージェントが AWS の認証 (署名 / キー / ワークスペース ID) を付けて送ることを確かめる。
+    # 実行ロールの代わりに、偽のアクセスキーを環境変数で渡す (MicroVM では SDK が実行ロールの認証情報を自分で取る)
+
+    FAKE_AWS = {"AWS_ACCESS_KEY_ID": "AKIAPMVATEST0000000", "AWS_SECRET_ACCESS_KEY": "fake-secret",
+                "AWS_SESSION_TOKEN": "fake-session", "AWS_EC2_METADATA_DISABLED": "true"}
+
+    def run_claude_aws(self, **env):
+        mock = AnthropicMock("touch made-by-claude.txt")
+        self.addCleanup(mock.shutdown)
+        (self.home / ".claude.json").write_text(json.dumps(
+            {"hasCompletedOnboarding": True, "projects": {str(self.work): {"hasTrustDialogAccepted": True}}}), encoding="utf-8")
+        env = {k: v.replace("{mock}", mock.url) for k, v in env.items()}
+        p = subprocess.run([CLAUDE, "-p", "テストして", "--model", "claude-mock", "--allowedTools", "Bash"], cwd=self.work,
+                           env=self.agent_env(**env), stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=180)
+        self.assertTrue(mock.headers, p.stdout + p.stderr)
+        return p, mock
+
+    @unittest.skipUnless(CLAUDE, "PMVA_E2E_CLAUDE が必要")
+    def test_claude_mantle_signs_with_aws_credentials(self):
+        p, mock = self.run_claude_aws(CLAUDE_CODE_USE_MANTLE="1", AWS_REGION="ap-northeast-1",
+                                      ANTHROPIC_BEDROCK_MANTLE_BASE_URL="{mock}", **self.FAKE_AWS)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertTrue((self.work / "made-by-claude.txt").exists())
+        for h in mock.headers:
+            self.assertRegex(h["authorization"],
+                             r"^AWS4-HMAC-SHA256 Credential=AKIAPMVATEST0000000/\d{8}/ap-northeast-1/bedrock-mantle/aws4_request")
+
+    @unittest.skipUnless(CLAUDE, "PMVA_E2E_CLAUDE が必要")
+    def test_claude_platform_on_aws_role_and_api_key(self):
+        p, mock = self.run_claude_aws(CLAUDE_CODE_USE_ANTHROPIC_AWS="1", ANTHROPIC_AWS_WORKSPACE_ID="wrkspc_01Test",
+                                      AWS_REGION="us-east-1", ANTHROPIC_AWS_BASE_URL="{mock}", **self.FAKE_AWS)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        for h in mock.headers:
+            self.assertEqual(h["anthropic-workspace-id"], "wrkspc_01Test")
+            self.assertRegex(h["authorization"], r"^AWS4-HMAC-SHA256 Credential=AKIAPMVATEST0000000/\d{8}/us-east-1/")
+        (self.work / "made-by-claude.txt").unlink()
+        # ワークスペースの API キーは、AWS の認証情報より優先される
+        p, mock = self.run_claude_aws(CLAUDE_CODE_USE_ANTHROPIC_AWS="1", ANTHROPIC_AWS_WORKSPACE_ID="wrkspc_01Test",
+                                      AWS_REGION="us-east-1", ANTHROPIC_AWS_BASE_URL="{mock}",
+                                      ANTHROPIC_AWS_API_KEY="sk-ant-aws-test", **self.FAKE_AWS)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        for h in mock.headers:
+            self.assertEqual((h["x-api-key"], h["anthropic-workspace-id"]), ("sk-ant-aws-test", "wrkspc_01Test"))
+            self.assertNotIn("authorization", h)
+
+    @unittest.skipUnless(CLAUDE, "PMVA_E2E_CLAUDE が必要")
+    def test_claude_bedrock_api_key_is_sent_as_bearer(self):
+        # Bedrock の応答 (バイナリのイベントストリーム) は偽の API では返せないので、要求に付く認証だけを確かめる
+        p, mock = self.run_claude_aws(CLAUDE_CODE_USE_BEDROCK="1", AWS_BEARER_TOKEN_BEDROCK="bedrock-key-test",
+                                      AWS_REGION="ap-northeast-1", ANTHROPIC_BEDROCK_BASE_URL="{mock}", **self.FAKE_AWS)
+        self.assertIn("/model/claude-mock/invoke-with-response-stream", [path for path, _ in mock.requests])
+        for h in mock.headers:
+            self.assertEqual(h["authorization"], "Bearer bedrock-key-test", "キーがあれば AWS の認証情報より優先される")
+
+    def write_codex_bedrock_config(self, provider_lines):
+        # bootstrap.sh が書くのと同じ形 (notify と接続先の設定をトップレベルに置き、テーブルはその後)
+        (self.home / ".codex" / "config.toml").write_text(
+            f'# pmva:provider begin\nmodel_provider = "amazon-bedrock"\n{provider_lines}\n# pmva:provider end\n'
+            f'notify = ["{NOTIFY}", "codex"]\napproval_policy = "never"\nsandbox_mode = "danger-full-access"\n'
+            f'\n[projects."{self.work}"]\ntrust_level = "trusted"\n', encoding="utf-8")
+
+    def run_codex(self, mock, *overrides, **env):
+        args = [CODEX, "exec", "--skip-git-repo-check"]
+        for o in overrides:
+            args += ["-c", o]
+        p = subprocess.run(args + ["テストして"], cwd=self.work,
+                           env=self.agent_env(CODEX_HOME=str(self.home / ".codex"), **env),
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertTrue((self.work / "made-by-codex.txt").exists(), "ツールが実行された")
+        self.assertEqual(self.wait_state("codex", ("done",))["message"], "完了しました。")
+        self.assertTrue(mock.requests)
+        for path, _ in mock.requests:
+            self.assertEqual(path, "/v1/responses")
+        return mock.headers
+
+    @unittest.skipUnless(CODEX, "PMVA_E2E_CODEX が必要")
+    def test_codex_bedrock_signs_with_aws_credentials(self):
+        mock = OpenAIResponsesMock("touch made-by-codex.txt")
+        self.addCleanup(mock.shutdown)
+        self.write_codex_bedrock_config('model_providers.amazon-bedrock.aws.region = "ap-northeast-1"')
+        headers = self.run_codex(mock, f'model_providers.amazon-bedrock.base_url="{mock.url}/v1"', **self.FAKE_AWS)
+        for h in headers:
+            self.assertRegex(h["authorization"],
+                             r"^AWS4-HMAC-SHA256 Credential=AKIAPMVATEST0000000/\d{8}/ap-northeast-1/bedrock-mantle/aws4_request")
+            self.assertEqual(h["x-amz-security-token"], "fake-session")
+
+    @unittest.skipUnless(CODEX, "PMVA_E2E_CODEX が必要")
+    def test_codex_bedrock_api_key_from_file(self):
+        mock = OpenAIResponsesMock("touch made-by-codex.txt")
+        self.addCleanup(mock.shutdown)
+        key = self.home / ".pmva" / "codex_bedrock_api_key"
+        key.write_text("codex-bedrock-key", encoding="utf-8")
+        self.write_codex_bedrock_config(
+            f'model_providers.amazon-bedrock.base_url = "{mock.url}/v1"\n'
+            f'model_providers.amazon-bedrock.auth = {{ command = "cat", args = [{json.dumps(str(key))}] }}')
+        # Claude Code 用のキーが環境変数にあっても、ファイルのキーを使う
+        headers = self.run_codex(mock, AWS_BEARER_TOKEN_BEDROCK="claude-bedrock-key", **self.FAKE_AWS)
+        for h in headers:
+            self.assertEqual(h["authorization"], "Bearer codex-bedrock-key")
+
     # ---------------------------------------------------------------- 司令塔 (mvm orchestrator install)
 
     def install_orchestrator(self, *args):

@@ -158,8 +158,8 @@ Claude Code の hooks と Codex の `notify` から `image/notify.sh` を呼び�
 
   | 起動するエージェント | 実行ロール | 読めるシークレット (`${PMVA_PREFIX}/` の後ろ) |
   |---|---|---|
-  | Claude Code だけ | `ExecutionRoleClaude` | `anthropic-*`、`claude-*`、`github-*`、`notify-*` (+ Bedrock の呼び出し) |
-  | Codex だけ | `ExecutionRoleCodex` | `openai-*`、`codex-*`、`github-*`、`notify-*` |
+  | Claude Code だけ | `ExecutionRoleClaude` | `anthropic-*`、`claude-*`、`github-*`、`notify-*` (+ Bedrock / Mantle、Claude Platform on AWS の呼び出し) |
+  | Codex だけ | `ExecutionRoleCodex` | `openai-*`、`codex-*`、`github-*`、`notify-*` (+ Bedrock / Mantle の呼び出し) |
   | 両方 | `ExecutionRole` | 上の全部 |
   | どちらも使わない (`--agent none`) | `ExecutionRoleNone` | `github-*`、`notify-*` |
 

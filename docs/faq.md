@@ -25,6 +25,9 @@ AWS アカウントの MicroVM メモリのクォータ (`L-CD1C0CC4`) で決ま
 **Q. ChatGPT のアカウントで Codex を使えますか?**
 使えます。手元で ChatGPT にログインした Codex の `~/.codex/auth.json` を登録します ([auth.md](auth.md#chatgpt-アカウント))。
 
+**Q. キーを管理せずに、費用を AWS の請求にまとめられますか?**
+できます。Claude Code は `--claude-auth bedrock` / `mantle` / `anthropic-aws`、Codex は `--codex-auth bedrock` (Bedrock の OpenAI のモデル) で、MicroVM の実行ロールの権限で呼びます。シークレットの登録は要りません。Bedrock ではモデルの利用申請が、Claude Platform on AWS では AWS Marketplace での購読が別に必要です ([auth.md](auth.md#どれを選ぶか))。
+
 **Q. 認証情報はどこに保存されますか? 安全ですか?**
 AWS Secrets Manager に保存し、MicroVM の起動時にだけ取り出します。イメージや手元の設定ファイルには残りません。各 MicroVM は、そのセッションで使うエージェントの認証情報だけを読めます。ワークスペースの保存 (スナップショット) にも認証情報は含めません ([architecture.md](architecture.md#セキュリティ))。
 
