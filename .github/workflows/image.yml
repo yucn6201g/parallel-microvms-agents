@@ -1,0 +1,47 @@
+name: Image
+
+# MicroVM のイメージ (image/Dockerfile) を、Lambda MicroVMs と同じ ARM64 でビルドして動かす。
+# ベースイメージ (public.ecr.aws/lambda/microvms:al2023-minimal) は公開されているので、AWS を使わずに確かめられる。
+# 時間がかかる (15 分ほど) ので、イメージに関係するファイルを変えたときだけ動かす
+on:
+  push:
+    branches: [main]
+    paths: ["image/**", "bin/mvm.py", "tests/test_image.py", ".github/workflows/image.yml"]
+  pull_request:
+    paths: ["image/**", "bin/mvm.py", "tests/test_image.py", ".github/workflows/image.yml"]
+  workflow_dispatch:
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Make the build context the same way as mvm image build
+        # mvm image build が S3 に置く zip (改行を LF に、実行権限、config.env の値を ARG に) と同じものを使う
+        run: |
+          python - <<'PY'
+          import importlib.util, pathlib, zipfile
+          spec = importlib.util.spec_from_file_location("mvm", "bin/mvm.py")
+          mvm = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mvm)
+          mvm.C.update(mvm.DEFAULTS)
+          mvm.build_artifact_zip(pathlib.Path("image.zip"))
+          zipfile.ZipFile("image.zip").extractall("build-context")
+          PY
+      - name: Build the image (ARM64)
+        run: docker build -t pmva-agent:test build-context
+      - name: Image tests
+        env:
+          PMVA_TEST_IMAGE: pmva-agent:test
+        run: python -m unittest tests.test_image -v

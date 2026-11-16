@@ -215,6 +215,26 @@ EOF
     > "$ssh_dir/websocat.log" 2>&1 < /dev/null &
 fi
 
+# ---------------------------------------------------------------- リポジトリごとの準備 (.pmva/setup.sh)
+# 依存関係のインストール (npm ci、uv sync)、ブラウザの用意 (npx playwright install chromium) など。
+# スナップショットには node_modules / .venv / ~/.cache を含めないので、起動のたびに (復元したときも) 実行する。
+# 失敗してもエージェントは起動する (エージェントがログを見て直せるように)。ログは ~/.pmva/setup.log
+SETUP_SCRIPT="$WORKDIR/.pmva/setup.sh"
+if [ -f "$SETUP_SCRIPT" ] && [ "$(j .skipSetup)" != "true" ]; then
+  setup_timeout="$(j .setupTimeoutSeconds)"
+  setup_timeout="${setup_timeout:-1800}"
+  log "run $SETUP_SCRIPT (timeout ${setup_timeout}s, log: $PMVA/setup.log)"
+  mark setup
+  # shellcheck disable=SC1090
+  if (cd "$WORKDIR" && . "$ENV_FILE" && export PATH="$HOME/.local/bin:$PATH" \
+        && umask 022 && timeout "$setup_timeout" bash "$SETUP_SCRIPT") > "$PMVA/setup.log" 2>&1 < /dev/null; then
+    log "setup done"
+  else
+    warn "setup.sh failed (exit $?). See ~/.pmva/setup.log"
+  fi
+  mark running
+fi
+
 # ---------------------------------------------------------------- tmux / エージェント起動
 PROMPT_TEXT="$(j .prompt)"
 CLAUDE_ARGS="$(j .claudeArgs)"

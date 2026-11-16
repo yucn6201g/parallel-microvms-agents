@@ -462,6 +462,65 @@ class SupervisorTest(unittest.TestCase):
         time.sleep(2)
         self.assertEqual(len(self.webhook.bodies), 1, "同じ回数では何度も通知しない")
 
+    # ---------------------------------------------------------------- リポジトリごとの準備 (.pmva/setup.sh)
+
+    def make_repo(self, setup_script):
+        src = Path(self.tmp.name) / "src" / "app"
+        (src / ".pmva").mkdir(parents=True)
+        (src / ".pmva" / "setup.sh").write_text(setup_script, encoding="utf-8")
+        git = ["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@example.com"]
+        subprocess.run(["git", "init", "-q", str(src)], check=True, env=self.env)
+        subprocess.run(git + ["add", "-A"], check=True, env=self.env)
+        subprocess.run(git + ["commit", "-q", "-m", "init"], check=True, env=self.env)
+        return str(src)
+
+    def test_setup_script_runs_before_agents(self):
+        repo = self.make_repo('echo "pwd=$(pwd)" > "$HOME/setup-ran.txt"\n'
+                              'echo "workdir=$PMVA_WORKDIR" >> "$HOME/setup-ran.txt"\n'
+                              'echo "path=$PATH" >> "$HOME/setup-ran.txt"\n'
+                              'echo "準備の出力"\nsleep 2\n')
+        self.hook("run", {"microvmId": "m", "runHookPayload": json.dumps(
+            {"name": "su", "agent": "claude", "repo": repo, "prompt": "テストして"})})
+        # 準備の間はエージェントを起動しない
+        for _ in range(100):
+            _, st = self.get("/status?lines=0")
+            if st["bootstrap"] == "setup":
+                break
+            time.sleep(0.1)
+        self.assertEqual(st["bootstrap"], "setup")
+        self.assertEqual(st["agents"]["claude"]["state"], "starting")
+        self.assertNotIn("claude", [w["name"] for w in st["windows"]])
+        st = self.wait_ready()
+        self.assertEqual(st["bootstrap"], "ready")
+        self.assertIn("claude", [w["name"] for w in st["windows"]])
+        ran = (self.home / "setup-ran.txt").read_text(encoding="utf-8")
+        workdir = str(self.home / "work" / "app")
+        self.assertIn(f"pwd={workdir}\n", ran)
+        self.assertIn(f"workdir={workdir}\n", ran, "env.sh を読んでいる")
+        self.assertIn(f"path={self.home}/.local/bin:", ran, "pmva-node で入れた node が先に見つかる")
+        self.assertIn("準備の出力", (self.home / ".pmva" / "setup.log").read_text(encoding="utf-8"))
+
+    def test_setup_script_failure_still_starts_agents(self):
+        repo = self.make_repo("echo 依存関係のエラー >&2\nexit 3\n")
+        self.hook("run", {"microvmId": "m", "runHookPayload": json.dumps({"name": "sf", "agent": "claude", "repo": repo})})
+        st = self.wait_ready()
+        self.assertEqual(st["bootstrap"], "ready (warnings: setup.sh failed (exit 3). See ~/.pmva/setup.log)")
+        self.assertIn("claude", [w["name"] for w in st["windows"]], "失敗してもエージェントは起動する")
+        self.assertIn("依存関係のエラー", (self.home / ".pmva" / "setup.log").read_text(encoding="utf-8"))
+
+    def test_setup_script_timeout_and_skip(self):
+        repo = self.make_repo('touch "$HOME/setup-started"\nsleep 30\n')
+        self.hook("run", {"microvmId": "m", "runHookPayload": json.dumps(
+            {"name": "st", "agent": "none", "repo": repo, "setupTimeoutSeconds": 1})})
+        st = self.wait_ready()
+        self.assertEqual(st["bootstrap"], "ready (warnings: setup.sh failed (exit 124). See ~/.pmva/setup.log)")
+        (self.home / "setup-started").unlink()
+        self.hook("run", {"microvmId": "m", "runHookPayload": json.dumps(
+            {"name": "st", "agent": "none", "repo": repo, "skipSetup": "true"})})
+        st = self.wait_ready()
+        self.assertEqual(st["bootstrap"], "ready")
+        self.assertFalse((self.home / "setup-started").exists(), "--no-setup なら実行しない")
+
     # ---------------------------------------------------------------- 認証方式ごとの初期化
 
     def run_session(self, **payload):

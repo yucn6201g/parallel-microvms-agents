@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# リポジトリが求める版の Node.js を入れて、使えるようにする (MicroVM の中で、root なしで動く)。
+#
+#   pmva-node install            .node-version / .nvmrc の版 (なければエラー)
+#   pmva-node install 20         20 系の最新版。20.11 や 20.11.1、lts/* や lts/iron も書ける
+#
+# nodejs.org の公式バイナリを SHASUMS256.txt で確かめてから ~/.local/share/pmva-node/<版> に置き、
+# ~/.local/bin の node / npm / npx / corepack をそれに向ける (~/.local/bin は PATH の先頭にある)。
+# イメージに入っている Node.js (/usr/local/bin/node) に戻すときは pmva-node reset。
+set -euo pipefail
+
+base="${PMVA_NODE_MIRROR:-https://nodejs.org/dist}"
+root="$HOME/.local/share/pmva-node"
+bin="$HOME/.local/bin"
+cmd="${1:-}"
+want="${2:-}"
+
+usage() {
+  echo "使い方: pmva-node install [<版>] | pmva-node reset" >&2
+  exit 2
+}
+
+case "$cmd" in
+  install|use) ;;
+  reset)
+    for b in node npm npx corepack; do
+      if [ -L "$bin/$b" ]; then rm -f "$bin/$b"; fi
+    done
+    echo "イメージの Node.js を使います ($(command -v node || echo 'node がありません'))"
+    exit 0
+    ;;
+  *) usage ;;
+esac
+
+if [ -z "$want" ]; then
+  for f in .node-version .nvmrc; do
+    if [ -f "$f" ]; then
+      want="$(tr -d ' \r\n' < "$f")"
+      break
+    fi
+  done
+fi
+[ -n "$want" ] || { echo "版を指定してください (例: pmva-node install 20)。.node-version か .nvmrc があればその版を使います" >&2; exit 2; }
+want="${want#v}"
+
+case "$(uname -m)" in
+  aarch64|arm64) arch=arm64 ;;
+  x86_64|amd64) arch=x64 ;;
+  *) echo "この CPU ($(uname -m)) 用の Node.js はありません" >&2; exit 1 ;;
+esac
+
+if [[ "$want" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  version="$want"
+else
+  # 20、20.11、lts/*、lts/iron を、その中でいちばん新しい版にする (index.json は新しい順)
+  index="$(curl -fsSL "$base/index.json")"
+  version="$(jq -r --arg w "$want" '
+    def lts_name: (.lts | if type == "string" then ascii_downcase else "" end);
+    [ .[] | select(
+        if $w == "lts/*" or $w == "lts" then .lts != false
+        elif ($w | startswith("lts/")) then lts_name == ($w | ltrimstr("lts/") | ascii_downcase)
+        else (.version == ("v" + $w) or (.version | startswith("v" + $w + ".")))
+        end) ][0].version // empty' <<<"$index")"
+  version="${version#v}"
+  [ -n "$version" ] || { echo "Node.js の版 $want が見つかりません" >&2; exit 1; }
+fi
+
+dir="$root/$version"
+if [ ! -x "$dir/bin/node" ]; then
+  file="node-v$version-linux-$arch.tar.xz"
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  echo "Node.js $version を入れます" >&2
+  curl -fsSL -o "$tmp/$file" "$base/v$version/$file"
+  curl -fsSL "$base/v$version/SHASUMS256.txt" | grep " $file\$" > "$tmp/SHASUMS256.txt" \
+    || { echo "SHASUMS256.txt に $file がありません" >&2; exit 1; }
+  (cd "$tmp" && sha256sum -c --quiet SHASUMS256.txt)
+  mkdir -p "$dir"
+  tar -xJf "$tmp/$file" -C "$dir" --strip-components=1 --no-same-owner
+fi
+
+mkdir -p "$bin"
+for b in node npm npx corepack; do
+  if [ -e "$dir/bin/$b" ]; then ln -sfn "$dir/bin/$b" "$bin/$b"; fi
+done
+# 同じシェルで先に node を使っていると、古い場所を覚えていることがある (そのときは hash -r)
+echo "Node.js $version を使います ($bin/node)"

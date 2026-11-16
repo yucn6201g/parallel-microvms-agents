@@ -8,7 +8,7 @@
 | 準備 | [`doctor`](#doctor) / [`infra`](#infra) / [`secret`](#secret) / [`image`](#image) |
 | 起動 | [`up`](#up) / [`fleet`](#fleet) |
 | 確認・指示 | [`ls`](#ls) / [`peek`](#peek) / [`follow`](#follow) / [`view`](#view) / [`top`](#top) / [`send`](#send) / [`wait`](#wait) / [`result`](#result) / [`watch`](#watch) / [`logs`](#logs) |
-| 接続 | [`ssh`](#ssh) / [`ssh-config`](#ssh-config) / [`shell`](#shell) / [`token`](#token) |
+| 接続 | [`ssh`](#ssh) / [`forward`](#forward) / [`ssh-config`](#ssh-config) / [`shell`](#shell) / [`token`](#token) |
 | 保存・停止 | [`save`](#save) / [`suspend` / `resume`](#suspend--resume) / [`stop`](#stop) / [`stop-all`](#stop-all) / [`renew`](#renew) |
 | 司令塔 | [`orchestrator`](#orchestrator) |
 | 費用 | [`cost`](#cost) |
@@ -104,6 +104,7 @@ MicroVM を 1 台起動し、エージェントを tmux の中で開始します
 | `--idle <秒>\|off` | `IDLE_MAX_SECONDS` | 受信通信がこの秒数無いとサスペンド |
 | `--max-duration <秒>` | `MAX_DURATION_SECONDS` | 寿命 (上限 28800 = 8 時間) |
 | `--notify` / `--no-notify` | `NOTIFY_WEBHOOK` | 完了・入力待ちを Webhook に通知する |
+| `--no-setup` | | リポジトリの `.pmva/setup.sh` を実行しない ([setup.md](setup.md#リポジトリごとの準備-pmvasetupsh)) |
 
 注意:
 
@@ -289,6 +290,19 @@ mvm ssh <name> --no-reconnect     # 切れても再接続しない
 
 SSH over WebSocket で `agent` ユーザーとして接続します。tmux へのアタッチは、接続が切れると自動で再接続します (接続してすぐ切れることが 6 回続いたらあきらめます)。
 起動時に SSH 公開鍵 (`SSH_PUBLIC_KEY_FILE`) が無かったセッションには使えません (鍵を作ってから `mvm renew`)。
+
+### forward
+
+```bash
+mvm forward <name> <port>... [--no-reconnect]
+```
+
+VM の中のポート (開発サーバーなど) を、手元の PC のポートにつなぎます。`3000` なら手元の `http://localhost:3000/` で VM の 3000 番を開けます。手元のポートを変えるときは `8080:3000` (手元:VM) と書きます。複数のポートを並べられます。Ctrl-C で終了します。
+
+- `mvm ssh` と同じ経路 (SSH over WebSocket) を使うので、SSH 公開鍵を付けて起動したセッションが対象です。切れたら自動でつなぎ直します
+- 手元のポートが使われているときは、つなぐ前に止まります
+- VM の中のサーバーは `localhost` (`127.0.0.1`) で待ち受けていれば十分です
+- つないでいる間は通信があるので、その VM はサスペンドされません
 
 ### ssh-config
 
