@@ -629,6 +629,91 @@ class SupervisorTest(unittest.TestCase):
         self.assertEqual(self.env_value("AWS_REGION"), "us-west-2")
         self.assertEqual(self.env_value("ANTHROPIC_MODEL"), "us.anthropic.test-model")
 
+    def codex_config(self):
+        import tomllib   # Python 3.11 以降 (このテストは Linux の CI で動く)
+        text = (self.home / ".codex" / "config.toml").read_text(encoding="utf-8")
+        return tomllib.loads(text), text
+
+    def test_bedrock_api_keys_for_claude_and_codex(self):
+        self.add_secret("pmva/claude-bedrock-api-key", "claude-bedrock-key")
+        self.add_secret("pmva/codex-bedrock-api-key", "codex-bedrock-key")
+        st = self.run_session(agent="both", region="ap-northeast-1", bedrockRegion="us-east-1",
+                              claudeAuth="bedrock-api-key", claudeSecret="pmva/claude-bedrock-api-key",
+                              codexAuth="bedrock-api-key", codexSecret="pmva/codex-bedrock-api-key")
+        self.assertEqual(st["bootstrap"], "ready")
+        self.assertEqual(self.env_value("CLAUDE_CODE_USE_BEDROCK"), "1")
+        self.assertEqual(self.env_value("AWS_BEARER_TOKEN_BEDROCK"), "claude-bedrock-key")
+        self.assertEqual(self.env_value("AWS_REGION"), "us-east-1")
+        # Codex のキーは環境変数に出さず、ファイルから読ませる (Claude のキーと混ざらない)
+        key_file = self.home / ".pmva" / "secrets" / "codex_bedrock_api_key"
+        self.assertEqual(key_file.read_text(encoding="utf-8"), "codex-bedrock-key")
+        self.assertEqual(self.mode(key_file), "0o600")
+        cfg, text = self.codex_config()
+        self.assertEqual(cfg["model_provider"], "amazon-bedrock")
+        bedrock = cfg["model_providers"]["amazon-bedrock"]
+        self.assertEqual(bedrock["base_url"], "https://bedrock-mantle.us-east-1.api.aws/openai/v1")
+        self.assertEqual(bedrock["auth"], {"command": "cat", "args": [str(key_file)]})
+        self.assertNotIn("aws", bedrock, "Codex は auth と aws を同時に指定できない")
+        self.assertTrue(cfg["notify"][0].endswith("notify.sh"))
+        self.assertIn("codex-bedrock-key", key_file.read_text(encoding="utf-8"))
+        self.assertNotIn("codex-bedrock-key", text)
+
+    def test_mantle_and_codex_bedrock_role_then_switch_back(self):
+        st = self.run_session(agent="both", region="ap-northeast-1", claudeAuth="mantle", codexAuth="bedrock")
+        self.assertEqual(st["bootstrap"], "ready")
+        self.assertEqual(self.env_value("CLAUDE_CODE_USE_MANTLE"), "1")
+        self.assertEqual(self.env_value("CLAUDE_CODE_USE_BEDROCK"), "")
+        self.assertEqual(self.env_value("AWS_REGION"), "ap-northeast-1")
+        cfg, _ = self.codex_config()
+        self.assertEqual(cfg["model_provider"], "amazon-bedrock")
+        self.assertEqual(cfg["model_providers"]["amazon-bedrock"], {"aws": {"region": "ap-northeast-1"}})
+        # 同じ ~/.codex (スナップショットからの復元と同じ) で、別の認証方式で起動し直すと、接続先の設定は消える
+        self.add_secret("pmva/openai-api-key", "sk-openai-test")
+        st = self.run_session(agent="codex", codexAuth="api-key", codexSecret="pmva/openai-api-key")
+        self.assertEqual(st["bootstrap"], "ready")
+        cfg, text = self.codex_config()
+        self.assertNotIn("model_provider", cfg)
+        self.assertNotIn("model_providers", cfg)
+        self.assertEqual(text.count("notify ="), 1)
+
+    def test_codex_bedrock_keeps_users_own_provider(self):
+        (self.home / ".codex").mkdir(exist_ok=True)
+        (self.home / ".codex" / "config.toml").write_text('model_provider = "my-gateway"\n', encoding="utf-8")
+        st = self.run_session(agent="codex", region="ap-northeast-1", codexAuth="bedrock")
+        self.assertIn("model_provider is already set", st["bootstrap"])
+        cfg, _ = self.codex_config()
+        self.assertEqual(cfg["model_provider"], "my-gateway")
+
+    def test_codex_bedrock_rejects_bad_region(self):
+        st = self.run_session(agent="codex", region="ap-northeast-1", codexAuth="bedrock", bedrockRegion='x" = 1')
+        self.assertIn("invalid Bedrock region", st["bootstrap"])
+        cfg, _ = self.codex_config()
+        self.assertNotIn("model_provider", cfg)
+
+    def test_claude_key_for_bedrock_warns_when_codex_uses_role(self):
+        self.add_secret("pmva/claude-bedrock-api-key", "claude-bedrock-key")
+        st = self.run_session(agent="both", region="ap-northeast-1", claudeAuth="bedrock-api-key",
+                              claudeSecret="pmva/claude-bedrock-api-key", codexAuth="bedrock")
+        self.assertIn("Codex also uses the Claude Bedrock API key", st["bootstrap"])
+
+    def test_claude_platform_on_aws(self):
+        self.add_secret("pmva/anthropic-aws-api-key", "sk-ant-aws-test")
+        st = self.run_session(region="ap-northeast-1", claudeAuth="anthropic-aws-api-key",
+                              claudeSecret="pmva/anthropic-aws-api-key",
+                              anthropicAwsWorkspaceId="wrkspc_01Test", anthropicAwsRegion="us-east-1")
+        self.assertEqual(st["bootstrap"], "ready")
+        self.assertEqual(self.env_value("CLAUDE_CODE_USE_ANTHROPIC_AWS"), "1")
+        self.assertEqual(self.env_value("ANTHROPIC_AWS_WORKSPACE_ID"), "wrkspc_01Test")
+        self.assertEqual(self.env_value("AWS_REGION"), "us-east-1")
+        self.assertEqual(self.env_value("ANTHROPIC_AWS_API_KEY"), "sk-ant-aws-test")
+        # キーなし (実行ロールで署名する)
+        st = self.run_session(region="ap-northeast-1", claudeAuth="anthropic-aws", anthropicAwsWorkspaceId="wrkspc_01Test")
+        self.assertEqual(st["bootstrap"], "ready")
+        self.assertEqual(self.env_value("ANTHROPIC_AWS_API_KEY"), "")
+        self.assertEqual(self.env_value("AWS_REGION"), "ap-northeast-1")
+        st = self.run_session(region="ap-northeast-1", claudeAuth="anthropic-aws")
+        self.assertIn("anthropicAwsWorkspaceId", st["bootstrap"])
+
     def test_missing_secret_fails_bootstrap(self):
         # 登録していないシークレットを指定したら、空のトークンで「準備完了」にせず失敗にする
         for auth, secret in (("oauth-token", "pmva/claude-oauth-token"), ("api-key", "pmva/anthropic-api-key")):

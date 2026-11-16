@@ -13,7 +13,12 @@ Parameters:
     Type: String
     Default: "true"
     AllowedValues: ["true", "false"]
-    Description: 実行ロールに Amazon Bedrock の呼び出し権限を付与するか (Claude Code の Bedrock 認証で使用)
+    Description: 実行ロールに Amazon Bedrock (Mantle を含む) の呼び出し権限を付与するか (Claude Code / Codex の Bedrock 認証で使用)
+  EnableAnthropicAws:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: 実行ロールに Claude Platform on AWS の呼び出し権限を付与するか (Claude Code の anthropic-aws 認証で使用)
   WorkspaceSnapshotRetentionDays:
     Type: Number
     Default: 7
@@ -59,6 +64,7 @@ Parameters:
 
 Conditions:
   BedrockEnabled: !Equals [!Ref EnableBedrock, "true"]
+  AnthropicAwsEnabled: !Equals [!Ref EnableAnthropicAws, "true"]
   NightlyStopEnabled: !Not [!Equals [!Ref NightlyStopCron, ""]]
   BudgetEnabled: !And
     - !Not [!Equals [!Ref BudgetMonthlyUsd, 0]]
@@ -230,10 +236,10 @@ Resources:
                   - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}/claude-*"
                   - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}/openai-*"
                   - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}/codex-*"
-      ManagedPolicyArns: !If
-        - BedrockEnabled
-        - [!Ref RuntimePolicy, !Ref BedrockInvokePolicy]
-        - [!Ref RuntimePolicy]
+      ManagedPolicyArns:
+        - !Ref RuntimePolicy
+        - !If [BedrockEnabled, !Ref BedrockInvokePolicy, !Ref AWS::NoValue]
+        - !If [AnthropicAwsEnabled, !Ref AnthropicAwsInvokePolicy, !Ref AWS::NoValue]
 
   ExecutionRoleClaude:
     Type: AWS::IAM::Role
@@ -259,10 +265,10 @@ Resources:
                 Resource:
                   - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}/anthropic-*"
                   - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}/claude-*"
-      ManagedPolicyArns: !If
-        - BedrockEnabled
-        - [!Ref RuntimePolicy, !Ref BedrockInvokePolicy]
-        - [!Ref RuntimePolicy]
+      ManagedPolicyArns:
+        - !Ref RuntimePolicy
+        - !If [BedrockEnabled, !Ref BedrockInvokePolicy, !Ref AWS::NoValue]
+        - !If [AnthropicAwsEnabled, !Ref AnthropicAwsInvokePolicy, !Ref AWS::NoValue]
 
   ExecutionRoleCodex:
     Type: AWS::IAM::Role
@@ -290,6 +296,7 @@ Resources:
                   - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}/codex-*"
       ManagedPolicyArns:
         - !Ref RuntimePolicy
+        - !If [BedrockEnabled, !Ref BedrockInvokePolicy, !Ref AWS::NoValue]
 
   # エージェントなし (--agent none)
   ExecutionRoleNone:
@@ -326,6 +333,34 @@ Resources:
               - bedrock:GetInferenceProfile
               - bedrock:ListFoundationModels
             Resource: "*"
+          # Bedrock の Mantle (Claude Code の mantle 認証、Codex の bedrock 認証で OpenAI のモデルを呼ぶ)
+          - Sid: InvokeOnBedrockMantle
+            Effect: Allow
+            Action:
+              - bedrock-mantle:CreateInference
+              - bedrock-mantle:CountTokens
+              - bedrock-mantle:GetModel
+              - bedrock-mantle:ListModels
+            Resource: "*"
+
+  # Claude Platform on AWS (Anthropic が運用する Claude API を、AWS の認証と請求で使う)。
+  # AWS Marketplace での購読とワークスペースが別に必要
+  AnthropicAwsInvokePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: AnthropicAwsEnabled
+    Properties:
+      ManagedPolicyName: !Sub "${Prefix}-anthropic-aws-invoke"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: InvokeClaudePlatformOnAws
+            Effect: Allow
+            Action:
+              - aws-external-anthropic:CreateInference
+              - aws-external-anthropic:CountTokens
+              - aws-external-anthropic:GetModel
+              - aws-external-anthropic:ListModels
+            Resource: !Sub "arn:${AWS::Partition}:aws-external-anthropic:*:${AWS::AccountId}:workspace/*"
 
   # ローカル PC で mvm を実行する IAM ユーザー / ロールにアタッチするポリシー
   OperatorPolicy:

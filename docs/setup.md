@@ -138,7 +138,8 @@ mvm infra deploy
 - IAM ロール `pmva-microvm-build` (イメージビルド用)、`pmva-microvm-execution*` (MicroVM 実行時。使うエージェントの組み合わせごとに 4 つ。[architecture.md](architecture.md#セキュリティ))
 - CloudWatch Logs `/aws/lambda-microvms/pmva`
 - 管理ポリシー `pmva-operator`: 普段 mvm を使う IAM ユーザー / SSO の権限セットにアタッチする
-- (既定) `pmva-bedrock-invoke`: Bedrock を使わない場合は `config.env` で `ENABLE_BEDROCK=false` にしてから実行
+- (既定) `pmva-bedrock-invoke`: Bedrock (Mantle を含む) の呼び出し権限。Bedrock を使わない場合は `config.env` で `ENABLE_BEDROCK=false` にしてから実行
+- (任意) `pmva-anthropic-aws-invoke`: Claude Platform on AWS の呼び出し権限。`config.env` で `ENABLE_ANTHROPIC_AWS=true` にしたときだけ作る
 - (既定) キープアライブ: Lambda 関数 `pmva-keepalive` と、それを 5 分ごとに呼ぶ EventBridge ルール ([下記](#pc-を閉じても作業を続ける-キープアライブ))
 - (任意) 予算アラート `pmva-monthly`: `config.env` の `BUDGET_MONTHLY_USD` と `BUDGET_EMAIL` を両方設定したときだけ作る
 - (任意) 毎晩の自動停止: Lambda 関数 `pmva-nightly-stop` と EventBridge Scheduler のスケジュール (`NIGHTLY_STOP_TIME` を設定したとき)

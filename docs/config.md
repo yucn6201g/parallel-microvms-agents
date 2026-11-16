@@ -21,7 +21,8 @@
 | `INFRA_TEMPLATE` | `full` | infra deploy | `full` (標準: キープアライブ、毎晩の自動停止、予算アラートを含む) / `minimal` (最小構成: 動かすのに必要なリソースだけ) ([setup.md](setup.md#3-aws-リソースの作成)) |
 | `PMVA_PREFIX` | `pmva` | infra deploy | AWS のリソース名とシークレット名の接頭辞。変えると別の環境として扱われる |
 | `STACK_NAME` | `pmva` | すぐ | CloudFormation のスタック名。1 つのアカウントで複数の環境を分けるときは `PMVA_PREFIX` と一緒に変える |
-| `ENABLE_BEDROCK` | `true` | infra deploy | 実行ロールに Amazon Bedrock を呼ぶ権限を付ける |
+| `ENABLE_BEDROCK` | `true` | infra deploy | 実行ロールに Amazon Bedrock (Mantle を含む) を呼ぶ権限を付ける。Claude Code の `bedrock` / `mantle`、Codex の `bedrock` で使う |
+| `ENABLE_ANTHROPIC_AWS` | `false` | infra deploy | 実行ロールに Claude Platform on AWS を呼ぶ権限を付ける。`--claude-auth anthropic-aws` で使う ([auth.md](auth.md#claude-platform-on-aws-anthropic-aws)) |
 | `BUDGET_MONTHLY_USD` | `0` | infra deploy | 月額の予算 (USD)。`BUDGET_EMAIL` と両方を設定すると AWS Budgets のアラートを作る |
 | `BUDGET_EMAIL` | (空) | infra deploy | 予算アラートの送り先。実績が予算の 80% を超えたとき、月末の予測が 100% を超えたときに届く |
 
@@ -64,7 +65,9 @@
 | `DEFAULT_CODEX_AUTH` | `api-key` | Codex の認証方式 |
 | `DEFAULT_CLAUDE_ARGS` | (空) | claude の追加引数。例: `"--dangerously-skip-permissions"` (許可の確認を省く。VM は隔離されているので、使い捨ての作業なら選択肢になる) |
 | `DEFAULT_CODEX_ARGS` | (空) | codex の追加引数 |
-| `BEDROCK_REGION` | `AWS_REGION` と同じ | `--claude-auth bedrock` で Bedrock を呼ぶリージョン |
+| `BEDROCK_REGION` | `AWS_REGION` と同じ | Bedrock (Mantle を含む) を呼ぶリージョン。Claude Code の `bedrock` / `bedrock-api-key` / `mantle`、Codex の `bedrock` / `bedrock-api-key` で使う |
+| `ANTHROPIC_AWS_WORKSPACE_ID` | (空) | Claude Platform on AWS のワークスペース ID (`wrkspc_...`)。`--claude-auth anthropic-aws` / `anthropic-aws-api-key` では必須 |
+| `ANTHROPIC_AWS_REGION` | `AWS_REGION` と同じ | Claude Platform on AWS のワークスペースのリージョン |
 | `CLAUDE_MODEL` | (空) | Claude のモデル / Bedrock の推論プロファイル ID。空ならエージェントの既定 |
 | `USE_GITHUB_TOKEN` | `true` | `<PMVA_PREFIX>/github-token` を clone / push に使う。トークンを登録していないなら `false` にする (登録しないまま `true` だと初期化が失敗する) |
 | `NOTIFY_WEBHOOK` | `false` | `true` で、応答の完了・入力待ちを `<PMVA_PREFIX>/notify-webhook` の URL に通知する |
@@ -83,6 +86,7 @@
 ```
 DEFAULT_CLAUDE_AUTH=bedrock
 CLAUDE_MODEL=<Bedrock コンソールで確認した推論プロファイル ID>
+DEFAULT_CODEX_AUTH=bedrock          # Codex も Bedrock の OpenAI のモデルで使う
 USE_GITHUB_TOKEN=false
 ```
 

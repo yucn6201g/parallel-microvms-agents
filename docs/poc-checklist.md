@@ -170,6 +170,17 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 - [ ] MicroVM の上での `mvm wait` / `result` / `follow` / `view` / `top`: 未確認 (イメージの作り直しが必要)。Codex の対話モード (tmux の中) での `notify` も未確認 (`codex exec` では確認済み)
 - [ ] メモリ不足による強制終了の検出 (`/proc/vmstat` の `oom_kill`): 自動テストでファイルを差し替えて確認したのみ。MicroVM のカーネルでこの値が使えるかは未確認
 
+## I. AWS の認証方式の追加 (2026-11-16)
+
+- [x] `bootstrap.sh` が方式ごとに書く設定 (環境変数、`~/.codex/config.toml` の接続先、キーのファイルの権限 600、起動し直したときの書き直し、利用者が自分で書いた `model_provider` を残すこと): 自動テスト (`tests/test_supervisor.py`)
+- [x] 固定した版の Claude Code 2.1.312 / Codex 0.165.0 が、その設定で AWS の認証を付けて送ること: 接続先を LLM API の代わりに差し替えて確認 (`tests/test_agents_e2e.py`)
+  - Claude Code の `mantle`: `bedrock-mantle` の SigV4 署名。Claude Platform on AWS: 署名と `anthropic-workspace-id`、キーがあれば `x-api-key` (署名より優先)。Bedrock の API キー: `Authorization: Bearer` (応答のイベントストリームは偽の API で返せないので、要求だけを確認)
+  - Codex の `bedrock`: `bedrock-mantle` の SigV4 署名と、設定したリージョン。`bedrock-api-key`: ファイルのキーを `Authorization: Bearer` で送り、環境変数の Claude Code 用のキーより優先。tmux の中の対話モードでも、ログイン画面を出さずに動く
+- [ ] MicroVM の実行ロールの認証情報で、Codex (Rust の AWS SDK) が Bedrock を呼べること: 未確認 (Claude Code は 2026-10-28 に Bedrock まで届くことを確認済み)
+- [ ] 実際の Bedrock の Mantle で、OpenAI のモデル (Codex) と Claude (`mantle`) が使えること、必要な IAM の権限 (`bedrock-mantle:CreateInference` など) が足りること: 未確認 (モデルの利用申請が要る)
+- [ ] Claude Platform on AWS: 未確認 (AWS Marketplace での購読とワークスペースが要る)
+- [ ] Bedrock の API キー: 未確認 (キーの発行が要る)
+
 ## 結果
 
 | 項目 | 結果 / メモ |
