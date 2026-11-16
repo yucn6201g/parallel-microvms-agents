@@ -73,8 +73,9 @@ def heavy_command(command):
 
 
 def main():
+    # 入出力は UTF-8 のバイト列で扱う (Windows では標準入出力の既定が cp1252 / cp932 などになり、日本語が化けるため)
     try:
-        event = json.load(sys.stdin)
+        event = json.loads(sys.stdin.buffer.read().decode("utf-8", "replace") or "null")
     except ValueError:
         return 0
     if not isinstance(event, dict) or event.get("tool_name") != "Bash":
@@ -83,12 +84,14 @@ def main():
     hit = heavy_command(command)
     if not hit:
         return 0
-    sys.stderr.write(
+    message = (
         f"この PC は司令塔なので、重い処理はここで動かしません: {hit[:200]}\n"
         "MicroVM のエージェントに任せてください (mvm-orchestrator の skill を参照)。"
         "例: mvm send <name> \"<やってほしいこと>\" → mvm wait <name> --timeout 540 → mvm result <name>\n"
         "どうしてもこの PC で動かす必要があるときは、理由をユーザーに説明して了承を得てから、"
         "コマンドの先頭に PMVA_ALLOW_LOCAL=1 を付けて実行してください。\n")
+    sys.stderr.buffer.write(message.encode("utf-8"))
+    sys.stderr.flush()
     return 2
 
 

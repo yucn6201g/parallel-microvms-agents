@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import unittest
@@ -34,12 +35,19 @@ class GuardTest(unittest.TestCase):
             self.assertIsNone(guard.heavy_command(command), command)
 
     def run_hook(self, event):
-        return subprocess.run([sys.executable, str(GUARD)], input=json.dumps(event).encode("utf-8"), capture_output=True)
+        # Windows の既定 (cp1252 など) と同じく、標準入出力が UTF-8 でない状態で動かす
+        env = dict(os.environ, PYTHONIOENCODING="cp1252")
+        return subprocess.run([sys.executable, str(GUARD)], input=json.dumps(event, ensure_ascii=False).encode("utf-8"),
+                              capture_output=True, env=env)
 
     def test_hook_blocks_with_exit_code_2(self):
         p = self.run_hook({"tool_name": "Bash", "tool_input": {"command": "npm run build"}})
         self.assertEqual(p.returncode, 2)
         self.assertIn("この PC は司令塔なので、重い処理はここで動かしません: npm run build", p.stderr.decode("utf-8"))
+        # 日本語を含むコマンドも、UTF-8 のまま読み、日本語の説明を UTF-8 で返す
+        p = self.run_hook({"tool_name": "Bash", "tool_input": {"command": "echo 日本語 && pytest -k 日本語"}})
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("ここで動かしません: pytest -k 日本語", p.stderr.decode("utf-8"))
         for event in ({"tool_name": "Bash", "tool_input": {"command": "mvm ls"}},
                       {"tool_name": "Read", "tool_input": {"file_path": "package.json"}}):
             self.assertEqual(self.run_hook(event).returncode, 0, event)
