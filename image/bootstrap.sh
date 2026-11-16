@@ -132,6 +132,41 @@ if [ -n "$RESTORE" ]; then
   fi
 fi
 
+# ---------------------------------------------------------------- 手元の Claude Code / Codex の設定 (mvm profile push)
+# ルール (CLAUDE.md / AGENTS.md)、skill、サブエージェント、コマンド。復元の後に置くので、送った設定が優先される。
+# skill などは 1 つずつ丸ごと置き換える (手元で消したファイルが残らないように)。VM の中で作った別の名前のものは残す
+PROFILE_URI="$(j .profile)"
+if [ -n "$PROFILE_URI" ]; then
+  log "apply profile $PROFILE_URI"
+  profile_tmp="$(mktemp -d)"
+  if aws s3 cp --only-show-errors "$PROFILE_URI" "$profile_tmp/profile.tar.gz" \
+      && tar -xzf "$profile_tmp/profile.tar.gz" -C "$profile_tmp" --no-same-owner; then
+    for agent in claude codex; do
+      [ -d "$profile_tmp/$agent" ] || continue
+      dest="$HOME/.$agent"
+      mkdir -p "$dest"
+      for entry in "$profile_tmp/$agent"/*; do
+        [ -e "$entry" ] || continue
+        item="$(basename "$entry")"
+        if [ -d "$entry" ]; then
+          mkdir -p "$dest/$item"
+          for child in "$entry"/*; do
+            [ -e "$child" ] || continue
+            rm -rf "${dest:?}/$item/$(basename "$child")"
+            cp -R "$child" "$dest/$item/"
+          done
+        else
+          cp "$entry" "$dest/$item"
+        fi
+      done
+    done
+    log "profile applied"
+  else
+    warn "profile could not be applied: $PROFILE_URI"
+  fi
+  rm -rf "$profile_tmp"
+fi
+
 REPO="$(j .repo)"
 WORKDIR="$HOME/work"
 if [ -n "$REPO" ]; then

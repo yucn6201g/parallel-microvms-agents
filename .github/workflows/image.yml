@@ -2,7 +2,7 @@ name: Image
 
 # MicroVM のイメージ (image/Dockerfile) を、Lambda MicroVMs と同じ ARM64 でビルドして動かす。
 # ベースイメージ (public.ecr.aws/lambda/microvms:al2023-minimal) は公開されているので、AWS を使わずに確かめられる。
-# 時間がかかる (15 分ほど) ので、イメージに関係するファイルを変えたときだけ動かす
+# 数分かかるので、イメージに関係するファイルを変えたときだけ動かす
 on:
   push:
     branches: [main]

@@ -5,7 +5,7 @@
 
 | 分類 | コマンド |
 |---|---|
-| 準備 | [`doctor`](#doctor) / [`infra`](#infra) / [`secret`](#secret) / [`image`](#image) |
+| 準備 | [`doctor`](#doctor) / [`infra`](#infra) / [`secret`](#secret) / [`image`](#image) / [`profile`](#profile) |
 | 起動 | [`up`](#up) / [`fleet`](#fleet) |
 | 確認・指示 | [`ls`](#ls) / [`peek`](#peek) / [`follow`](#follow) / [`view`](#view) / [`top`](#top) / [`send`](#send) / [`wait`](#wait) / [`result`](#result) / [`watch`](#watch) / [`logs`](#logs) |
 | 接続 | [`ssh`](#ssh) / [`forward`](#forward) / [`ssh-config`](#ssh-config) / [`shell`](#shell) / [`token`](#token) |
@@ -74,6 +74,27 @@ mvm image update-versions [--claude <版>] [--codex <版>]   # image/Dockerfile 
 - `build`: `image/` を zip にして S3 に置き、イメージ (2 回目からは新しいバージョン) を作ります。完了まで待ち、失敗したら原因を表示します
 - `update-versions`: 版を省略すると npm の最新版にします。書き換えた後は `build` し、動作を確認してから Dockerfile の変更を commit してください
 
+### profile
+
+```bash
+mvm profile show [--agent claude|codex|both]                      # 送るものを表示する (送らない)
+mvm profile push [--name <名前>] [--agent claude|codex|both] [--dry-run]
+```
+
+手元の Claude Code / Codex の自分用の設定を S3 に送り、VM の起動時にエージェントのホームに置きます。VM のエージェントも、手元と同じルールや skill で動くようになります。
+
+| エージェント | 送るもの (あれば) |
+|---|---|
+| Claude Code | `~/.claude/` の `CLAUDE.md`、`skills/`、`agents/`、`commands/`、`output-styles/` |
+| Codex | `~/.codex/` (`CODEX_HOME`) の `AGENTS.md`、`skills/`、`prompts/` |
+
+- **送らないもの**: `settings.json` / `config.toml` (認証情報、MCP、手元のパス、フックを含みやすいため)、認証情報のファイル、`mvm-orchestrator` の skill、Codex が自分で入れる skill (`.system`)、`.git` / `node_modules` など
+- **送る前に確かめること**: API キーやトークン、秘密鍵らしい文字列を含むファイル、1MB を超えるファイル、シンボリックリンクは送りません (理由を表示します)。手元のパス (`C:\Users\...`、`/Users/...`) を含むファイルは送りますが、VM では見つからないので注意を表示します
+- Windows で書いたテキストの改行は LF にし、スクリプト (`.sh` / `.py` / `#!` で始まるもの) には実行権限を付けます
+- 送った設定を使うには、`config.env` に `PROFILE=<名前>` を書くか、`mvm up --profile <名前>` で起動します。起動中の VM には反映されません (次の起動・`renew` から)
+- VM の中では、skill・サブエージェント・コマンドを 1 つずつ丸ごと置き換えます。VM の中で作った別の名前のものは残します
+- 名前は英小文字・数字・ハイフン (既定 `default`)。チーム用と個人用など、いくつかのまとまりを使い分けられます
+
 ---
 
 ## 起動
@@ -105,6 +126,7 @@ MicroVM を 1 台起動し、エージェントを tmux の中で開始します
 | `--max-duration <秒>` | `MAX_DURATION_SECONDS` | 寿命 (上限 28800 = 8 時間) |
 | `--notify` / `--no-notify` | `NOTIFY_WEBHOOK` | 完了・入力待ちを Webhook に通知する |
 | `--no-setup` | | リポジトリの `.pmva/setup.sh` を実行しない ([setup.md](setup.md#リポジトリごとの準備-pmvasetupsh)) |
+| `--profile <名前>` / `--no-profile` | `PROFILE` | 手元から送った設定のまとまり ([profile](#profile)) を使う / 使わない |
 
 注意:
 

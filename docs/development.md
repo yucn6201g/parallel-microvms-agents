@@ -85,7 +85,7 @@ python -m py_compile bin/mvm.py image/supervisor.py scripts/estimate_cost.py scr
 - lint: shellcheck、cfn-lint、Python の構文チェック
 - agents-e2e: `image/Dockerfile` で固定した版の Claude Code / Codex を入れて `tests/test_agents_e2e.py` を動かす。`mvm image update-versions` で版を上げたときに、フックや会話の記録の形式が変わっていないかが分かる
 
-`.github/workflows/image.yml` は、`image/` などを変えたときに、ARM64 のランナーで本物のイメージをビルドして `tests/test_image.py` を動かします (15 分ほど)。Lambda MicroVMs のベースイメージは公開されているので、AWS は使いません。手元で動かすには:
+`.github/workflows/image.yml` は、`image/` などを変えたときに、ARM64 のランナーで本物のイメージをビルドして `tests/test_image.py` を動かします (数分)。Lambda MicroVMs のベースイメージは公開されているので、AWS は使いません。手元で動かすには:
 
 ```bash
 docker build -t pmva-agent:test image/

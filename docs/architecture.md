@@ -116,6 +116,14 @@ Claude Code の hooks と Codex の `notify` から `image/notify.sh` を呼び�
 フックは通知の設定にかかわらず常に入れます。利用者が `~/.claude/settings.json` に書いたフックは残し、pmva のものだけを入れ直します。スナップショットの復元で設定が上書きされるので、復元の後に入れます。
 通知 (`--notify`) が有効なら、`done` と `waiting` のときに Webhook にも 1 行の通知を送ります。Webhook の URL は他の認証情報と同じく Secrets Manager に置きます。
 
+### 手元の設定を VM に渡す (`mvm profile`)
+
+`mvm profile push` が、手元の Claude Code / Codex のルール・skill・サブエージェント・コマンドを tar.gz にして `s3://<バケット>/profiles/<名前>.tar.gz` に置きます。`mvm up` は `runHookPayload` にその場所だけを入れ、`bootstrap.sh` がワークスペースの復元の後に取得して `~/.claude` / `~/.codex` に置きます。
+
+- 実行ロールは `profiles/*` を読めるだけで、書けない (VM の中から設定を書き換えられない)
+- 認証情報らしい文字列を含むファイルは手元で除く。`settings.json` / `config.toml` は送らない (MCP の設定や認証情報、手元のパスを含みやすいため)
+- pmva のフックは、設定を置いた後で入れる (`settings.json` は送らないので、利用者のフックと衝突しない)
+
 ### 推論の過程を手元で見る (`mvm follow`)
 
 エージェントが自分で書いている会話の記録 (Claude Code は `~/.claude/projects/` の JSONL、Codex は `~/.codex/sessions/` の rollout) を、`supervisor.py` の `/events` が読んで、表示用の出来事 (指示・思考・ツールの実行と結果・応答) に直して返します。

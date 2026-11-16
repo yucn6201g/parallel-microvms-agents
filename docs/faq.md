@@ -39,11 +39,14 @@ AWS Secrets Manager に保存し、MicroVM の起動時にだけ取り出しま�
 **Q. 8 時間を超えるとどうなりますか?**
 MicroVM は最大 8 時間で終了します。その前に `mvm renew <name>` で、保存 → 新しい VM で復元をしてください。ブランチと会話の履歴も引き継ぎます ([usage.md](usage.md#8-時間を超えて続ける))。
 
+**Q. VM のエージェントは、手元の Claude Code / Codex と同じ設定 (ルール、skill) で動きますか?**
+リポジトリに入っている設定 (`CLAUDE.md`、`AGENTS.md`、`.claude/skills/` など) は、clone すればそのまま使われます。手元の自分用の設定 (`~/.claude/CLAUDE.md`、`~/.claude/skills/`、`~/.codex/AGENTS.md` など) は、`mvm profile push` で送り、`config.env` に `PROFILE=default` を書くと VM にも置かれます ([commands.md](commands.md#profile))。MCP の設定や手元のアプリにつなぐものは送りません。手元でしかできない作業は、手元のエージェントを司令塔にして分担します ([orchestrator.md](orchestrator.md))。
+
 **Q. VM の中のファイルは、終了したら消えますか?**
 VM のディスクは一時的なもので、終了すると消えます。`~/work` (リポジトリ) と `~/.claude`、`~/.codex` (会話の履歴) は、30 分ごとと `mvm stop` のときに S3 に保存され、`--restore latest` で戻せます。確実に残したい成果物は git に push してください。
 
 **Q. VM の中で sudo は使えますか? パッケージを追加したいです。**
-`agent` ユーザーは sudo を使えません (コンテナの制限)。root が必要な作業は `mvm shell <name>` (root で入る) で行います。毎回使うパッケージは `image/Dockerfile` に追加して `mvm image build` します。
+`agent` ユーザーは sudo を使えません (コンテナの制限)。root が必要な作業は `mvm shell <name>` (root で入る) で行います。毎回使うパッケージは `config.env` の `IMAGE_EXTRA_PACKAGES` に書いて `mvm image build` します。Python と Node.js の版は root なしで変えられます (`uv python install`、`pmva-node install`。[setup.md](setup.md#リポジトリごとの準備-pmvasetupsh))。
 
 **Q. Docker や GPU は使えますか?**
 イメージに Docker は入っていません。GPU もありません。CPU (ARM64) で完結するビルドとテストが前提です。

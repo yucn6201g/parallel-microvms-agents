@@ -100,6 +100,8 @@ class AgentE2ETest(unittest.TestCase):
     @unittest.skipUnless(CLAUDE, "PMVA_E2E_CLAUDE が必要")
     def test_claude_hooks_record_state_and_transcript(self):
         mock = self.claude_settings()
+        # mvm profile push で置く、利用者全体のルール
+        (self.home / ".claude" / "CLAUDE.md").write_text("PMVA-PROFILE-RULE: テストのルール\n", encoding="utf-8")
         p = subprocess.run([CLAUDE, "-p", "テストして", "--model", "claude-mock", "--allowedTools", "Bash"],
                            cwd=self.work, env=self.agent_env(ANTHROPIC_BASE_URL=mock.url), stdin=subprocess.DEVNULL,
                            capture_output=True, text=True, timeout=120)
@@ -107,6 +109,8 @@ class AgentE2ETest(unittest.TestCase):
         self.assertTrue((self.work / "made-by-claude.txt").exists(), "ツールが実行された")
         st = self.wait_state("claude", ("done",))
         self.assertEqual(st["message"], "完了しました。", "Stop フックの last_assistant_message")
+        self.assertIn("PMVA-PROFILE-RULE", json.dumps([b for _, b in mock.requests], ensure_ascii=False),
+                      "~/.claude/CLAUDE.md を読んでいる")
         transcript = st["transcript"]
         self.assertTrue(transcript.endswith(".jsonl") and os.path.isfile(transcript))
         self.assertEqual(self.sup.last_claude_text(transcript), "完了しました。", "会話記録から取り出す経路")
@@ -194,11 +198,13 @@ class AgentE2ETest(unittest.TestCase):
         mock = OpenAIResponsesMock("touch made-by-codex.txt")
         self.addCleanup(mock.shutdown)
         self.write_codex_config(mock)
+        (self.home / ".codex" / "AGENTS.md").write_text("PMVA-PROFILE-RULE: テストのルール\n", encoding="utf-8")
         p = subprocess.run([CODEX, "exec", "--skip-git-repo-check", "テストして"], cwd=self.work,
                            env=self.agent_env(MOCK_API_KEY="x", CODEX_HOME=str(self.home / ".codex")),
                            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertTrue((self.work / "made-by-codex.txt").exists(), "ツールが実行された")
+        self.assertIn("PMVA-PROFILE-RULE", json.dumps(mock.requests[0][1], ensure_ascii=False), "~/.codex/AGENTS.md を読んでいる")
         st = self.wait_state("codex", ("done",))
         self.assertEqual(st["message"], "完了しました。", "notify の last-assistant-message")
         rollouts = list((self.home / ".codex" / "sessions").rglob("rollout-*.jsonl"))

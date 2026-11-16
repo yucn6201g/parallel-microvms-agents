@@ -13,6 +13,7 @@ import base64
 import collections
 import getpass
 import hashlib
+import io
 import json
 import os
 import re
@@ -22,6 +23,7 @@ import shutil
 import socket
 import ssl
 import subprocess
+import tarfile
 import sys
 import tempfile
 import threading
@@ -62,6 +64,7 @@ DEFAULTS = {
     "BUDGET_MONTHLY_USD": "0", "BUDGET_EMAIL": "", "KEEPALIVE_RATE_MINUTES": "5", "KEEPALIVE_ACTIVE_SECONDS": "900",
     "NOTIFY_WEBHOOK": "false", "NIGHTLY_STOP_TIME": "", "NIGHTLY_STOP_TIMEZONE": "Asia/Tokyo",
     "INFRA_TEMPLATE": "full", "SETUP_TIMEOUT_SECONDS": "1800", "IMAGE_BROWSER_DEPS": "true", "IMAGE_EXTRA_PACKAGES": "",
+    "PROFILE": "",
 }
 # mvm infra deploy で使う CloudFormation テンプレート。minimal は mvm の動作に必要なリソースだけ
 # (キープアライブ、毎晩の自動停止、予算アラートを含まない)
@@ -1281,6 +1284,14 @@ def build_payload(name, a):
     branch = a.branch or (f"pmva/{name}" if a.repo else "")
     bucket = stack_output("ArtifactBucketName")
     restore = f"s3://{bucket}/workspaces/{name}/latest.tar.gz" if a.restore == "latest" else (a.restore or "")
+    profile = "" if a.no_profile else (a.profile or C["PROFILE"])
+    profile_uri = ""
+    if profile:
+        check_profile_name(profile)
+        profile_uri = f"s3://{bucket}/{PROFILE_PREFIX}{profile}.tar.gz"
+        if not aws("s3api", "head-object", "--bucket", bucket, "--key", f"{PROFILE_PREFIX}{profile}.tar.gz", check=False):
+            die(f"設定のまとまり {profile} がまだありません。mvm profile push --name {profile} で送ってください "
+                "(使わないなら --no-profile)")
     ssh_key = ""
     key_file = expand_path(C["SSH_PUBLIC_KEY_FILE"])
     if key_file and key_file.exists():
@@ -1300,6 +1311,7 @@ def build_payload(name, a):
         "notifySecret": f"{prefix}/notify-webhook" if notify else "",
         "setupTimeoutSeconds": int(C["SETUP_TIMEOUT_SECONDS"]),
         "skipSetup": "true" if a.no_setup else "",
+        "profile": profile_uri,
     }
     return {k: v for k, v in payload.items() if v != ""}
 
@@ -1695,6 +1707,116 @@ def cmd_top(args):
             print(f"  !! メモリ不足でプロセスが {r['oomKills']} 回強制終了されました")
         for g in mem.get("top") or []:
             print(f"  {g['name']:<20} {g['count']:>4} 個  {g['rssMiB']:>7} MiB")
+    return 0
+
+
+# ---------------------------------------------------------------- 手元のエージェントの設定を VM に渡す (mvm profile)
+
+PROFILE_PREFIX = "profiles/"
+# 渡すもの: ルール、skill、サブエージェント、コマンドなど。settings.json / config.toml (認証情報、MCP、手元のパス、
+# フックを含みやすい) と、認証情報のファイルは渡さない
+PROFILE_ITEMS = {
+    "claude": ("CLAUDE.md", "skills", "agents", "commands", "output-styles"),
+    "codex": ("AGENTS.md", "skills", "prompts"),
+}
+PROFILE_SKIP_NAMES = {".system", "mvm-orchestrator", ".git", "node_modules", "__pycache__",
+                      ".venv", ".DS_Store", "Thumbs.db"}
+PROFILE_MAX_FILE = 1024 * 1024          # 1 ファイルの上限
+PROFILE_MAX_TOTAL = 20 * 1024 * 1024    # 合計の上限
+PROFILE_TEXT_SUFFIXES = {".md", ".txt", ".sh", ".bash", ".py", ".js", ".mjs", ".cjs", ".ts", ".json", ".yaml", ".yml",
+                         ".toml", ".ini", ".cfg", ".csv", ".html", ".css", ".sql", ""}
+SECRET_PATTERN = re.compile(
+    rb"(sk-ant-[A-Za-z0-9_-]{16,}|sk-(proj-)?[A-Za-z0-9_-]{32,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}"
+    rb"|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|xox[abprs]-[A-Za-z0-9-]{10,}"
+    rb"|hooks\.slack\.com/services/[A-Za-z0-9/]+)")
+
+
+def check_profile_name(name):
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", name):
+        die(f"設定のまとまりの名前は英小文字・数字・ハイフンにしてください: {name}")
+
+
+def agent_homes():
+    return {"claude": Path.home() / ".claude", "codex": Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")}
+
+
+def collect_profile(agents):
+    """渡すファイルを集める。戻り値は ([(tar の中の名前, 中身, 実行権限)], [(場所, 渡さない理由)], [(場所, 注意)])。"""
+    homes = agent_homes()
+    files, skipped, notes = [], [], []
+    home_text = str(Path.home()).encode("utf-8")
+    total = 0
+    for agent in agents:
+        base = homes[agent]
+        for item in PROFILE_ITEMS[agent]:
+            top = base / item
+            if not top.exists():
+                continue
+            candidates = [top] if top.is_file() else sorted(p for p in top.rglob("*"))
+            for path in candidates:
+                rel = path.relative_to(base)
+                if any(part in PROFILE_SKIP_NAMES for part in rel.parts):
+                    continue
+                if path.is_symlink():
+                    skipped.append((path, "シンボリックリンク"))
+                    continue
+                if path.is_dir():
+                    continue
+                size = path.stat().st_size
+                if size > PROFILE_MAX_FILE:
+                    skipped.append((path, f"大きすぎる ({size // 1024}KB。1 ファイル {PROFILE_MAX_FILE // 1024 // 1024}MB まで)"))
+                    continue
+                data = path.read_bytes()
+                if SECRET_PATTERN.search(data):
+                    skipped.append((path, "認証情報 (API キー、トークン、秘密鍵など) らしい文字列を含む"))
+                    continue
+                if path.suffix.lower() in PROFILE_TEXT_SUFFIXES and b"\0" not in data:
+                    data = data.replace(b"\r\n", b"\n")   # Windows で書いたスクリプトも Linux で動くように
+                    if home_text in data or (IS_WINDOWS and home_text.replace(b"\\", b"/") in data):
+                        notes.append((path, "手元のパスを含む (VM では見つからない)"))
+                total += len(data)
+                if total > PROFILE_MAX_TOTAL:
+                    die(f"渡すファイルの合計が {PROFILE_MAX_TOTAL // 1024 // 1024}MB を超えました。大きなファイルを含む skill を見直してください")
+                executable = path.suffix in (".sh", ".bash", ".py") or data.startswith(b"#!")
+                files.append((f"{agent}/{rel.as_posix()}", data, executable))
+    return files, skipped, notes
+
+
+def write_profile_tar(dest, files):
+    with tarfile.open(dest, "w:gz", format=tarfile.PAX_FORMAT) as tar:
+        for name, data, executable in files:
+            info = tarfile.TarInfo(name)
+            info.size, info.mode, info.mtime = len(data), 0o755 if executable else 0o644, int(time.time())
+            tar.addfile(info, io.BytesIO(data))
+
+
+def cmd_profile(args):
+    agents = ["claude", "codex"] if args.agent == "both" else [args.agent]
+    name = args.name
+    check_profile_name(name)
+    files, skipped, notes = collect_profile(agents)
+    for path, reason in skipped:
+        print(f"  渡さない: {path} ({reason})")
+    for path, reason in notes:
+        print(f"  注意:     {path} ({reason})")
+    if args.action == "show" or args.dry_run:
+        for arc, data, _ in files:
+            print(f"  {arc}  ({len(data):,} バイト)")
+        print(f"{len(files)} ファイルを渡します (まだ送っていません)")
+        return 0
+    if not files:
+        die("渡すものがありません (" + ", ".join(f"{a}: {', '.join(PROFILE_ITEMS[a])}" for a in agents) + ")")
+    bucket = stack_output("ArtifactBucketName")
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    tar_path = STATE_DIR / f"profile-{name}.tar.gz"
+    write_profile_tar(tar_path, files)
+    key = f"{PROFILE_PREFIX}{name}.tar.gz"
+    aws("s3", "cp", "--only-show-errors", str(tar_path), f"s3://{bucket}/{key}", output=None)
+    tar_path.unlink()
+    log(f"{len(files)} ファイルを送りました: s3://{bucket}/{key}")
+    if C["PROFILE"] != name:
+        log(f"起動する VM で使うには、config.env に PROFILE={name} を書くか、mvm up に --profile {name} を付けてください")
+    log("起動中の VM には反映されません (次に起動・renew したときから)")
     return 0
 
 
@@ -2182,6 +2304,8 @@ def add_up_options(p):
     p.add_argument("--idle", help="アイドルでサスペンドするまでの秒数。off で無効")
     p.add_argument("--max-duration", help="最大寿命 (秒、上限 28800)")
     p.add_argument("--no-setup", action="store_true", help="リポジトリの .pmva/setup.sh を実行しない")
+    p.add_argument("--profile", help="手元から送った Claude Code / Codex の設定のまとまり (mvm profile push) を使う")
+    p.add_argument("--no-profile", action="store_true", help="config.env の PROFILE を使わない")
     p.add_argument("--notify", dest="notify", action="store_true", default=None,
                    help="完了・入力待ちを <prefix>/notify-webhook の URL に通知する")
     p.add_argument("--no-notify", dest="notify", action="store_false", help="通知しない")
@@ -2275,6 +2399,12 @@ def build_parser():
     x.add_argument("names", nargs="*", metavar="name", help="表示するセッション (省略時は動いている全セッション)")
     x.add_argument("--json", action="store_true", help="JSON で出力")
     x.set_defaults(func=cmd_top)
+    x = sub.add_parser("profile", help="手元の Claude Code / Codex のルール・skill・サブエージェント・コマンドを VM に渡す")
+    x.add_argument("action", choices=("push", "show"))
+    x.add_argument("--name", default="default", help="設定のまとまりの名前 (既定 default)")
+    x.add_argument("--agent", choices=("claude", "codex", "both"), default="both")
+    x.add_argument("--dry-run", action="store_true", help="push で、送るものを表示するだけにする")
+    x.set_defaults(func=cmd_profile)
     x = sub.add_parser("orchestrator", help="手元の Claude Code / Codex を司令塔にする (MicroVM に作業を任せる skill と設定)")
     x.add_argument("action", choices=("install", "uninstall"))
     x.add_argument("agent", choices=("claude", "codex"))

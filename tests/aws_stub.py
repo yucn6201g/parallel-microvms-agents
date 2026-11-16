@@ -5,6 +5,7 @@
   <microvmId>.payload  run-microvm の --run-hook-payload
   <microvmId>.term     terminate 済みの印
   secret-<name>        create-secret / put-secret-value で受け取った値
+  s3/<bucket>/<key>    s3 cp で S3 に置いたファイル
 """
 
 import json
@@ -129,6 +130,18 @@ if cmd == "cloudformation describe-stack-resources":  # 依存関係の順に 1 
     out({"StackResources": [{"LogicalResourceId": u, "PhysicalResourceId": "pmva-keepalive" if "Function" in u else "perm-1",
                              "ResourceType": "AWS::Lambda::Function" if "Function" in u else "AWS::Lambda::Permission",
                              "ResourceStatus": "DELETE_FAILED"} for u in pending[:1]]})
+# s3 cp (手元 → S3) は s3/<バケット>/<キー> に置き、s3api head-object はそこを見る
+paths = [x for x in a[2:] if not x.startswith("--")]
+if cmd == "s3 cp" and len(paths) == 2 and paths[1].startswith("s3://"):
+    dest = D / "s3" / paths[1][len("s3://"):]
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(Path(paths[0]).read_bytes())
+    sys.exit(0)
+if cmd == "s3api head-object":
+    obj = D / "s3" / opt("--bucket") / opt("--key")
+    if obj.exists():
+        out({"ContentLength": obj.stat().st_size})
+    fail("An error occurred (404) when calling the HeadObject operation: Not Found")
 if cmd in ("s3 rm", "cloudformation deploy"):
     sys.exit(0)
 if cmd == "ce get-cost-and-usage":  # 2 ページに分けて返す
