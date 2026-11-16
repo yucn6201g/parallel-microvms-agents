@@ -184,6 +184,7 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 - [ ] 実際の ChatGPT / Claude のアカウントで、`mvm login` から VM の中のエージェントにログインできること: 未確認 (MicroVM とアカウントが要る)
 - [x] Codex の `gateway`: 固定した版の Codex が、ファイルのキーを `Authorization: Bearer` で、`apiKeyHeader` のときは環境変数のキーを指定のヘッダーで送り、URL のパラメータと追加のヘッダーを付けることを確認 (`tests/test_agents_e2e.py`)
 - [ ] Codex の `access-token`: 未確認 (トークンの発行と、ChatGPT への確認の通信が要る)
+- [x] `custom`: `bootstrap.sh` が環境変数・ファイル (権限 600)・Claude Code の設定・Codex の接続先を書くこと、`{{files}}` の置き換え、使えない名前を飛ばすことを確認 (`tests/test_supervisor.py`)。中身はエージェントの設定そのものなので、本物のエージェントでは確かめていない
 
 ## 結果
 

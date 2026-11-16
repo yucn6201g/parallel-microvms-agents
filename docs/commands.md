@@ -59,6 +59,7 @@ mvm secret ls
 | `codex-auth-json` | ChatGPT でログイン済みの `~/.codex/auth.json` の中身 | `--codex-auth chatgpt` |
 | `codex-access-token` | Codex のアクセストークン (`at-...`) | `--codex-auth access-token` |
 | `codex-gateway` | `{"baseUrl":"...","apiKey":"..."}` 形式の JSON ([auth.md](auth.md#ゲートウェイ-gateway)) | `--codex-auth gateway` |
+| `claude-custom-auth` / `codex-custom-auth` | 環境変数・ファイル・設定をまとめた JSON ([auth.md](auth.md#どの方式にも当てはまらないとき-custom)) | `--claude-auth custom` / `--codex-auth custom` |
 | `codex-bedrock-api-key` | Amazon Bedrock の API キー (Codex 用) | `--codex-auth bedrock-api-key` |
 | `github-token` | GitHub の personal access token | clone / push (`USE_GITHUB_TOKEN=true`) |
 | `notify-webhook` | Slack などの Webhook URL (`https://...`) | `--notify` |
@@ -115,8 +116,8 @@ MicroVM を 1 台起動し、エージェントを tmux の中で開始します
 | オプション | 既定 | 説明 |
 |---|---|---|
 | `--agent claude\|codex\|both\|none` | `DEFAULT_AGENT` | 起動するエージェント。`none` はエージェントなし (シェルだけ) |
-| `--claude-auth api-key\|oauth-token\|bedrock\|bedrock-api-key\|mantle\|anthropic-aws\|anthropic-aws-api-key\|gateway\|interactive\|none` | `DEFAULT_CLAUDE_AUTH` | Claude Code の認証方式 ([auth.md](auth.md)) |
-| `--codex-auth api-key\|chatgpt\|access-token\|bedrock\|bedrock-api-key\|gateway\|interactive\|none` | `DEFAULT_CODEX_AUTH` | Codex の認証方式 |
+| `--claude-auth api-key\|oauth-token\|bedrock\|bedrock-api-key\|mantle\|anthropic-aws\|anthropic-aws-api-key\|gateway\|custom\|interactive\|none` | `DEFAULT_CLAUDE_AUTH` | Claude Code の認証方式 ([auth.md](auth.md)) |
+| `--codex-auth api-key\|chatgpt\|access-token\|bedrock\|bedrock-api-key\|gateway\|custom\|interactive\|none` | `DEFAULT_CODEX_AUTH` | Codex の認証方式 |
 | `--claude-secret` / `--codex-secret` / `--github-secret <名前>` | 認証方式から決まる | 既定と別名で登録したシークレットを使う |
 | `--no-github` | | GitHub トークンを使わない |
 | `--repo <URL>` | | clone するリポジトリ |

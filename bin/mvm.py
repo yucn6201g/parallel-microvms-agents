@@ -72,8 +72,9 @@ DEFAULTS = {
 INFRA_TEMPLATES = {"full": "cloudformation.yaml", "minimal": "cloudformation-minimal.yaml"}
 AGENTS = ("claude", "codex", "both", "none")
 CLAUDE_AUTHS = ("api-key", "oauth-token", "bedrock", "bedrock-api-key", "mantle", "anthropic-aws",
-                "anthropic-aws-api-key", "gateway", "interactive", "none")
-CODEX_AUTHS = ("api-key", "chatgpt", "access-token", "bedrock", "bedrock-api-key", "gateway", "interactive", "none")
+                "anthropic-aws-api-key", "gateway", "custom", "interactive", "none")
+CODEX_AUTHS = ("api-key", "chatgpt", "access-token", "bedrock", "bedrock-api-key", "gateway", "custom",
+               "interactive", "none")
 # 実行ロールはエージェントごとに分かれており、読めるシークレットを名前の接頭辞で区別する
 # (infra/cloudformation.yaml)。別名で登録するときも、この接頭辞で始める必要がある
 SECRET_NAME_PREFIXES = {
@@ -82,11 +83,13 @@ SECRET_NAME_PREFIXES = {
     "codex-auth-json": ("openai-", "codex-"), "github-token": ("github-",), "notify-webhook": ("notify-",),
     "claude-bedrock-api-key": ("anthropic-", "claude-"), "anthropic-aws-api-key": ("anthropic-", "claude-"),
     "codex-bedrock-api-key": ("openai-", "codex-"), "codex-access-token": ("openai-", "codex-"),
-    "codex-gateway": ("openai-", "codex-"),
+    "codex-gateway": ("openai-", "codex-"), "claude-custom-auth": ("anthropic-", "claude-"),
+    "codex-custom-auth": ("openai-", "codex-"),
 }
 SECRET_KINDS = ("anthropic-api-key", "claude-oauth-token", "anthropic-gateway", "claude-bedrock-api-key",
                 "anthropic-aws-api-key", "openai-api-key", "codex-auth-json", "codex-access-token",
-                "codex-bedrock-api-key", "codex-gateway", "github-token", "notify-webhook")
+                "codex-bedrock-api-key", "codex-gateway", "claude-custom-auth", "codex-custom-auth",
+                "github-token", "notify-webhook")
 
 C = {}  # 読み込んだ設定
 
@@ -1002,6 +1005,48 @@ def check_codex_gateway(value):
             die(usage)
 
 
+# --claude-auth custom / --codex-auth custom で上書きさせない環境変数 (VM の動作に要るもの)
+CUSTOM_ENV_RESERVED = re.compile(r"(PATH|HOME|USER|SHELL|LANG|TERM|TMUX.*|LD_.*|PMVA_.*)")
+CUSTOM_FILE_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")
+
+
+def check_custom_auth(kind, value):
+    """--claude-auth custom / --codex-auth custom のシークレット: 環境変数、ファイル、エージェントの設定の組み合わせ。"""
+    agent_key = "claudeSettings" if kind == "claude-custom-auth" else "codexConfig"
+
+    def bad(why):
+        die(f"{kind} の内容が正しくありません: {why} (形式は docs/auth.md の「どの方式にも当てはまらないとき (custom)」)")
+    try:
+        v = json.loads(value)
+    except ValueError:
+        bad("JSON ではありません")
+    if not isinstance(v, dict):
+        bad("JSON のオブジェクト ({...}) にしてください")
+    unknown = set(v) - {"env", "files", agent_key}
+    if unknown:
+        bad(f"使えない項目があります: {', '.join(sorted(unknown))} (使えるのは env、files、{agent_key})")
+    env = v.get("env", {})
+    if not isinstance(env, dict):
+        bad("env は {名前: 値} にしてください")
+    for name, val in env.items():
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) or CUSTOM_ENV_RESERVED.fullmatch(name):
+            bad(f"環境変数 {name} は使えません")
+        if not isinstance(val, str):
+            bad(f"環境変数 {name} の値は文字列にしてください")
+    files = v.get("files", {})
+    if not isinstance(files, dict):
+        bad("files は {ファイル名: 中身} にしてください")
+    for name, val in files.items():
+        if not CUSTOM_FILE_NAME.fullmatch(name):
+            bad(f"ファイル名 {name} は使えません (英数字と . _ - だけ。. で始めない)")
+        if not isinstance(val, str):
+            bad(f"ファイル {name} の中身は文字列にしてください")
+    if agent_key == "claudeSettings" and not isinstance(v.get(agent_key, {}), dict):
+        bad("claudeSettings は ~/.claude/settings.json に足す {...} にしてください")
+    if agent_key == "codexConfig" and not isinstance(v.get(agent_key, ""), str):
+        bad("codexConfig は ~/.codex/config.toml に足す TOML の文字列にしてください")
+
+
 def cmd_secret(args):
     prefix = C["PMVA_PREFIX"]
     if args.action == "ls":
@@ -1036,6 +1081,8 @@ def cmd_secret(args):
         die("Webhook の URL (https://...) を渡してください")
     if kind == "codex-gateway":
         check_codex_gateway(value)
+    if kind in ("claude-custom-auth", "codex-custom-auth"):
+        check_custom_auth(kind, value)
     if kind == "codex-access-token" and not re.fullmatch(r"at-\S+|[\w-]+\.[\w-]+\.[\w-]+", value):
         die("Codex のアクセストークン (at- で始まる個人用のトークン、またはエージェント用の JWT) を渡してください")
     if kind == "codex-auth-json":
@@ -1306,6 +1353,7 @@ def build_payload(name, a):
         "gateway": f"{prefix}/anthropic-gateway",
         "bedrock-api-key": f"{prefix}/claude-bedrock-api-key",
         "anthropic-aws-api-key": f"{prefix}/anthropic-aws-api-key",
+        "custom": f"{prefix}/claude-custom-auth",
     }.get(claude_auth, "")
     codex_secret = a.codex_secret or {
         "api-key": f"{prefix}/openai-api-key",
@@ -1313,6 +1361,7 @@ def build_payload(name, a):
         "bedrock-api-key": f"{prefix}/codex-bedrock-api-key",
         "access-token": f"{prefix}/codex-access-token",
         "gateway": f"{prefix}/codex-gateway",
+        "custom": f"{prefix}/codex-custom-auth",
     }.get(codex_auth, "")
     # Claude Platform on AWS はワークスペース ID が必須 (リクエストごとに送る)
     anthropic_aws = {}

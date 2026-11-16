@@ -37,6 +37,38 @@ addenv() { printf 'export %s=%q\n' "$1" "$2" >> "$ENV_FILE"; }
 valid_region() { [[ "$1" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]+$ ]]; }
 BEDROCK_REGION="$(j .bedrockRegion)"; BEDROCK_REGION="${BEDROCK_REGION:-$AWS_REGION}"
 
+# --claude-auth custom / --codex-auth custom: シークレットに書いた環境変数 (env)、ファイル (files)、
+# エージェントの設定 (claudeSettings / codexConfig) をそのまま入れる。値の {{files}} はファイルを置いた場所に置き換える。
+# ファイルは ~/.pmva/secrets/<agent>-custom/ (スナップショットに含めない) に権限 600 で置く
+CLAUDE_CUSTOM_SETTINGS=""
+custom_auth() {
+  local agent="$1" spec dir name value
+  spec="$(secret "$2")"
+  dir="$SECRETS_DIR/$agent-custom"
+  rm -rf "$dir"; mkdir -p "$dir"
+  while IFS= read -r name; do
+    if [[ "$name" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]]; then
+      jq -j --arg n "$name" '.files[$n] | tostring' <<<"$spec" > "$dir/$name"
+    else
+      warn "custom auth: skipped file $name"
+    fi
+  done < <(jq -r '.files // {} | keys[]' <<<"$spec")
+  while IFS= read -r name; do
+    if [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && ! [[ "$name" =~ ^(PATH|HOME|USER|SHELL|LANG|TERM|TMUX.*|LD_.*|PMVA_.*)$ ]]; then
+      value="$(jq -j --arg n "$name" --arg d "$dir" '.env[$n] | tostring | gsub("\\{\\{files\\}\\}"; $d)' <<<"$spec")"
+      addenv "$name" "$value"
+    else
+      warn "custom auth: skipped env $name"
+    fi
+  done < <(jq -r '.env // {} | keys[]' <<<"$spec")
+  if [ "$agent" = claude ]; then
+    CLAUDE_CUSTOM_SETTINGS="$(jq -c --arg d "$dir" '.claudeSettings // empty
+      | walk(if type == "string" then gsub("\\{\\{files\\}\\}"; $d) else . end)' <<<"$spec")"
+  else
+    CODEX_PROVIDER="$(jq -r --arg d "$dir" '.codexConfig // empty | gsub("\\{\\{files\\}\\}"; $d)' <<<"$spec")"
+  fi
+}
+
 mkdir -p "$PMVA" "$SECRETS_DIR" "$HOME/.claude" "$HOME/.codex" "$HOME/work"
 : > "$ENV_FILE"
 addenv PMVA_SESSION "$NAME"
@@ -100,6 +132,7 @@ case "$CLAUDE_AUTH" in
     addenv ANTHROPIC_BASE_URL "$(jq -r .baseUrl <<<"$gw")"
     addenv ANTHROPIC_AUTH_TOKEN "$(jq -r .authToken <<<"$gw")"
     ;;
+  custom) custom_auth claude "$CLAUDE_SECRET" ;;
   interactive|none) ;;  # interactive: 接続後に claude を起動して /login する
   *) warn "unknown claudeAuth: $CLAUDE_AUTH" ;;
 esac
@@ -187,6 +220,7 @@ model_providers.amazon-bedrock.auth = { command = \"cat\", args = [$(jq -rn --ar
       warn "Codex also uses the Claude Bedrock API key (AWS_BEARER_TOKEN_BEDROCK); use --codex-auth bedrock-api-key or --claude-auth bedrock"
     fi
     ;;
+  custom) custom_auth codex "$CODEX_SECRET" ;;   # 接続先の設定 (codexConfig) は CODEX_PROVIDER に入る
   interactive|none) ;;  # interactive: 接続後に手元から mvm login (ブラウザ) か mvm login --device
   *) warn "unknown codexAuth: $CODEX_AUTH" ;;
 esac
@@ -291,6 +325,10 @@ addenv PMVA_WORKDIR "$WORKDIR"
 # エージェントのフック (状態の記録と通知)。Claude Code は、利用者が自分で書いたフックを残し、pmva のフックだけを入れ直す
 settings="$HOME/.claude/settings.json"
 [ -s "$settings" ] || echo '{}' > "$settings"
+# --claude-auth custom の claudeSettings を先に足す (pmva のフックは、その後で必ず入れ直す)
+if [ -n "$CLAUDE_CUSTOM_SETTINGS" ]; then
+  jq --argjson s "$CLAUDE_CUSTOM_SETTINGS" '. * $s' "$settings" > "$settings.tmp" && mv "$settings.tmp" "$settings"
+fi
 jq 'def pmva(ev; arg):
       .hooks[ev] = ([(.hooks[ev] // [])[] | select([.hooks[]?.command? // "" | startswith("/opt/pmva/notify.sh")] | any | not)]
                     + [{"hooks": [{"type": "command", "command": ("/opt/pmva/notify.sh " + arg)}]}]);
@@ -308,11 +346,12 @@ fi
 # Codex の接続先 (--codex-auth bedrock など)。前回の起動で書いたもの (スナップショットから戻る) を消してから書き直す
 sed -i '/^# pmva:provider begin/,/^# pmva:provider end/d' "$codex_cfg"
 if [ -n "$CODEX_PROVIDER" ]; then
-  if grep -qE "^(model_provider *=|\\[model_providers\\.$CODEX_PROVIDER_ID)" "$codex_cfg"; then
+  # custom (codexConfig) は利用者が書いた設定なので、重なりの確認はしない
+  if [ -n "$CODEX_PROVIDER_ID" ] && grep -qE "^(model_provider *=|\\[model_providers\\.$CODEX_PROVIDER_ID)" "$codex_cfg"; then
     warn "codex model_provider is already set in config.toml; --codex-auth $CODEX_AUTH was not applied"
   else
     { echo "# pmva:provider begin (mvm up --codex-auth $CODEX_AUTH が起動のたびに書き直す)"
-      echo "model_provider = \"$CODEX_PROVIDER_ID\""
+      [ -z "$CODEX_PROVIDER_ID" ] || echo "model_provider = \"$CODEX_PROVIDER_ID\""
       echo "$CODEX_PROVIDER"
       echo "# pmva:provider end"
       cat "$codex_cfg"; } > "$codex_cfg.tmp"

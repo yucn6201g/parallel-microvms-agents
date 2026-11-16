@@ -51,6 +51,9 @@ def load_supervisor():
 class AgentE2ETest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        # 一時フォルダは、各テストが addCleanup で止めるエージェント (tmux など) より後に消す
+        # (addCleanup は登録の逆順で、tearDown より後に動く)
+        self.addCleanup(self.remove_tmp)
         t = Path(self.tmp.name)
         self.home, self.work = t / "home", t / "work"
         for d in (self.home / ".claude", self.home / ".codex", self.home / ".pmva", self.work):
@@ -58,7 +61,14 @@ class AgentE2ETest(unittest.TestCase):
         subprocess.run(["git", "init", "-q", str(self.work)], check=True)
         self.sup = load_supervisor()
 
-    def tearDown(self):
+    def remove_tmp(self):
+        # 止めた直後のエージェントが終了処理で ~/.claude などに書き込むことがあるので、少し待ってやり直す
+        for _ in range(10):
+            try:
+                self.tmp.cleanup()
+                return
+            except OSError:
+                time.sleep(0.5)
         self.tmp.cleanup()
 
     def agent_env(self, **extra):
