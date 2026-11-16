@@ -733,6 +733,52 @@ class SupervisorTest(unittest.TestCase):
         cfg, _ = self.codex_config()
         self.assertNotIn("model_provider", cfg)
 
+    def test_claude_custom_auth(self):
+        self.add_secret("pmva/claude-custom-auth", json.dumps({
+            "env": {"ANTHROPIC_BASE_URL": "https://gw.example.com", "CLAUDE_CODE_CLIENT_CERT": "{{files}}/client.pem",
+                    "ANTHROPIC_CUSTOM_HEADERS": "X-A: 1\nX-B: 'q'"},
+            "files": {"client.pem": "-----BEGIN CERTIFICATE-----\nx\n", "key.sh": "#!/bin/sh\necho k\n"},
+            "claudeSettings": {"apiKeyHelper": "sh {{files}}/key.sh", "env": {"X_SETTING": "1"}}}))
+        st = self.run_session(claudeAuth="custom", claudeSecret="pmva/claude-custom-auth")
+        self.assertEqual(st["bootstrap"], "ready")
+        files = self.home / ".pmva" / "secrets" / "claude-custom"
+        self.assertEqual(self.env_value("ANTHROPIC_BASE_URL"), "https://gw.example.com")
+        self.assertEqual(self.env_value("CLAUDE_CODE_CLIENT_CERT"), f"{files}/client.pem")
+        self.assertEqual(self.env_value("ANTHROPIC_CUSTOM_HEADERS"), "X-A: 1\nX-B: 'q'")
+        self.assertEqual((files / "client.pem").read_text(encoding="utf-8"), "-----BEGIN CERTIFICATE-----\nx\n")
+        self.assertEqual(self.mode(files / "key.sh"), "0o600")
+        settings = json.loads((self.home / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        self.assertEqual(settings["apiKeyHelper"], f"sh {files}/key.sh")
+        self.assertEqual(settings["env"], {"X_SETTING": "1"})
+        self.assertIn("Stop", settings["hooks"], "pmva のフックは残る")
+
+    def test_codex_custom_auth(self):
+        self.add_secret("pmva/codex-custom-auth", json.dumps({
+            "env": {"MY_GATEWAY_KEY": "k-123"}, "files": {"token": "tok"},
+            "codexConfig": 'model_provider = "corp"\nmodel_providers.corp.name = "corp"\n'
+                           'model_providers.corp.base_url = "https://corp.example.com/v1"\n'
+                           'model_providers.corp.auth = { command = "cat", args = ["{{files}}/token"] }\n'}))
+        st = self.run_session(agent="codex", codexAuth="custom", codexSecret="pmva/codex-custom-auth")
+        self.assertEqual(st["bootstrap"], "ready")
+        self.assertEqual(self.env_value("MY_GATEWAY_KEY"), "k-123")
+        cfg, text = self.codex_config()
+        files = self.home / ".pmva" / "secrets" / "codex-custom"
+        self.assertEqual(cfg["model_provider"], "corp")
+        self.assertEqual(cfg["model_providers"]["corp"]["auth"]["args"], [f"{files}/token"])
+        self.assertTrue(cfg["notify"][0].endswith("notify.sh"))
+        self.assertIn("# pmva:provider begin", text)
+
+    def test_custom_auth_rejects_bad_names(self):
+        self.add_secret("pmva/claude-custom-auth", json.dumps({
+            "env": {"PATH": "/evil", "bad-name": "x", "OK_NAME": "1"}, "files": {"../escape": "x", "ok.txt": "1"}}))
+        st = self.run_session(claudeAuth="custom", claudeSecret="pmva/claude-custom-auth")
+        self.assertIn("custom auth: skipped env PATH", st["bootstrap"])
+        self.assertIn("custom auth: skipped env bad-name", st["bootstrap"])
+        self.assertIn("custom auth: skipped file ../escape", st["bootstrap"])
+        self.assertEqual(self.env_value("OK_NAME"), "1")
+        self.assertFalse((self.home / ".pmva" / "secrets" / "escape").exists())
+        self.assertTrue((self.home / ".pmva" / "secrets" / "claude-custom" / "ok.txt").exists())
+
     def test_claude_key_for_bedrock_warns_when_codex_uses_role(self):
         self.add_secret("pmva/claude-bedrock-api-key", "claude-bedrock-key")
         st = self.run_session(agent="both", region="ap-northeast-1", claudeAuth="bedrock-api-key",

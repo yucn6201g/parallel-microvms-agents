@@ -1046,6 +1046,27 @@ class CliTest(unittest.TestCase):
         self.assertIn("at-", err)
         self.mvm("secret", "set", "codex-access-token", input=b"at-test")
 
+    def test_custom_auth(self):
+        self.mvm("up", "u1", "--agent", "both", "--claude-auth", "custom", "--codex-auth", "custom")
+        u1 = self.payloads()[0]
+        self.assertEqual((u1["claudeSecret"], u1["codexSecret"]), ("pmva/claude-custom-auth", "pmva/codex-custom-auth"))
+        good = {"env": {"A_B": "1"}, "files": {"cert.pem": "x"}, "claudeSettings": {"apiKeyHelper": "sh {{files}}/k.sh"}}
+        self.mvm("secret", "set", "claude-custom-auth", input=json.dumps(good).encode())
+        self.mvm("secret", "set", "codex-custom-auth", input=json.dumps({"codexConfig": 'model_provider = "x"\n'}).encode())
+        for kind, bad in (("claude-custom-auth", {"env": {"PATH": "/x"}}),
+                          ("claude-custom-auth", {"env": {"bad-name": "x"}}),
+                          ("claude-custom-auth", {"env": {"A": 1}}),
+                          ("claude-custom-auth", {"files": {"../x": "y"}}),
+                          ("claude-custom-auth", {"files": {".hidden": "y"}}),
+                          ("claude-custom-auth", {"codexConfig": "x = 1"}),
+                          ("codex-custom-auth", {"claudeSettings": {}}),
+                          ("codex-custom-auth", {"codexConfig": ["x"]}),
+                          ("codex-custom-auth", {"unknown": 1}),
+                          ("codex-custom-auth", ["not", "object"])):
+            rc, _, err = self.mvm("secret", "set", kind, input=json.dumps(bad).encode(), check=False)
+            self.assertNotEqual(rc, 0, (kind, bad))
+            self.assertIn("auth.md", err, (kind, bad))
+
     def test_setup_options_in_payload(self):
         self.mvm("up", "s1")
         self.mvm("up", "s2", "--no-setup")

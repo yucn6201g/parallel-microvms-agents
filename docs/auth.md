@@ -22,6 +22,7 @@ mvm up a3 --agent both   --claude-auth oauth-token --codex-auth api-key   # 1 �
 | API キー (従量) で使う | `api-key` / `anthropic-aws-api-key` | `api-key` |
 | 社内の LLM ゲートウェイ、LiteLLM、Azure OpenAI などを通す | `gateway` | `gateway` |
 | VM の中で、手元のブラウザを使ってログインする | `interactive` + `mvm login` | `interactive` + `mvm login` |
+| 上のどれにも当てはまらない (エージェントの環境変数や設定を自分で書く) | `custom` | `custom` |
 
 `bedrock`、`mantle`、`anthropic-aws`、Codex の `bedrock` は、MicroVM の実行ロールの権限で呼びます。シークレットの登録は要りません。
 
@@ -37,6 +38,7 @@ mvm up a3 --agent both   --claude-auth oauth-token --codex-auth api-key   # 1 �
 | `anthropic-aws` | Claude Platform on AWS (AWS Marketplace 請求) | 不要 (実行ロールを使用) | `CLAUDE_CODE_USE_ANTHROPIC_AWS=1`、`ANTHROPIC_AWS_WORKSPACE_ID` |
 | `anthropic-aws-api-key` | Claude Platform on AWS | `anthropic-aws-api-key` | 上に加えて `ANTHROPIC_AWS_API_KEY` |
 | `gateway` | 社内 LLM ゲートウェイ / プロキシ | `anthropic-gateway` (JSON) | `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN` |
+| `custom` | 書いた設定による | `claude-custom-auth` (JSON) | 環境変数、ファイル、`~/.claude/settings.json` ([下記](#どの方式にも当てはまらないとき-custom)) |
 | `interactive` | 任意 | 不要 | 起動後に手元から `mvm login <name> claude` ([下記](#vm-の中でログインする-mvm-login)) |
 
 ### サブスクリプション (oauth-token)
@@ -145,6 +147,7 @@ mvm secret set anthropic-gateway --file gateway.json
 | `bedrock` | Amazon Bedrock の OpenAI のモデル (AWS 請求) | 不要 (実行ロールを使用) | `~/.codex/config.toml` の `model_provider = "amazon-bedrock"` |
 | `bedrock-api-key` | Amazon Bedrock (キーを発行した AWS アカウントに請求) | `codex-bedrock-api-key` | 上に加えて、キーをファイルから読む設定 |
 | `gateway` | 接続先による (LiteLLM、Azure OpenAI、社内ゲートウェイなど) | `codex-gateway` (JSON) | `~/.codex/config.toml` の `model_provider = "pmva-gateway"` |
+| `custom` | 書いた設定による | `codex-custom-auth` (JSON) | 環境変数、ファイル、`~/.codex/config.toml` ([下記](#どの方式にも当てはまらないとき-custom)) |
 | `interactive` | 任意 | 不要 | 起動後に手元から `mvm login <name> codex` ([下記](#vm-の中でログインする-mvm-login)) |
 
 ### API キー
@@ -201,6 +204,81 @@ mvm up c1 --agent codex --codex-auth gateway --codex-args "--model <接続先の
 
 - VM の中では、`~/.codex/config.toml` の先頭の `# pmva:provider begin` 〜 `end` に接続先 (`pmva-gateway`) を書きます。キーは `config.toml` に書かず、`Authorization: Bearer` なら `~/.pmva/secrets/` のファイルから、`apiKeyHeader` なら環境変数 `PMVA_CODEX_GATEWAY_KEY` から渡します
 - 接続先が Responses API に対応している必要があります (Codex 0.165.0 は Chat Completions API には対応していません)
+
+## どの方式にも当てはまらないとき (custom)
+
+エージェントが対応していても上の一覧にない方式や、エージェントの新しい版で増えた方式は、`custom` で使えます。エージェントに渡す環境変数、ファイル、設定を JSON に書いて登録します。
+
+```json
+{
+  "env":   {"環境変数の名前": "値"},
+  "files": {"ファイル名": "中身"},
+  "claudeSettings": {"~/.claude/settings.json に足す設定": "..."},
+  "codexConfig": "~/.codex/config.toml に足す TOML"
+}
+```
+
+| 項目 | 意味 |
+|---|---|
+| `env` | 環境変数。`~/.pmva/env.sh` に書き、エージェントとシェルが読む。`PATH`、`HOME`、`LANG`、`PMVA_*` など VM の動作に要るものは使えない |
+| `files` | ファイル。`~/.pmva/secrets/claude-custom/` (Codex は `codex-custom/`) に権限 600 で置く。証明書や鍵、キーを返すスクリプトなどに使う。スナップショットには含めない |
+| `claudeSettings` | Claude Code だけ (`claude-custom-auth`)。`~/.claude/settings.json` に足す (`apiKeyHelper`、`awsAuthRefresh`、`env` など)。pmva のフックは消えない |
+| `codexConfig` | Codex だけ (`codex-custom-auth`)。`~/.codex/config.toml` の先頭の `# pmva:provider begin` 〜 `end` に書く (`model_provider`、`model_providers.<名前>.*` などのトップレベルのキー) |
+
+`env`、`claudeSettings`、`codexConfig` の値の中の `{{files}}` は、ファイルを置いた場所に置き換わります。JSON をファイルに書いて登録し、登録後はファイルを消してください。
+
+```bash
+mvm secret set claude-custom-auth --file claude-auth.json
+mvm up a1 --claude-auth custom
+mvm secret set codex-custom-auth --file codex-auth.json
+mvm up c1 --agent codex --codex-auth custom
+```
+
+例: Bedrock の通常の入口 (Invoke API) と Mantle を 1 つのセッションで使う
+
+```json
+{"env": {"CLAUDE_CODE_USE_BEDROCK": "1", "CLAUDE_CODE_USE_MANTLE": "1", "AWS_REGION": "us-east-1"}}
+```
+
+例: クライアント証明書 (mTLS) と追加のヘッダーが要る社内ゲートウェイ
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://llm-gateway.example.com",
+    "ANTHROPIC_AUTH_TOKEN": "...",
+    "ANTHROPIC_CUSTOM_HEADERS": "X-Team: platform",
+    "CLAUDE_CODE_CLIENT_CERT": "{{files}}/client.pem",
+    "CLAUDE_CODE_CLIENT_KEY": "{{files}}/client.key"
+  },
+  "files": {"client.pem": "-----BEGIN CERTIFICATE-----\n...", "client.key": "-----BEGIN PRIVATE KEY-----\n..."}
+}
+```
+
+例: 短い時間で切れるキーを、スクリプトで取り直す (Claude Code の `apiKeyHelper`)
+
+```json
+{
+  "files": {"key.sh": "#!/bin/sh\naws secretsmanager get-secret-value --secret-id pmva/claude-rotating --query SecretString --output text\n"},
+  "claudeSettings": {"apiKeyHelper": "sh {{files}}/key.sh"}
+}
+```
+
+例: Codex を、Responses API に対応した独自の接続先で使う (キーは環境変数から)
+
+```json
+{
+  "env": {"CORP_LLM_KEY": "..."},
+  "codexConfig": "model_provider = \"corp\"\nmodel = \"corp-model\"\nmodel_providers.corp.name = \"corp\"\nmodel_providers.corp.base_url = \"https://llm.example.com/v1\"\nmodel_providers.corp.env_key = \"CORP_LLM_KEY\"\n"
+}
+```
+
+注意:
+
+- 書いた設定が正しいかは、エージェントが起動してから分かります。うまく動かないときは `mvm ssh` で接続し、エージェントのエラーや `~/.pmva/bootstrap.log` を確認してください
+- `claudeSettings` は `~/.claude/settings.json` に残り、スナップショットにも含まれます。キーなどの秘密の値は `claudeSettings` に直接書かず、`files` や `env` に入れてください。別の方式で起動し直しても、足した設定は残ります
+- `codexConfig` はトップレベルのキーだけを書いてください (`[テーブル]` を書くと、その後ろにある利用者の設定がテーブルの中に入ってしまいます)。`model_providers.corp.name = ...` のように、ドットでつないだ名前で書けます
+- 実行ロールが読めるシークレットは、Claude Code は `anthropic-` / `claude-`、Codex は `openai-` / `codex-` で始まる名前だけです (`{{files}}` のスクリプトから Secrets Manager を読む場合も同じ)
 
 ## VM の中でログインする (mvm login)
 
