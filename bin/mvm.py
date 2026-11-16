@@ -61,7 +61,7 @@ DEFAULTS = {
     "GIT_USER_NAME": "", "GIT_USER_EMAIL": "", "SSH_PUBLIC_KEY_FILE": "~/.ssh/id_ed25519.pub",
     "BUDGET_MONTHLY_USD": "0", "BUDGET_EMAIL": "", "KEEPALIVE_RATE_MINUTES": "5", "KEEPALIVE_ACTIVE_SECONDS": "900",
     "NOTIFY_WEBHOOK": "false", "NIGHTLY_STOP_TIME": "", "NIGHTLY_STOP_TIMEZONE": "Asia/Tokyo",
-    "INFRA_TEMPLATE": "full",
+    "INFRA_TEMPLATE": "full", "SETUP_TIMEOUT_SECONDS": "1800", "IMAGE_BROWSER_DEPS": "true", "IMAGE_EXTRA_PACKAGES": "",
 }
 # mvm infra deploy で使う CloudFormation テンプレート。minimal は mvm の動作に必要なリソースだけ
 # (キープアライブ、毎晩の自動停止、予算アラートを含まない)
@@ -1024,10 +1024,30 @@ def cmd_secret(args):
 
 # ---------------------------------------------------------------- image
 
+def image_build_args():
+    """config.env の値で書き換える Dockerfile の ARG。"""
+    conf = {k: C.get(k, DEFAULTS[k]) for k in ("IMAGE_EXTRA_PACKAGES", "IMAGE_BROWSER_DEPS")}
+    packages = " ".join(conf["IMAGE_EXTRA_PACKAGES"].split())
+    if packages and not re.fullmatch(r"[A-Za-z0-9._+-]+( [A-Za-z0-9._+-]+)*", packages):
+        die(f"IMAGE_EXTRA_PACKAGES はパッケージ名を空白で区切って書いてください: {conf['IMAGE_EXTRA_PACKAGES']}")
+    return {"INSTALL_BROWSER_DEPS": "true" if as_bool(conf["IMAGE_BROWSER_DEPS"]) else "false", "EXTRA_PACKAGES": packages}
+
+
+def apply_build_args(dockerfile, values):
+    text = dockerfile.decode("utf-8")
+    for key, value in values.items():
+        text, n = re.subn(rf"^ARG {key}=.*$", lambda _m: f"ARG {key}={value}", text, flags=re.M)
+        if n != 1:
+            die(f"image/Dockerfile に ARG {key}= の行が見つかりません")
+    return text.encode("utf-8")
+
+
 def build_artifact_zip(dest):
-    """image/ を zip にする。Windows で clone した場合に備え、改行を LF に、実行権限を付けて格納する。"""
+    """image/ を zip にする。Windows で clone した場合に備え、改行を LF に、実行権限を付けて格納する。
+    Dockerfile の一部の ARG は config.env の値に書き換える (Lambda MicroVMs のビルドには引数を渡せないため)。"""
     src = ROOT / "image"
-    executables = {"supervisor.py", "bootstrap.sh", "snapshot.sh", "notify.sh", "agent-attach"}
+    executables = {"supervisor.py", "bootstrap.sh", "snapshot.sh", "notify.sh", "agent-attach", "pmva-node"}
+    build_args = image_build_args()
     with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
         for p in sorted(src.rglob("*")):
             if p.is_dir() or "__pycache__" in p.parts or p.suffix == ".pyc" or p.name == ".DS_Store":
@@ -1036,7 +1056,10 @@ def build_artifact_zip(dest):
             info = zipfile.ZipInfo(rel, date_time=time.localtime(p.stat().st_mtime)[:6])
             info.external_attr = (0o100755 if p.name in executables else 0o100644) << 16
             info.compress_type = zipfile.ZIP_DEFLATED
-            z.writestr(info, p.read_bytes().replace(b"\r\n", b"\n"))
+            data = p.read_bytes().replace(b"\r\n", b"\n")
+            if rel == "Dockerfile":
+                data = apply_build_args(data, build_args)
+            z.writestr(info, data)
 
 
 # Dockerfile の ARG 名 → npm パッケージ名。イメージには ARG に書いた版がそのまま入る
@@ -1275,6 +1298,8 @@ def build_payload(name, a):
         "snapshotBucket": bucket, "snapshotIntervalSeconds": int(C["SNAPSHOT_INTERVAL_SECONDS"]),
         "sshPublicKey": ssh_key,
         "notifySecret": f"{prefix}/notify-webhook" if notify else "",
+        "setupTimeoutSeconds": int(C["SETUP_TIMEOUT_SECONDS"]),
+        "skipSetup": "true" if a.no_setup else "",
     }
     return {k: v for k, v in payload.items() if v != ""}
 
@@ -1986,7 +2011,36 @@ def cmd_view(args):
     return attach_tmux(args.name, ["agent-attach", "--view", window], args.no_reconnect)
 
 
-def attach_tmux(name, remote, no_reconnect):
+def parse_forward(spec):
+    """「3000」「8080:3000」(手元のポート:VM のポート) を (手元, VM) にする。"""
+    m = re.fullmatch(r"(?:(\d+):)?(\d+)", spec)
+    if not m or not all(0 < int(x) < 65536 for x in m.groups() if x):
+        die(f"ポートの指定が正しくありません: {spec} (例: 3000 または 8080:3000)")
+    return int(m.group(1) or m.group(2)), int(m.group(2))
+
+
+def cmd_forward(args):
+    """VM の中のポート (開発サーバーなど) を、手元の PC のポートにつなぐ。"""
+    pairs = [parse_forward(spec) for spec in args.ports]
+    for local, remote in pairs:
+        with socket.socket() as sock:
+            try:
+                sock.bind(("127.0.0.1", local))
+            except OSError:
+                die(f"手元のポート {local} は使われています。別のポートを指定してください (例: {local + 1}:{remote})")
+    forwards = []
+    for local, remote in pairs:
+        forwards += ["-L", f"127.0.0.1:{local}:127.0.0.1:{remote}"]
+        log(f"http://localhost:{local}/ → {args.name} のポート {remote}")
+    log("Ctrl-C で終了します (つないでいる間、この VM はサスペンドされません)")
+    try:
+        return attach_tmux(args.name, None, args.no_reconnect,
+                           extra=["-N", "-o", "ExitOnForwardFailure=yes", *forwards])
+    except KeyboardInterrupt:
+        return 0
+
+
+def attach_tmux(name, remote, no_reconnect, extra=None):
     ssh = ssh_binary(name)
     host = f"agent@pmva-{name}"
     # tmux へのアタッチは、接続が切れたら (ssh の終了コード 255) 自動でつなぎ直す。
@@ -1994,7 +2048,9 @@ def attach_tmux(name, remote, no_reconnect):
     failures = 0
     while True:
         started = time.time()
-        rc = subprocess.call([ssh, *ssh_options(name), "-t", host, *remote])
+        command = [ssh, *ssh_options(name), *(extra or []), host] if remote is None else \
+            [ssh, *ssh_options(name), "-t", host, *remote]
+        rc = subprocess.call(command)
         if rc != 255 or no_reconnect:
             return rc
         failures = 1 if time.time() - started > 60 else failures + 1
@@ -2125,6 +2181,7 @@ def add_up_options(p):
     p.add_argument("--bedrock-region")
     p.add_argument("--idle", help="アイドルでサスペンドするまでの秒数。off で無効")
     p.add_argument("--max-duration", help="最大寿命 (秒、上限 28800)")
+    p.add_argument("--no-setup", action="store_true", help="リポジトリの .pmva/setup.sh を実行しない")
     p.add_argument("--notify", dest="notify", action="store_true", default=None,
                    help="完了・入力待ちを <prefix>/notify-webhook の URL に通知する")
     p.add_argument("--no-notify", dest="notify", action="store_false", help="通知しない")
@@ -2204,6 +2261,11 @@ def build_parser():
     x.add_argument("--once", action="store_true", help="直前の出来事を表示して終わる")
     x.add_argument("--json", action="store_true", help="1 行に 1 件の JSON で出力")
     x.set_defaults(func=cmd_follow)
+    x = sub.add_parser("forward", help="VM の中のポート (開発サーバーなど) を手元の PC のポートにつなぐ")
+    x.add_argument("name")
+    x.add_argument("ports", nargs="+", metavar="port", help="VM のポート (例: 3000)。手元のポートを変えるときは 8080:3000")
+    x.add_argument("--no-reconnect", action="store_true", help="接続が切れても再接続しない")
+    x.set_defaults(func=cmd_forward)
     x = sub.add_parser("view", help="エージェントの画面を読み取り専用で表示 (入力はエージェントに届かない)")
     x.add_argument("name")
     x.add_argument("--window", help="表示するウィンドウ (claude / codex / shell)")

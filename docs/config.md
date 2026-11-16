@@ -32,6 +32,8 @@
 | `IMAGE_NAME` | `pmva-agent` | image build | MicroVM イメージの名前 |
 | `BASE_IMAGE_ARN` | (空) | image build | ベースイメージ。空なら `arn:aws:lambda:<リージョン>:aws:microvm-image:al2023-1` |
 | `MEMORY_MIB` | `4096` | image build | 1 台のメモリ (MiB)。2GB あたり 1 vCPU (4096 = 2 vCPU)。重いビルドなら `8192`。クォータの計算にも使う |
+| `IMAGE_BROWSER_DEPS` | `true` | image build | Chromium (Playwright / Puppeteer) を動かすライブラリと日本語フォントを入れる。ブラウザを使わないなら `false` でイメージが小さくなる |
+| `IMAGE_EXTRA_PACKAGES` | (空) | image build | イメージに追加する Amazon Linux 2023 のパッケージ (空白区切り)。MicroVM の中では root になれないので、DB などはここで入れる。例: `postgresql16-server valkey sqlite` |
 
 ## 並列数とライフサイクル
 
@@ -44,6 +46,7 @@
 | `IDLE_AUTO_RESUME` | `true` | 起動時 | 通信が来たら自動で再開する |
 | `INGRESS_CONNECTORS` | `"HTTP_INGRESS SHELL_INGRESS"` | 起動時 | 受信の接続口。`SHELL_INGRESS` を外すと `mvm shell` とコンソールの Connect が使えなくなる |
 | `SNAPSHOT_INTERVAL_SECONDS` | `1800` | 起動時 | ワークスペースを S3 に保存する間隔。`0` で定期保存しない |
+| `SETUP_TIMEOUT_SECONDS` | `1800` | 起動時 | リポジトリの `.pmva/setup.sh` を打ち切るまでの秒数 ([setup.md](setup.md#リポジトリごとの準備-pmvasetupsh)) |
 | `KEEPALIVE_RATE_MINUTES` | `5` | infra deploy | 作業中の VM を AWS 側から起こし続ける間隔 (分)。`0` で無効。`IDLE_MAX_SECONDS` より十分短くする |
 | `KEEPALIVE_ACTIVE_SECONDS` | `900` | infra deploy | 最後の作業 (画面の変化や CPU の使用) からこの秒数以内なら作業中とみなす |
 | `NIGHTLY_STOP_TIME` | (空) | infra deploy | 毎日この時刻 (`HH:MM`) に全台を保存してから止める。空なら止めない。テンプレートでは `23:00` |

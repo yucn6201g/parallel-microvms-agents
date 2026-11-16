@@ -254,6 +254,37 @@ Windows の注意:
 - Python は python.org 版か `winget` 版を使ってください。Microsoft Store 版の Python は実行ファイルのパスが特殊なため、ssh の ProxyCommand から起動できないことがあります。
 - VS Code Remote-SSH の設定 `remote.SSH.path` は既定 (Windows 標準の OpenSSH) のままで使えます。
 
+## リポジトリごとの準備 (.pmva/setup.sh)
+
+リポジトリに `.pmva/setup.sh` を置くと、VM の起動時 (clone の後、エージェントを起動する前) に実行します。依存関係のインストールやブラウザの用意をここに書いておくと、エージェントがすぐにテストを動かせます。
+
+```bash
+# .pmva/setup.sh の例 (bash で実行。作業ディレクトリはリポジトリの直下)
+set -e
+pmva-node install          # .node-version / .nvmrc の版の Node.js (なければイメージの Node.js 22 のまま)
+npm ci
+npx playwright install chromium   # ブラウザを使うテストがあるとき (ライブラリと日本語フォントはイメージに入っている)
+uv sync                    # Python: pyproject.toml の依存関係と、指定の版の Python を入れる
+```
+
+- **起動のたびに実行する**: 保存したワークスペースには `node_modules`、`.venv`、`~/.cache` を含めない (保存と復元を軽くするため) ので、`--restore` で戻したときも実行します。何度実行しても同じ結果になるように書きます (`npm ci`、`uv sync` など)
+- **時間の上限**: `SETUP_TIMEOUT_SECONDS` (既定 1800 秒)。準備の間、`mvm peek` には `bootstrap=setup` と表示され、`mvm wait` は待ち続けます
+- **失敗しても、エージェントは起動します**: `mvm peek` に `ready (warnings: setup.sh failed ...)` と出ます。ログは VM の `~/.pmva/setup.log` です (エージェントに「~/.pmva/setup.log を見て直して」と頼めます)
+- **実行しないとき**: `mvm up <name> --no-setup`
+- **root にはなれません**: VM の中では `sudo` も `dnf` も使えません。OS のパッケージが要るときは、`config.env` の `IMAGE_EXTRA_PACKAGES` に書いて `mvm image build` で入れます (例: `postgresql16-server valkey sqlite`)。DB はエージェントのユーザーのまま起動します (例: `valkey-server --daemonize yes`)
+- 認証情報 (GitHub トークンなど) と同じ環境で動くので、信頼できるリポジトリのスクリプトだけを実行してください (エージェント自身もそのリポジトリのコードを動かします)
+
+### イメージに入っている開発ツール
+
+| ツール | 版 | 用途 |
+|---|---|---|
+| Node.js | 22 (イメージに固定) | 別の版は `pmva-node install <版>` (nodejs.org の公式バイナリを SHASUMS256 で確かめて入れる) |
+| uv | 0.13 系 | Python の版とパッケージ (`uv python install 3.12`、`uv sync`、`uv run pytest`)。OS の Python は 3.9 |
+| Chromium の実行に必要なライブラリと日本語フォント | — | Playwright / Puppeteer の headless の Chromium。`IMAGE_BROWSER_DEPS=false` で外すとイメージが約 450MB 小さくなる |
+| gcc / make、git、gh、jq、tmux | — | |
+
+ブラウザ本体は、プロジェクトが使う Playwright / Puppeteer の版に合わせて `setup.sh` で入れます (`~/.cache` に入り、VM ごとに 1 回)。
+
 ## PC を閉じても作業を続ける (キープアライブ)
 
 MicroVM は、エンドポイントへの受信通信が `IDLE_MAX_SECONDS` (既定 30 分) 無いと一時停止します。エージェントが作業中でも、手元から何も接続していなければ止まってしまうので、AWS 側に「作業中の VM だけを起こし続ける」仕組みを置いています。

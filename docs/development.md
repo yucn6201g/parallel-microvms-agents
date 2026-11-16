@@ -42,6 +42,8 @@ python -m unittest discover -s tests -v
 | `tests/test_supervisor.py` | `supervisor.py` と `bootstrap.sh` などを、パスとポートを差し替えてローカルで動かす結合テスト (認証方式ごとの初期化、送信、作業の判定、通知、保存の中身) | Linux で `tmux` と `jq` があるときだけ |
 | `tests/test_templates.py` | 標準と最小構成のテンプレートで、共通のリソース・出力・パラメータが同じ内容か | すべて |
 | `tests/test_keepalive.py` | テンプレートに書いた Lambda (キープアライブ、毎晩の停止) のコードを取り出し、模擬 API で動かす | すべて |
+| `tests/test_image.py` | `image/Dockerfile` で作った本物のイメージを Docker で動かす (ツール、headless の Chromium と日本語フォント、uv / pmva-node、起動時の初期化と `.pmva/setup.sh`) | Docker があり、ビルドしたイメージを `PMVA_TEST_IMAGE` で指定したときだけ (CI の `image` ワークフロー) |
+| `tests/test_pmva_node.py` | `pmva-node` の版の選び方とチェックサムの確認 (nodejs.org の代わりにローカルのサーバー) | Linux で `jq` があるとき |
 | `tests/test_agents_e2e.py` | 本物の Claude Code / Codex を LLM API の代わり (`tests/mock_llm.py`) につないで動かし、フックによる状態の記録と、会話の記録の読み取りを確かめる | Linux で、エージェントの実行ファイルを `PMVA_E2E_CLAUDE` / `PMVA_E2E_CODEX` で指定したときだけ (CI の `agents-e2e`) |
 | `tests/test_orchestrator_guard.py` | 重い処理を止めるフックが、止めるべきコマンドだけを止めること | すべて |
 | `tests/fixtures/` | 本物のエージェントが書いた会話の記録 (個人情報を除いたもの)。`mvm follow` / `result` の読み取りのテストに使う | — |
@@ -68,7 +70,7 @@ PMVA_E2E_CLAUDE=/tmp/agents/node_modules/.bin/claude PMVA_E2E_CODEX=/tmp/agents/
 CI と同じものを手元で実行できます。
 
 ```bash
-shellcheck -S warning bin/mvm scripts/install.sh image/bootstrap.sh image/snapshot.sh image/notify.sh image/agent-attach
+shellcheck -S warning bin/mvm scripts/install.sh image/bootstrap.sh image/snapshot.sh image/notify.sh image/agent-attach image/pmva-node
 pip install cfn-lint && cfn-lint infra/cloudformation.yaml infra/cloudformation-minimal.yaml
 python -m py_compile bin/mvm.py image/supervisor.py scripts/estimate_cost.py scripts/orchestrator_guard.py tests/*.py
 ```
@@ -82,6 +84,13 @@ python -m py_compile bin/mvm.py image/supervisor.py scripts/estimate_cost.py scr
 - テスト: Windows / macOS (Python 3.9 と 3.13)、Linux (3.13)
 - lint: shellcheck、cfn-lint、Python の構文チェック
 - agents-e2e: `image/Dockerfile` で固定した版の Claude Code / Codex を入れて `tests/test_agents_e2e.py` を動かす。`mvm image update-versions` で版を上げたときに、フックや会話の記録の形式が変わっていないかが分かる
+
+`.github/workflows/image.yml` は、`image/` などを変えたときに、ARM64 のランナーで本物のイメージをビルドして `tests/test_image.py` を動かします (15 分ほど)。Lambda MicroVMs のベースイメージは公開されているので、AWS は使いません。手元で動かすには:
+
+```bash
+docker build -t pmva-agent:test image/
+PMVA_TEST_IMAGE=pmva-agent:test python -m unittest tests.test_image -v
+```
 
 `.github/workflows/agent-versions.yml` は毎週月曜に Claude Code / Codex の新しい版を確認し、あれば Issue を立てます (Actions タブから手動でも実行できます)。
 `.github/dependabot.yml` は、CI で使う GitHub Actions の部品 (`actions/checkout` など) に新しい版が出ると、更新のプルリクエストを作ります。

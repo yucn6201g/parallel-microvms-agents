@@ -281,7 +281,7 @@ class ArtifactZipTest(unittest.TestCase):
             root = Path(d)
             img = root / "image"
             (img / "__pycache__").mkdir(parents=True)
-            (img / "Dockerfile").write_bytes(b"FROM x\r\nRUN true\r\n")
+            (img / "Dockerfile").write_bytes(b"FROM x\r\nARG INSTALL_BROWSER_DEPS=true\r\nARG EXTRA_PACKAGES=\r\nRUN true\r\n")
             (img / "bootstrap.sh").write_bytes(b"#!/bin/bash\r\necho hi\r\n")
             (img / "__pycache__" / "x.pyc").write_bytes(b"\x00\r\n")
             old = mvm.ROOT
@@ -296,6 +296,27 @@ class ArtifactZipTest(unittest.TestCase):
                 self.assertNotIn(b"\r\n", z.read("bootstrap.sh"))
                 self.assertEqual((z.getinfo("bootstrap.sh").external_attr >> 16) & 0o777, 0o755)
                 self.assertEqual((z.getinfo("Dockerfile").external_attr >> 16) & 0o777, 0o644)
+                self.assertEqual(z.read("Dockerfile"), b"FROM x\nARG INSTALL_BROWSER_DEPS=true\nARG EXTRA_PACKAGES=\nRUN true\n")
+
+    def test_config_is_written_into_dockerfile(self):
+        """Lambda MicroVMs のビルドには引数を渡せないので、config.env の値を Dockerfile の ARG に書き込む。"""
+        saved = dict(mvm.C)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                mvm.C.update(IMAGE_BROWSER_DEPS="false", IMAGE_EXTRA_PACKAGES="  postgresql16-server   valkey ")
+                mvm.build_artifact_zip(Path(d) / "a.zip")
+                with zipfile.ZipFile(Path(d) / "a.zip") as z:
+                    dockerfile = z.read("Dockerfile").decode("utf-8")
+                    self.assertEqual((z.getinfo("pmva-node").external_attr >> 16) & 0o777, 0o755)
+                self.assertIn("\nARG INSTALL_BROWSER_DEPS=false\n", dockerfile)
+                self.assertIn("\nARG EXTRA_PACKAGES=postgresql16-server valkey\n", dockerfile)
+                for bad in ("x; rm -rf /", "$(id)", "pkg|evil", "a&&b"):
+                    mvm.C["IMAGE_EXTRA_PACKAGES"] = bad
+                    with self.assertRaises(SystemExit):
+                        mvm.build_artifact_zip(Path(d) / "b.zip")
+        finally:
+            mvm.C.clear()
+            mvm.C.update(saved)
 
     def test_repo_image_has_no_crlf(self):
         # .gitattributes で LF に固定していることの確認 (Windows で checkout しても壊れない)
@@ -853,6 +874,46 @@ class CliTest(unittest.TestCase):
             self.assertIn("古いイメージ", out)
         finally:
             api.shutdown()
+
+    def fake_ssh(self):
+        fake = Path(self.tmp.name) / "fakessh"
+        fake.mkdir(exist_ok=True)
+        record = Path(self.tmp.name) / "ssh-args.json"
+        script = fake / "fake_ssh.py"
+        script.write_text(f"import json, sys\nopen({str(record)!r}, 'w').write(json.dumps(sys.argv[1:]))\n", encoding="utf-8")
+        if IS_WINDOWS:
+            (fake / "ssh.cmd").write_text(f'@"{sys.executable}" "{script}" %*\r\n', encoding="utf-8")
+        else:
+            (fake / "ssh").write_text(f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n', encoding="utf-8")
+            (fake / "ssh").chmod(0o755)
+        return dict(self.env, PATH=str(fake) + os.pathsep + self.env["PATH"]), record
+
+    def test_forward_ports(self):
+        env, record = self.fake_ssh()
+        self.mvm("up", "f1", env=env)
+        _, _, err = self.mvm("forward", "f1", "3000", "18080:8080", env=env)
+        args = json.loads(record.read_text(encoding="utf-8"))
+        self.assertEqual(args[-8:], ["-N", "-o", "ExitOnForwardFailure=yes", "-L", "127.0.0.1:3000:127.0.0.1:3000",
+                                     "-L", "127.0.0.1:18080:127.0.0.1:8080", "agent@pmva-f1"][-8:])
+        self.assertIn("http://localhost:18080/ → f1 のポート 8080", err)
+        for bad in ("abc", "0", "70000", "1:2:3"):
+            rc, _, err = self.mvm("forward", "f1", bad, env=env, check=False)
+            self.assertNotEqual(rc, 0, bad)
+            self.assertIn("ポートの指定が正しくありません", err)
+        with socket.socket() as busy:
+            busy.bind(("127.0.0.1", 0))
+            busy.listen()
+            port = busy.getsockname()[1]
+            rc, _, err = self.mvm("forward", "f1", f"{port}:3000", env=env, check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn(f"手元のポート {port} は使われています", err)
+
+    def test_setup_options_in_payload(self):
+        self.mvm("up", "s1")
+        self.mvm("up", "s2", "--no-setup")
+        p1, p2 = self.payloads()
+        self.assertEqual((p1["setupTimeoutSeconds"], "skipSetup" in p1), (1800, False))
+        self.assertEqual(p2["skipSetup"], "true")
 
     def test_view_attaches_read_only(self):
         fake = Path(self.tmp.name) / "fakessh"

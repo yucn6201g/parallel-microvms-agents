@@ -162,6 +162,9 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 - [x] 司令塔 (`mvm orchestrator install`): 固定した版の Claude Code / Codex が skill を読み込むこと、Claude Code の `--dir` のフックが `npm test` を止めること、確認用の `mvm` コマンドが許可を求めずに実行されること (入れる前は「This command requires approval」) を確認 (`tests/test_agents_e2e.py`)
 - [ ] 実際の LLM が skill に従って、タスクを分け、起動の了承を求め、`wait` / `result` で進めること: 未確認 (MicroVM と LLM の両方が要る)
 - [ ] Codex の `workspace-write` サンドボックスで `mvm` が動く設定 (`network_access`、`writable_roots`): 未確認。開発に使った環境ではサンドボックスが効かず、書き込みの制限を確かめられなかった
+- [x] イメージ (`image/Dockerfile`): 公開されているベースイメージで、Docker でビルドして動かした (amd64 は開発環境、ARM64 は CI の `image` ワークフロー)。headless の Chromium (Playwright 1.64.1) が日本語フォントで表示できること、uv で Python 3.12、`pmva-node` で Node.js 20、run フックから `.pmva/setup.sh` → エージェントの起動まで通ることを確認
+  - Chromium のライブラリは GTK なしで足りる (headless の Chromium は GTK を使わない)。外すとイメージが約 290MB 小さくなった
+- [ ] Lambda MicroVMs の上でのイメージのビルド (`mvm image build`) と、ブラウザ・`setup.sh` の動作: 未確認
 - [ ] MicroVM の上での `mvm wait` / `result` / `follow` / `view` / `top`: 未確認 (イメージの作り直しが必要)。Codex の対話モード (tmux の中) での `notify` も未確認 (`codex exec` では確認済み)
 - [ ] メモリ不足による強制終了の検出 (`/proc/vmstat` の `oom_kill`): 自動テストでファイルを差し替えて確認したのみ。MicroVM のカーネルでこの値が使えるかは未確認
 
