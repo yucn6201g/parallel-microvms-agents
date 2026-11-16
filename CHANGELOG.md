@@ -13,6 +13,7 @@
 - `mvm follow`: エージェントの推論の過程 (指示・思考・ツールの実行と結果・応答) を、会話の記録から流れるように表示する。複数台をまとめて表示でき、`--json` で 1 行に 1 件の JSON も出せる
 - `mvm view`: エージェントの画面を読み取り専用で表示する (入力はエージェントに届かない)
 - `mvm top`: VM のメモリの使用量と、多く使っているプロセスを表示する。メモリ不足でプロセスが強制終了されたら `top` / `peek` に表示し、通知も送る
+- `mvm orchestrator install claude|codex`: 手元の Claude Code / Codex を司令塔にする。MicroVM に作業を任せる skill (`mvm-orchestrator`)、確認用の `mvm` コマンドの許可、`--dir` ではそのフォルダで重い処理 (npm / pytest / ビルド / ブラウザ) を止めるフックを入れる ([docs/orchestrator.md](docs/orchestrator.md))
 - CI の `agents-e2e`: 固定した版の Claude Code / Codex を LLM API の代わりにつないで動かし、フックと会話の記録の読み取りを確かめる
 
 ### 変更

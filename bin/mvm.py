@@ -15,7 +15,9 @@ import getpass
 import hashlib
 import json
 import os
+import re
 import select
+import shlex
 import shutil
 import socket
 import ssl
@@ -1671,6 +1673,140 @@ def cmd_top(args):
     return 0
 
 
+# ---------------------------------------------------------------- 手元のエージェントを司令塔にする
+
+ORCH_SKILL = "mvm-orchestrator"
+ORCH_READONLY = ("ls", "peek", "wait", "result", "follow", "top", "doctor")   # 確認なしで実行してよいコマンド
+ORCH_BEGIN = "<!-- pmva:orchestrator (mvm orchestrator install が書いた部分。消すときは mvm orchestrator uninstall) -->"
+ORCH_END = "<!-- /pmva:orchestrator -->"
+ORCH_AGENTS_MD = """## この PC は司令塔
+
+- 依存関係のインストール、ビルド、テスト、開発サーバー、ブラウザなどの重い処理は、この PC で動かさない。
+  mvm-orchestrator の skill に従って、MicroVM のエージェントに任せる (この PC の RAM を使わないため)
+- どうしてもこの PC で動かす必要があるときは、理由をユーザーに説明して了承を得てから動かす"""
+
+
+def quote_path(path):
+    text = Path(path).as_posix()
+    return f'"{text}"' if IS_WINDOWS or " " in text else shlex.quote(text)
+
+
+def mvm_invocation():
+    """手元のエージェントが mvm を呼ぶときのコマンド。エイリアスはエージェントのシェルでは使えないので、絶対パスにする。"""
+    if IS_WINDOWS:
+        return f"{quote_path(sys.executable)} {quote_path(SCRIPT)}"
+    return quote_path(ROOT / "bin" / "mvm")
+
+
+def guard_command():
+    return f"{quote_path(sys.executable)} {quote_path(ROOT / 'scripts' / 'orchestrator_guard.py')}"
+
+
+def is_orchestrator_rule(rule):
+    return isinstance(rule, str) and bool(re.match(r'^Bash\(.*(bin/mvm|mvm\.py)"? (' + "|".join(ORCH_READONLY) + r'):\*\)$', rule))
+
+
+def is_guard_entry(entry):
+    return isinstance(entry, dict) and any("orchestrator_guard.py" in str(h.get("command", ""))
+                                           for h in entry.get("hooks") or [] if isinstance(h, dict))
+
+
+def update_json(path, change):
+    """JSON の設定ファイルを読み、change で書き換えて保存する。壊れたファイルは上書きしない。"""
+    data = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8") or "{}")
+        except ValueError as e:
+            die(f"{path} を JSON として読めないので、書き換えずに止めました ({e})。直してからもう一度実行してください")
+        if not isinstance(data, dict):
+            die(f"{path} の中身がオブジェクトではないので、書き換えずに止めました")
+    change(data)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def upsert_block(path, body):
+    """ファイルの pmva の部分 (目印の間) を書き換える。body が None なら消す。ほかの部分には触らない。"""
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    pattern = re.compile(re.escape(ORCH_BEGIN) + r".*?" + re.escape(ORCH_END) + r"\n?", re.S)
+    text, removed = pattern.subn("", text)
+    if removed and text.strip():
+        text = text.rstrip("\n") + "\n"   # 書き足したときに空けた行も戻す
+    if body is not None:
+        text = (text.rstrip("\n") + "\n\n" if text.strip() else "") + f"{ORCH_BEGIN}\n{body}\n{ORCH_END}\n"
+    if text.strip() or path.exists():
+        path.write_text(text, encoding="utf-8")
+
+
+def orchestrator_paths(agent, folder):
+    """skill を置く場所と、設定ファイル。--dir なしは利用者全体、ありはそのフォルダだけ。"""
+    if agent == "claude":
+        base = Path(folder) / ".claude" if folder else Path.home() / ".claude"
+        settings = base / ("settings.local.json" if folder else "settings.json")
+        return base / "skills" / ORCH_SKILL, settings
+    codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    base = Path(folder) / ".agents" / "skills" if folder else codex_home / "skills"
+    return base / ORCH_SKILL, Path(folder) / "AGENTS.md" if folder else None
+
+
+def cmd_orchestrator(args):
+    folder = Path(args.dir).resolve() if args.dir else None
+    if folder and not folder.is_dir():
+        die(f"フォルダ {folder} がありません")
+    skill_dir, settings = orchestrator_paths(args.agent, folder)
+    mvm = mvm_invocation()
+    rules = [f"Bash({mvm} {sub}:*)" for sub in ORCH_READONLY]
+
+    if args.action == "uninstall":
+        if skill_dir.exists():
+            shutil.rmtree(skill_dir)
+        if args.agent == "claude" and settings.exists():
+            def remove(data):
+                perms = data.get("permissions") or {}
+                if isinstance(perms.get("allow"), list):
+                    perms["allow"] = [r for r in perms["allow"] if not is_orchestrator_rule(r)]
+                hooks = data.get("hooks") or {}
+                if isinstance(hooks.get("PreToolUse"), list):
+                    hooks["PreToolUse"] = [e for e in hooks["PreToolUse"] if not is_guard_entry(e)]
+            update_json(settings, remove)
+        if args.agent == "codex" and settings and settings.exists():
+            upsert_block(settings, None)
+        log(f"{args.agent} の司令塔の設定を取り除きました ({skill_dir})")
+        return 0
+
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    template = (ROOT / "skills" / ORCH_SKILL / "SKILL.md").read_text(encoding="utf-8")
+    (skill_dir / "SKILL.md").write_text(template.replace("{{MVM}}", mvm), encoding="utf-8")
+    print(f"skill: {skill_dir / 'SKILL.md'}")
+    if args.agent == "claude":
+        def add(data):
+            perms = data.setdefault("permissions", {})
+            perms["allow"] = [r for r in perms.get("allow") or [] if not is_orchestrator_rule(r)] + rules
+            if folder:
+                hooks = data.setdefault("hooks", {})
+                hooks["PreToolUse"] = [e for e in hooks.get("PreToolUse") or [] if not is_guard_entry(e)] + [
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": guard_command()}]}]
+        update_json(settings, add)
+        print(f"設定: {settings}")
+        print(f"  確認なしで実行できるようにしたコマンド: mvm {' / '.join(ORCH_READONLY)}"
+              " (VM を起動・終了するコマンドは、これまでどおり毎回確認します)")
+        if folder:
+            print("  重い処理 (npm / pytest / ビルド / ブラウザなど) を止めるフックを入れました。"
+                  f"このフォルダで起動した Claude Code だけが対象です")
+    else:
+        if folder:
+            upsert_block(settings, ORCH_AGENTS_MD)
+            print(f"AGENTS.md: {settings} (重い処理をこの PC で動かさない決まりを追記)")
+        print("Codex のサンドボックス (workspace-write) で使うときは、mvm が AWS に接続し、状態を保存できるよう、"
+              "~/.codex/config.toml に次を足してください:\n")
+        print("[sandbox_workspace_write]\nnetwork_access = true\n"
+              f"writable_roots = [{json.dumps(STATE_DIR.as_posix())}, {json.dumps((Path.home() / '.aws').as_posix())}]\n")
+    print(f"{'Claude Code' if args.agent == 'claude' else 'Codex'} を{'このフォルダで' if folder else ''}起動し直すと使えます。"
+          "例: 「このリポジトリの issue 3 件を、MicroVM で並列に直して」")
+    return 0
+
+
 # mvm wait が「終わった」とみなすエージェントの状態と、まとめるときの優先順 (先にあるものを代表にする)
 WAIT_FINISHED = ("failed", "exited", "waiting", "ready", "done")
 
@@ -2077,6 +2213,11 @@ def build_parser():
     x.add_argument("names", nargs="*", metavar="name", help="表示するセッション (省略時は動いている全セッション)")
     x.add_argument("--json", action="store_true", help="JSON で出力")
     x.set_defaults(func=cmd_top)
+    x = sub.add_parser("orchestrator", help="手元の Claude Code / Codex を司令塔にする (MicroVM に作業を任せる skill と設定)")
+    x.add_argument("action", choices=("install", "uninstall"))
+    x.add_argument("agent", choices=("claude", "codex"))
+    x.add_argument("--dir", help="このフォルダで起動したエージェントだけを司令塔にする (重い処理を止める設定も入れる)")
+    x.set_defaults(func=cmd_orchestrator)
     x = sub.add_parser("result", help="エージェントの最後の応答を表示")
     x.add_argument("name")
     x.add_argument("--agent", choices=("claude", "codex"), help="--agent both で起動したときに片方だけ表示する")
@@ -2145,7 +2286,8 @@ def main(argv=None):
         return 0
     if args.command == "secret" and args.action == "set" and not args.kind:
         parser.error("secret set には kind が必要です")
-    load_config()
+    if args.command != "orchestrator":   # 手元のエージェントの設定だけなので、config.env がなくても使える
+        load_config()
     return args.func(args) or 0
 
 
