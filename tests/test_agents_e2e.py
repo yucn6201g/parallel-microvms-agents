@@ -29,6 +29,16 @@ CLAUDE = os.environ.get("PMVA_E2E_CLAUDE", "")
 CODEX = os.environ.get("PMVA_E2E_CODEX", "")
 
 
+def mvm_constant(name):
+    spec = importlib.util.spec_from_file_location("mvm_for_e2e", MVM)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return getattr(module, name)
+
+
+MVM_LOGIN_URL = mvm_constant("LOGIN_URL")   # mvm login が手元のブラウザで開く URL の形
+
+
 def load_supervisor():
     spec = importlib.util.spec_from_file_location("pmva_supervisor", ROOT / "image" / "supervisor.py")
     module = importlib.util.module_from_spec(spec)
@@ -241,6 +251,76 @@ class AgentE2ETest(unittest.TestCase):
         headers = self.run_codex(mock, AWS_BEARER_TOKEN_BEDROCK="claude-bedrock-key", **self.FAKE_AWS)
         for h in headers:
             self.assertEqual(h["authorization"], "Bearer codex-bedrock-key")
+
+    @unittest.skipUnless(CODEX, "PMVA_E2E_CODEX が必要")
+    def test_codex_gateway_bearer_key_from_file(self):
+        mock = OpenAIResponsesMock("touch made-by-codex.txt")
+        self.addCleanup(mock.shutdown)
+        key = self.home / ".pmva" / "codex_gateway_key"
+        key.write_text("gw-key", encoding="utf-8")
+        # bootstrap.sh が --codex-auth gateway で書くのと同じ形
+        (self.home / ".codex" / "config.toml").write_text(
+            '# pmva:provider begin\nmodel_provider = "pmva-gateway"\n'
+            'model_providers.pmva-gateway.name = "pmva-gateway"\n'
+            f'model_providers.pmva-gateway.base_url = "{mock.url}/v1"\n'
+            'model_providers.pmva-gateway.wire_api = "responses"\n'
+            f'model_providers.pmva-gateway.auth = {{ command = "cat", args = [{json.dumps(str(key))}] }}\n'
+            '# pmva:provider end\n'
+            f'notify = ["{NOTIFY}", "codex"]\nmodel = "gpt-mock"\napproval_policy = "never"\nsandbox_mode = "danger-full-access"\n',
+            encoding="utf-8")
+        headers = self.run_codex(mock)
+        for h in headers:
+            self.assertEqual(h["authorization"], "Bearer gw-key")
+
+    @unittest.skipUnless(CODEX, "PMVA_E2E_CODEX が必要")
+    def test_codex_gateway_key_header_and_query(self):
+        mock = OpenAIResponsesMock("touch made-by-codex.txt")
+        self.addCleanup(mock.shutdown)
+        (self.home / ".codex" / "config.toml").write_text(
+            '# pmva:provider begin\nmodel_provider = "pmva-gateway"\n'
+            'model_providers.pmva-gateway.name = "pmva-gateway"\n'
+            f'model_providers.pmva-gateway.base_url = "{mock.url}/v1"\n'
+            'model_providers.pmva-gateway.wire_api = "responses"\n'
+            'model_providers.pmva-gateway.env_http_headers = { "api-key" = "PMVA_CODEX_GATEWAY_KEY" }\n'
+            'model_providers.pmva-gateway.query_params = { "api-version" = "2025-04-01-preview" }\n'
+            'model_providers.pmva-gateway.http_headers = { "X-Team" = "a" }\n'
+            '# pmva:provider end\n'
+            f'notify = ["{NOTIFY}", "codex"]\nmodel = "gpt-mock"\napproval_policy = "never"\nsandbox_mode = "danger-full-access"\n',
+            encoding="utf-8")
+        p = subprocess.run([CODEX, "exec", "--skip-git-repo-check", "テストして"], cwd=self.work,
+                           env=self.agent_env(CODEX_HOME=str(self.home / ".codex"), PMVA_CODEX_GATEWAY_KEY="azure-key"),
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        for (path, _), h in zip(mock.requests, mock.headers):
+            self.assertEqual(path, "/v1/responses?api-version=2025-04-01-preview")
+            self.assertEqual((h["api-key"], h["x-team"]), ("azure-key", "a"))
+
+    @unittest.skipUnless(CODEX, "PMVA_E2E_CODEX が必要")
+    def test_codex_browser_login_waits_on_port_1455(self):
+        """mvm login が前提にしていること: codex login は 127.0.0.1:1455 で戻りを待ち、ログインの URL を表示する。"""
+        import re
+        import urllib.error
+        import urllib.request
+        import signal
+        # npm の codex は本体を子プロセスで動かすので、プロセスのグループごと止める (残ると 1455 番を使い続ける)
+        proc = subprocess.Popen([CODEX, "login"], env=self.agent_env(CODEX_HOME=str(self.home / ".codex"), BROWSER="true"),
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                start_new_session=True)
+        self.addCleanup(proc.stdout.close)
+        self.addCleanup(proc.wait, 10)
+        self.addCleanup(os.killpg, proc.pid, signal.SIGTERM)
+        url = None
+        for line in proc.stdout:
+            m = re.search(r"https://auth\.openai\.com/\S+", line)
+            if m:
+                url = m.group(0)
+                break
+        self.assertIsNotNone(url)
+        self.assertRegex(url, MVM_LOGIN_URL)
+        self.assertIn("redirect_uri=http%3A%2F%2F127.0.0.1%3A1455%2Fauth%2Fcallback", url)
+        with self.assertRaises(urllib.error.HTTPError) as e:   # 正しくない state には 400 を返す (待っている)
+            urllib.request.urlopen("http://127.0.0.1:1455/auth/callback?code=x&state=wrong", timeout=10)
+        self.assertEqual(e.exception.code, 400)
 
     # ---------------------------------------------------------------- 司令塔 (mvm orchestrator install)
 

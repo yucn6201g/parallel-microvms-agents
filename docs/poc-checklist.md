@@ -180,6 +180,10 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 - [ ] 実際の Bedrock の Mantle で、OpenAI のモデル (Codex) と Claude (`mantle`) が使えること、必要な IAM の権限 (`bedrock-mantle:CreateInference` など) が足りること: 未確認 (モデルの利用申請が要る)
 - [ ] Claude Platform on AWS: 未確認 (AWS Marketplace での購読とワークスペースが要る)
 - [ ] Bedrock の API キー: 未確認 (キーの発行が要る)
+- [x] `mvm login` の前提: Codex 0.165.0 の `codex login` が `127.0.0.1:1455` で戻りを待ち (戻り先は `http://127.0.0.1:1455/auth/callback`)、ログインの URL を表示することを確認 (`tests/test_agents_e2e.py`)。`mvm login` が 1455 番をつなぎ、表示された URL をブラウザで開くことは自動テスト
+- [ ] 実際の ChatGPT / Claude のアカウントで、`mvm login` から VM の中のエージェントにログインできること: 未確認 (MicroVM とアカウントが要る)
+- [x] Codex の `gateway`: 固定した版の Codex が、ファイルのキーを `Authorization: Bearer` で、`apiKeyHeader` のときは環境変数のキーを指定のヘッダーで送り、URL のパラメータと追加のヘッダーを付けることを確認 (`tests/test_agents_e2e.py`)
+- [ ] Codex の `access-token`: 未確認 (トークンの発行と、ChatGPT への確認の通信が要る)
 
 ## 結果
 

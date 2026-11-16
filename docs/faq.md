@@ -23,7 +23,7 @@ AWS アカウントの MicroVM メモリのクォータ (`L-CD1C0CC4`) で決ま
 使えます。手元で `claude setup-token` を実行して発行した長期トークンを `mvm secret set claude-oauth-token` で登録します ([auth.md](auth.md#サブスクリプション-oauth-token))。複数台が同じサブスクリプションを使うと、利用上限を全台で分け合う点に注意してください。
 
 **Q. ChatGPT のアカウントで Codex を使えますか?**
-使えます。手元で ChatGPT にログインした Codex の `~/.codex/auth.json` を登録します ([auth.md](auth.md#chatgpt-アカウント))。
+使えます。手元で ChatGPT にログインした Codex の `~/.codex/auth.json` を登録するか、Codex のアクセストークンを登録します。VM ごとにログインしたいときは、`--codex-auth interactive` で起動して `mvm login` で手元のブラウザからログインします ([auth.md](auth.md#chatgpt-アカウント))。
 
 **Q. キーを管理せずに、費用を AWS の請求にまとめられますか?**
 できます。Claude Code は `--claude-auth bedrock` / `mantle` / `anthropic-aws`、Codex は `--codex-auth bedrock` (Bedrock の OpenAI のモデル) で、MicroVM の実行ロールの権限で呼びます。シークレットの登録は要りません。Bedrock ではモデルの利用申請が、Claude Platform on AWS では AWS Marketplace での購読が別に必要です ([auth.md](auth.md#どれを選ぶか))。

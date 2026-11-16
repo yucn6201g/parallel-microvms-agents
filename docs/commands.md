@@ -57,6 +57,8 @@ mvm secret ls
 | `anthropic-aws-api-key` | Claude Platform on AWS のワークスペースの API キー | `--claude-auth anthropic-aws-api-key` |
 | `openai-api-key` | OpenAI の API キー | `--codex-auth api-key` |
 | `codex-auth-json` | ChatGPT でログイン済みの `~/.codex/auth.json` の中身 | `--codex-auth chatgpt` |
+| `codex-access-token` | Codex のアクセストークン (`at-...`) | `--codex-auth access-token` |
+| `codex-gateway` | `{"baseUrl":"...","apiKey":"..."}` 形式の JSON ([auth.md](auth.md#ゲートウェイ-gateway)) | `--codex-auth gateway` |
 | `codex-bedrock-api-key` | Amazon Bedrock の API キー (Codex 用) | `--codex-auth bedrock-api-key` |
 | `github-token` | GitHub の personal access token | clone / push (`USE_GITHUB_TOKEN=true`) |
 | `notify-webhook` | Slack などの Webhook URL (`https://...`) | `--notify` |
@@ -114,7 +116,7 @@ MicroVM を 1 台起動し、エージェントを tmux の中で開始します
 |---|---|---|
 | `--agent claude\|codex\|both\|none` | `DEFAULT_AGENT` | 起動するエージェント。`none` はエージェントなし (シェルだけ) |
 | `--claude-auth api-key\|oauth-token\|bedrock\|bedrock-api-key\|mantle\|anthropic-aws\|anthropic-aws-api-key\|gateway\|interactive\|none` | `DEFAULT_CLAUDE_AUTH` | Claude Code の認証方式 ([auth.md](auth.md)) |
-| `--codex-auth api-key\|chatgpt\|bedrock\|bedrock-api-key\|interactive\|none` | `DEFAULT_CODEX_AUTH` | Codex の認証方式 |
+| `--codex-auth api-key\|chatgpt\|access-token\|bedrock\|bedrock-api-key\|gateway\|interactive\|none` | `DEFAULT_CODEX_AUTH` | Codex の認証方式 |
 | `--claude-secret` / `--codex-secret` / `--github-secret <名前>` | 認証方式から決まる | 既定と別名で登録したシークレットを使う |
 | `--no-github` | | GitHub トークンを使わない |
 | `--repo <URL>` | | clone するリポジトリ |
@@ -328,6 +330,23 @@ VM の中のポート (開発サーバーなど) を、手元の PC のポート
 - 手元のポートが使われているときは、つなぐ前に止まります
 - VM の中のサーバーは `localhost` (`127.0.0.1`) で待ち受けていれば十分です
 - つないでいる間は通信があるので、その VM はサスペンドされません
+
+### login
+
+```bash
+mvm login <name> [claude|codex] [--device] [--no-browser] [--console]
+```
+
+VM の中のエージェントに、手元のブラウザを使ってログインします (`--claude-auth interactive` / `--codex-auth interactive` で起動したとき)。エージェントを省くと、セッションのエージェント (`--agent both` のときは指定が必要) です。詳しくは [auth.md](auth.md#vm-の中でログインする-mvm-login)。
+
+| オプション | 説明 |
+|---|---|
+| (なし) | Codex: VM の中で `codex login` を動かし、手元の 1455 番ポートをつないで、ログインの URL を手元のブラウザで開く |
+| `--device` | Codex: コードを入力する方式 (`codex login --device-auth`) |
+| `--no-browser` | Codex: ブラウザを自動で開かない (表示された URL を自分で開く) |
+| `--console` | Claude Code: Anthropic Console (API の従量課金) でログインする |
+
+`mvm ssh` と同じ経路を使うので、SSH 公開鍵を付けて起動したセッションが対象です。
 
 ### ssh-config
 

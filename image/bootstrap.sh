@@ -109,7 +109,8 @@ CLAUDE_MODEL="$(j .claudeModel)"
 # ---------------------------------------------------------------- Codex
 CODEX_AUTH="$(j .codexAuth)"; CODEX_AUTH="${CODEX_AUTH:-none}"
 CODEX_SECRET="$(j .codexSecret)"
-CODEX_PROVIDER=""   # ~/.codex/config.toml に書く接続先の設定 (トップレベルのキー)
+# ~/.codex/config.toml に書く接続先の設定: プロバイダーの ID と、model_providers.<ID>.* の行 (トップレベルのキー)
+CODEX_PROVIDER_ID=""; CODEX_PROVIDER=""
 log "codex auth: $CODEX_AUTH"
 case "$CODEX_AUTH" in
   api-key)
@@ -122,17 +123,63 @@ case "$CODEX_AUTH" in
     # ローカル PC で ChatGPT ログイン済みの ~/.codex/auth.json をそのまま配置
     secret "$CODEX_SECRET" > "$HOME/.codex/auth.json"
     ;;
+  access-token)
+    # ChatGPT のアカウントのアクセストークン (at- で始まる個人用のトークン、またはエージェント用の JWT)。
+    # ログインの保存に失敗しても、環境変数から読める
+    token="$(secret "$CODEX_SECRET")"
+    addenv CODEX_ACCESS_TOKEN "$token"
+    printf '%s' "$token" | codex login --with-access-token >/dev/null 2>&1 || warn "codex login --with-access-token failed"
+    unset token
+    ;;
+  gateway)
+    # OpenAI の Responses API と同じ形の接続先 (LiteLLM、Azure OpenAI、社内ゲートウェイなど)。
+    # シークレットは {"baseUrl", "apiKey"?, "apiKeyHeader"?, "queryParams"?, "headers"?}
+    gw="$(secret "$CODEX_SECRET")"
+    if [ -z "$(jq -r '.baseUrl // empty' <<<"$gw")" ]; then
+      warn "codex gateway secret has no baseUrl"
+    else
+      key_file="$SECRETS_DIR/codex_gateway_key"
+      if [ -n "$(jq -r '.apiKey // empty' <<<"$gw")" ]; then
+        if [ -n "$(jq -r '.apiKeyHeader // empty' <<<"$gw")" ]; then
+          # 決まったヘッダー (Azure OpenAI の api-key など) で送るときは、環境変数から渡す
+          gw_key="$(jq -r .apiKey <<<"$gw")"
+          addenv PMVA_CODEX_GATEWAY_KEY "$gw_key"
+          unset gw_key
+        else
+          # Authorization: Bearer で送るときは、環境変数に出さずファイルから読ませる
+          jq -j .apiKey <<<"$gw" > "$key_file"
+        fi
+      fi
+      CODEX_PROVIDER_ID=pmva-gateway
+      # 値は JSON の文字列 (TOML の文字列としても正しい) にして書く
+      CODEX_PROVIDER="$(jq -r --arg key "$key_file" '
+        def table: to_entries | map("\(.key | @json) = \(.value | tostring | @json)") | join(", ") | "{ \(.) }";
+        "model_providers.pmva-gateway.name = \"pmva-gateway\"",
+        "model_providers.pmva-gateway.base_url = \(.baseUrl | @json)",
+        "model_providers.pmva-gateway.wire_api = \"responses\"",
+        (if (.apiKey // "") != "" and (.apiKeyHeader // "") == "" then
+           "model_providers.pmva-gateway.auth = { command = \"cat\", args = [\($key | @json)] }" else empty end),
+        (if (.apiKey // "") != "" and (.apiKeyHeader // "") != "" then
+           "model_providers.pmva-gateway.env_http_headers = { \(.apiKeyHeader | @json) = \"PMVA_CODEX_GATEWAY_KEY\" }" else empty end),
+        (if (.queryParams // {}) != {} then "model_providers.pmva-gateway.query_params = \(.queryParams | table)" else empty end),
+        (if (.headers // {}) != {} then "model_providers.pmva-gateway.http_headers = \(.headers | table)" else empty end)
+      ' <<<"$gw")"
+    fi
+    unset gw
+    ;;
   bedrock|bedrock-api-key)
     # Amazon Bedrock (Mantle) の OpenAI のモデル。接続先の設定は ~/.codex/config.toml に書く (フックの節で、復元の後に)
     if ! valid_region "$BEDROCK_REGION"; then
       warn "invalid Bedrock region for Codex: $BEDROCK_REGION"
     elif [ "$CODEX_AUTH" = bedrock ]; then
       # 実行ロールで署名する
+      CODEX_PROVIDER_ID=amazon-bedrock
       CODEX_PROVIDER="model_providers.amazon-bedrock.aws.region = \"$BEDROCK_REGION\""
     else
       # API キーは環境変数に出さず、ファイルから読ませる (Claude Code の Bedrock のキーと混ざらないように)。
       # キーを使うときは aws (リージョン) を書けないので、接続先の URL でリージョンを決める
       secret "$CODEX_SECRET" > "$SECRETS_DIR/codex_bedrock_api_key"
+      CODEX_PROVIDER_ID=amazon-bedrock
       CODEX_PROVIDER="model_providers.amazon-bedrock.base_url = \"https://bedrock-mantle.$BEDROCK_REGION.api.aws/openai/v1\"
 model_providers.amazon-bedrock.auth = { command = \"cat\", args = [$(jq -rn --arg p "$SECRETS_DIR/codex_bedrock_api_key" '$p | @json')] }"
     fi
@@ -140,7 +187,7 @@ model_providers.amazon-bedrock.auth = { command = \"cat\", args = [$(jq -rn --ar
       warn "Codex also uses the Claude Bedrock API key (AWS_BEARER_TOKEN_BEDROCK); use --codex-auth bedrock-api-key or --claude-auth bedrock"
     fi
     ;;
-  interactive|none) ;;  # interactive: 接続後に `codex login --device-auth`
+  interactive|none) ;;  # interactive: 接続後に手元から mvm login (ブラウザ) か mvm login --device
   *) warn "unknown codexAuth: $CODEX_AUTH" ;;
 esac
 
@@ -261,11 +308,11 @@ fi
 # Codex の接続先 (--codex-auth bedrock など)。前回の起動で書いたもの (スナップショットから戻る) を消してから書き直す
 sed -i '/^# pmva:provider begin/,/^# pmva:provider end/d' "$codex_cfg"
 if [ -n "$CODEX_PROVIDER" ]; then
-  if grep -qE '^(model_provider *=|\[model_providers\.amazon-bedrock)' "$codex_cfg"; then
+  if grep -qE "^(model_provider *=|\\[model_providers\\.$CODEX_PROVIDER_ID)" "$codex_cfg"; then
     warn "codex model_provider is already set in config.toml; --codex-auth $CODEX_AUTH was not applied"
   else
     { echo "# pmva:provider begin (mvm up --codex-auth $CODEX_AUTH が起動のたびに書き直す)"
-      echo 'model_provider = "amazon-bedrock"'
+      echo "model_provider = \"$CODEX_PROVIDER_ID\""
       echo "$CODEX_PROVIDER"
       echo "# pmva:provider end"
       cat "$codex_cfg"; } > "$codex_cfg.tmp"

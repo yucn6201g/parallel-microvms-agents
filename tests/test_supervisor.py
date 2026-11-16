@@ -690,6 +690,49 @@ class SupervisorTest(unittest.TestCase):
         cfg, _ = self.codex_config()
         self.assertNotIn("model_provider", cfg)
 
+    def test_codex_access_token(self):
+        self.add_secret("pmva/codex-access-token", "at-test-token")
+        st = self.run_session(agent="codex", codexAuth="access-token", codexSecret="pmva/codex-access-token")
+        self.assertEqual(st["bootstrap"], "ready")
+        self.assertEqual((self.home / ".codex-login-stub").read_text(encoding="utf-8"), "at-test-token")
+        self.assertEqual(self.env_value("CODEX_ACCESS_TOKEN"), "at-test-token")
+
+    def test_codex_gateway_with_bearer_key(self):
+        self.add_secret("pmva/codex-gateway", json.dumps({"baseUrl": "https://gw.example.com/v1", "apiKey": "gw-key"}))
+        st = self.run_session(agent="codex", codexAuth="gateway", codexSecret="pmva/codex-gateway")
+        self.assertEqual(st["bootstrap"], "ready")
+        key_file = self.home / ".pmva" / "secrets" / "codex_gateway_key"
+        self.assertEqual(key_file.read_text(encoding="utf-8"), "gw-key")
+        self.assertEqual(self.mode(key_file), "0o600")
+        cfg, text = self.codex_config()
+        self.assertEqual(cfg["model_provider"], "pmva-gateway")
+        self.assertEqual(cfg["model_providers"]["pmva-gateway"], {
+            "name": "pmva-gateway", "base_url": "https://gw.example.com/v1", "wire_api": "responses",
+            "auth": {"command": "cat", "args": [str(key_file)]}})
+        self.assertNotIn("gw-key", text)
+
+    def test_codex_gateway_with_key_header_query_and_headers(self):
+        self.add_secret("pmva/codex-gateway", json.dumps({
+            "baseUrl": "https://res.openai.azure.com/openai/v1", "apiKey": "azure-key", "apiKeyHeader": "api-key",
+            "queryParams": {"api-version": "2025-04-01-preview"}, "headers": {"X-Team": "a \"b\""}}))
+        st = self.run_session(agent="codex", codexAuth="gateway", codexSecret="pmva/codex-gateway")
+        self.assertEqual(st["bootstrap"], "ready")
+        cfg, text = self.codex_config()
+        gw = cfg["model_providers"]["pmva-gateway"]
+        self.assertEqual(gw["env_http_headers"], {"api-key": "PMVA_CODEX_GATEWAY_KEY"})
+        self.assertEqual(gw["query_params"], {"api-version": "2025-04-01-preview"})
+        self.assertEqual(gw["http_headers"], {"X-Team": 'a "b"'})
+        self.assertNotIn("auth", gw)
+        self.assertEqual(self.env_value("PMVA_CODEX_GATEWAY_KEY"), "azure-key")
+        self.assertNotIn("azure-key", text)
+
+    def test_codex_gateway_without_base_url_warns(self):
+        self.add_secret("pmva/codex-gateway", json.dumps({"apiKey": "k"}))
+        st = self.run_session(agent="codex", codexAuth="gateway", codexSecret="pmva/codex-gateway")
+        self.assertIn("codex gateway secret has no baseUrl", st["bootstrap"])
+        cfg, _ = self.codex_config()
+        self.assertNotIn("model_provider", cfg)
+
     def test_claude_key_for_bedrock_warns_when_codex_uses_role(self):
         self.add_secret("pmva/claude-bedrock-api-key", "claude-bedrock-key")
         st = self.run_session(agent="both", region="ap-northeast-1", claudeAuth="bedrock-api-key",
