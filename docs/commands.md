@@ -10,6 +10,7 @@
 | 確認・指示 | [`ls`](#ls) / [`peek`](#peek) / [`follow`](#follow) / [`view`](#view) / [`top`](#top) / [`send`](#send) / [`wait`](#wait) / [`result`](#result) / [`watch`](#watch) / [`logs`](#logs) |
 | 接続 | [`ssh`](#ssh) / [`ssh-config`](#ssh-config) / [`shell`](#shell) / [`token`](#token) |
 | 保存・停止 | [`save`](#save) / [`suspend` / `resume`](#suspend--resume) / [`stop`](#stop) / [`stop-all`](#stop-all) / [`renew`](#renew) |
+| 司令塔 | [`orchestrator`](#orchestrator) |
 | 費用 | [`cost`](#cost) |
 
 セッション名 (`<name>`) は英小文字・数字・ハイフンで 31 文字以内です (例: `agent-01`)。名前ごとの状態は手元の `.state/sessions/<name>.json` に記録します。
@@ -361,6 +362,26 @@ mvm renew <name>
 保存に失敗したとき、または状態を確認できないときは、作業を失わないよう**終了せずに止まります**。
 
 ---
+
+## 司令塔
+
+### orchestrator
+
+```bash
+mvm orchestrator install claude|codex [--dir <フォルダ>]
+mvm orchestrator uninstall claude|codex [--dir <フォルダ>]
+```
+
+手元の Claude Code / Codex に、MicroVM へ作業を任せるための skill (`mvm-orchestrator`) と設定を入れます。使い方は [orchestrator.md](orchestrator.md)。`config.env` がなくても実行できます。
+
+| | `--dir` なし | `--dir <フォルダ>` |
+|---|---|---|
+| 対象 | 利用者全体 (どのフォルダで起動しても使える) | そのフォルダで起動したときだけ |
+| Claude Code | `~/.claude/skills/`、`~/.claude/settings.json` に確認用の `mvm` コマンドの許可 | `<dir>/.claude/skills/`、`<dir>/.claude/settings.local.json` に許可と、重い処理を止めるフック |
+| Codex | `~/.codex/skills/` (`CODEX_HOME` があればそこ) | `<dir>/.agents/skills/`、`<dir>/AGENTS.md` に決まりを書き足す |
+
+- 何度実行しても重複しません。`uninstall` は入れたものだけを取り除きます
+- 設定ファイルが JSON として読めないときは、書き換えずに止まります
 
 ## 費用
 

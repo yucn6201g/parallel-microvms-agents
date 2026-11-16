@@ -11,6 +11,8 @@ Claude Code / Codex などのコーディングエージェントで変更する
 | `bin/mvm`、`bin/mvm.cmd` | 手元 PC | 起動スクリプト (macOS / Linux 用、Windows 用) |
 | `scripts/install.sh`、`scripts/install.ps1` | 手元 PC | セットアップ (ツールの確認、`config.env`、エイリアス) |
 | `scripts/estimate_cost.py` | 手元 PC | `mvm cost` の試算 |
+| `scripts/orchestrator_guard.py` | 手元 PC | 司令塔の Claude Code で重い処理を止めるフック (`mvm orchestrator install claude --dir`) |
+| `skills/mvm-orchestrator/SKILL.md` | 手元 PC | 司令塔のエージェントに入れる skill の元。`{{MVM}}` を mvm の呼び方に置き換えて配る |
 | `image/Dockerfile` | AWS (イメージのビルド) | MicroVM のイメージ。Claude Code / Codex の版はここで固定する |
 | `image/supervisor.py` | MicroVM | ライフサイクルフック (:9000)、状態・操作 API (:8080)、作業の判定 |
 | `image/bootstrap.sh` | MicroVM | 起動直後の初期化 (認証情報、clone、SSH、tmux) |
@@ -41,6 +43,7 @@ python -m unittest discover -s tests -v
 | `tests/test_templates.py` | 標準と最小構成のテンプレートで、共通のリソース・出力・パラメータが同じ内容か | すべて |
 | `tests/test_keepalive.py` | テンプレートに書いた Lambda (キープアライブ、毎晩の停止) のコードを取り出し、模擬 API で動かす | すべて |
 | `tests/test_agents_e2e.py` | 本物の Claude Code / Codex を LLM API の代わり (`tests/mock_llm.py`) につないで動かし、フックによる状態の記録と、会話の記録の読み取りを確かめる | Linux で、エージェントの実行ファイルを `PMVA_E2E_CLAUDE` / `PMVA_E2E_CODEX` で指定したときだけ (CI の `agents-e2e`) |
+| `tests/test_orchestrator_guard.py` | 重い処理を止めるフックが、止めるべきコマンドだけを止めること | すべて |
 | `tests/fixtures/` | 本物のエージェントが書いた会話の記録 (個人情報を除いたもの)。`mvm follow` / `result` の読み取りのテストに使う | — |
 | `tests/aws_stub.py` | AWS CLI の代わり。テストが `PATH` の先頭に置き、呼び出しを `calls.jsonl` に記録して決まった応答を返す | — |
 
@@ -67,7 +70,7 @@ CI と同じものを手元で実行できます。
 ```bash
 shellcheck -S warning bin/mvm scripts/install.sh image/bootstrap.sh image/snapshot.sh image/notify.sh image/agent-attach
 pip install cfn-lint && cfn-lint infra/cloudformation.yaml infra/cloudformation-minimal.yaml
-python -m py_compile bin/mvm.py image/supervisor.py scripts/estimate_cost.py tests/*.py
+python -m py_compile bin/mvm.py image/supervisor.py scripts/estimate_cost.py scripts/orchestrator_guard.py tests/*.py
 ```
 
 ワークフローを変えたときは `actionlint` (`pip install actionlint-py`) も通しておくと安心です。

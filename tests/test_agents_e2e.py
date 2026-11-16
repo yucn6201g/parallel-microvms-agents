@@ -24,6 +24,7 @@ from mock_llm import AnthropicMock, OpenAIResponsesMock  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 NOTIFY = ROOT / "image" / "notify.sh"
+MVM = ROOT / "bin" / "mvm.py"
 CLAUDE = os.environ.get("PMVA_E2E_CLAUDE", "")
 CODEX = os.environ.get("PMVA_E2E_CODEX", "")
 
@@ -135,18 +136,64 @@ class AgentE2ETest(unittest.TestCase):
         self.assertEqual(st["message"], "完了しました。")
         self.assertTrue((self.work / "made-by-claude.txt").exists())
 
+    # ---------------------------------------------------------------- 司令塔 (mvm orchestrator install)
+
+    def install_orchestrator(self, *args):
+        subprocess.run([sys.executable, str(MVM), "orchestrator", "install", *args], check=True, capture_output=True,
+                       env=dict(os.environ, HOME=str(self.home), CODEX_HOME=str(self.home / ".codex")))
+
+    def run_claude(self, mock):
+        p = subprocess.run([CLAUDE, "-p", "テストして", "--model", "claude-mock"], cwd=self.work,
+                           env=self.agent_env(ANTHROPIC_BASE_URL=mock.url, PMVA_CONFIG=str(self.home / "no-config.env")),
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        transcript = self.wait_state("claude", ("done",))["transcript"]
+        return [e for e in self.events("claude", transcript) if e[0] == "output"]
+
+    @unittest.skipUnless(CLAUDE, "PMVA_E2E_CLAUDE が必要")
+    def test_claude_orchestrator_skill_guard_and_allowed_commands(self):
+        mock = self.claude_settings()
+        mock.command = "npm test"
+        self.install_orchestrator("claude", "--dir", str(self.work))
+        # 重い処理はフックが止め、その理由が Claude に返る
+        outputs = self.run_claude(mock)
+        self.assertEqual(len(outputs), 1)
+        self.assertIn("この PC は司令塔なので、重い処理はここで動かしません: npm test", outputs[0][2])
+        # skill が読み込まれている (一覧が API への要求に含まれる)
+        self.assertIn("mvm-orchestrator", json.dumps([b for _, b in mock.requests], ensure_ascii=False))
+        # 確認用の mvm コマンドは、許可を求めずに実行される (-p では許可されていないツールは実行されない)
+        (self.home / ".pmva" / "agents" / "claude.json").unlink()
+        mock.command = f"{ROOT / 'bin' / 'mvm'} ls --json"
+        outputs = self.run_claude(mock)
+        self.assertIn("no-config.env がありません", outputs[0][2], outputs)
+
     # ---------------------------------------------------------------- Codex
 
     @unittest.skipUnless(CODEX, "PMVA_E2E_CODEX が必要")
-    def test_codex_notify_records_state_and_rollout(self):
-        mock = OpenAIResponsesMock("touch made-by-codex.txt")
+    def test_codex_finds_orchestrator_skill(self):
+        self.install_orchestrator("codex")
+        mock = OpenAIResponsesMock("true")
         self.addCleanup(mock.shutdown)
+        self.write_codex_config(mock)
+        p = subprocess.run([CODEX, "exec", "--skip-git-repo-check", "テストして"], cwd=self.work,
+                           env=self.agent_env(MOCK_API_KEY="x", CODEX_HOME=str(self.home / ".codex")),
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("mvm-orchestrator", json.dumps(mock.requests[0][1], ensure_ascii=False))
+
+    def write_codex_config(self, mock):
         # bootstrap.sh と同じく notify をいちばん上に書く
         (self.home / ".codex" / "config.toml").write_text(
             f'notify = ["{NOTIFY}", "codex"]\n'
             'model = "gpt-mock"\nmodel_provider = "mock"\napproval_policy = "never"\nsandbox_mode = "danger-full-access"\n'
             f'[model_providers.mock]\nname = "mock"\nbase_url = "{mock.url}/v1"\nwire_api = "responses"\nenv_key = "MOCK_API_KEY"\n',
             encoding="utf-8")
+
+    @unittest.skipUnless(CODEX, "PMVA_E2E_CODEX が必要")
+    def test_codex_notify_records_state_and_rollout(self):
+        mock = OpenAIResponsesMock("touch made-by-codex.txt")
+        self.addCleanup(mock.shutdown)
+        self.write_codex_config(mock)
         p = subprocess.run([CODEX, "exec", "--skip-git-repo-check", "テストして"], cwd=self.work,
                            env=self.agent_env(MOCK_API_KEY="x", CODEX_HOME=str(self.home / ".codex")),
                            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)

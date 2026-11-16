@@ -58,6 +58,10 @@ mvm wait task-02 --timeout 600    # 10 分で打ち切る (終了コード 2)
 `mvm wait` は、終わった台から 1 行ずつ表示します。`waiting` (許可・入力待ち) で返ったら、`mvm peek` で画面を見て、`mvm send` で答えるか、`mvm ssh` で入って操作します。
 `--json` を付けると `wait` / `result` / `ls` / `peek` の結果を JSON で受け取れるので、スクリプトや手元のエージェントから扱えます。
 
+## 手元のエージェントに任せる (司令塔)
+
+`mvm` のコマンドを自分で打つ代わりに、手元の Claude Code / Codex に「MicroVM で並列に直して」と頼むこともできます。`mvm orchestrator install claude` (または `codex`) で skill を入れると、エージェントがタスクを分けて起動し、終わるのを待ち、結果を確かめて報告します。詳しくは [orchestrator.md](orchestrator.md)。
+
 ## 推論の過程を手元で見る
 
 エージェントが何を考え、どのコマンドを実行して、どんな結果を見て判断したかを、手元で追えます。

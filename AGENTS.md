@@ -10,6 +10,7 @@ Claude Code / Codex を AWS Lambda MicroVMs 上で並列に動かし、手元の
 | 場所 | 動く場所 |
 |---|---|
 | `bin/mvm.py`、`scripts/` | 手元 PC (Windows / macOS / Linux) |
+| `skills/mvm-orchestrator/` | 手元 PC。司令塔のエージェントに入れる skill (`mvm orchestrator install` が配る) |
 | `image/` | MicroVM (ARM64、Amazon Linux 2023)。`supervisor.py`、`bootstrap.sh` など |
 | `infra/cloudformation.yaml` | AWS (Lambda のコードもテンプレートに直接書いている) |
 | `tests/` | 手元 / CI。AWS には一切つながない |
@@ -31,7 +32,7 @@ Claude Code / Codex を AWS Lambda MicroVMs 上で並列に動かし、手元の
 python -m unittest discover -s tests -v
 shellcheck -S warning bin/mvm scripts/install.sh image/bootstrap.sh image/snapshot.sh image/notify.sh image/agent-attach
 cfn-lint infra/cloudformation.yaml infra/cloudformation-minimal.yaml
-python -m py_compile bin/mvm.py image/supervisor.py scripts/estimate_cost.py tests/*.py
+python -m py_compile bin/mvm.py image/supervisor.py scripts/estimate_cost.py scripts/orchestrator_guard.py tests/*.py
 ```
 
 - `tests/test_supervisor.py` は Linux で `tmux` と `jq` があるときだけ動く

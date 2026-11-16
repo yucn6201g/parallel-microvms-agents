@@ -37,6 +37,7 @@ flowchart LR
 | 複数エージェントの並列実行 | `mvm fleet <台数>` / `mvm up <name>`。同時に動かせる台数は MicroVM メモリのクォータで決まり、超える前に止める (`mvm doctor` で確認) |
 | 手元 PC から画面確認 | `mvm peek`（画面末尾を取得）、`mvm follow`（推論の過程を流れるように表示）、`mvm view`（画面を読み取り専用で表示）、`mvm watch`（全台を一覧表示）、`mvm wait`（応答が終わるまで待つ）、`mvm result`（最後の応答を読む）、`mvm top`（VM のメモリ）、`mvm ssh`（tmux にアタッチ） |
 | 手元 PC から指示 | `mvm send <name> "指示"`（接続せずに入力）、または `mvm ssh` で直接操作 |
+| 手元のエージェントを司令塔にする | `mvm orchestrator install claude\|codex` で、手元の Claude Code / Codex に MicroVM へ作業を任せる skill を入れる。重い処理は MicroVM で動き、手元の RAM を使わない（[docs/orchestrator.md](docs/orchestrator.md)） |
 | 多様な認証方式 | Claude Code: サブスクリプション (OAuth トークン) / API キー / Amazon Bedrock / LLM ゲートウェイ / 対話ログイン<br>Codex: API キー / ChatGPT ログイン (auth.json) / 対話ログイン |
 | 8 時間制限への対応 | ワークスペースを S3 に定期保存し、`mvm renew` で新しい MicroVM に復元 |
 | PC を閉じても作業を続ける | AWS 側のキープアライブが、作業中の VM だけを一時停止させない（作業が終われば止まる） |
@@ -88,6 +89,7 @@ mvm ssh test-01                   # tmux にアタッチして直接操作 (Ctrl
 |---|---|
 | はじめて使う (1 台目を動かすまで) | [docs/quickstart.md](docs/quickstart.md) |
 | 実際の作業での使い方 (並列実行、PC を閉じて任せる、8 時間を超える、費用を抑える) | [docs/usage.md](docs/usage.md) |
+| 手元の Claude Code / Codex を司令塔にして、MicroVM に作業を任せる | [docs/orchestrator.md](docs/orchestrator.md) |
 | コマンドとオプションの一覧 | [docs/commands.md](docs/commands.md) |
 | `config.env` の全項目と反映のタイミング | [docs/config.md](docs/config.md) |
 | 認証方式ごとの設定 (サブスクリプション、API キー、Bedrock、ChatGPT、GitHub) | [docs/auth.md](docs/auth.md) |
@@ -123,9 +125,11 @@ tests/                      自動テスト (python -m unittest discover -s test
 AGENTS.md / CLAUDE.md       このリポジトリをコーディングエージェントで変更するときのルール
 CHANGELOG.md                変更履歴
 LICENSE                     ライセンス (MIT)
+skills/mvm-orchestrator/   手元のエージェントに入れる skill (mvm orchestrator install が使う)
 docs/
   quickstart.md             はじめての人向けの最短手順
   usage.md                  場面別の使い方
+  orchestrator.md           手元のエージェントを司令塔にする使い方
   commands.md               コマンドリファレンス
   config.md                 設定リファレンス (config.env)
   auth.md                   認証方式ごとの設定方法

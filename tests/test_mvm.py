@@ -875,6 +875,68 @@ class CliTest(unittest.TestCase):
         self.mvm("view", "v1", "--window", "shell", env=env)
         self.assertEqual(json.loads(record.read_text(encoding="utf-8"))[-1], "shell")
 
+    def test_orchestrator_install_for_claude(self):
+        env = dict(self.env, PMVA_CONFIG=str(Path(self.tmp.name) / "none.env"))  # config.env がなくても使える
+        settings = self.home / ".claude" / "settings.json"
+        settings.parent.mkdir()
+        settings.write_text(json.dumps({"model": "opus", "permissions": {"allow": ["Bash(git status)"]}}), encoding="utf-8")
+        self.mvm("orchestrator", "install", "claude", env=env)
+        self.mvm("orchestrator", "install", "claude", env=env)   # 2 回目でも重複しない
+        skill = (self.home / ".claude" / "skills" / "mvm-orchestrator" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertTrue(skill.startswith("---\nname: mvm-orchestrator\n"))
+        self.assertNotIn("{{MVM}}", skill)
+        mvm = (f'"{Path(sys.executable).as_posix()}" "{MVM.as_posix()}"' if IS_WINDOWS
+               else (ROOT / "bin" / "mvm").as_posix())
+        self.assertIn(f"{mvm} wait <name>... --timeout 540 --json", skill)
+        data = json.loads(settings.read_text(encoding="utf-8"))
+        self.assertEqual(data["model"], "opus", "ほかの設定は残す")
+        self.assertEqual(data["permissions"]["allow"],
+                         ["Bash(git status)"] + [f"Bash({mvm} {c}:*)" for c in ("ls", "peek", "wait", "result", "follow", "top", "doctor")])
+        self.assertNotIn("hooks", data, "利用者全体の設定には、重い処理を止めるフックを入れない")
+        # --dir: そのフォルダだけ。重い処理を止めるフックも入れる
+        proj = Path(self.tmp.name) / "proj"
+        proj.mkdir()
+        self.mvm("orchestrator", "install", "claude", "--dir", str(proj), env=env)
+        self.mvm("orchestrator", "install", "claude", "--dir", str(proj), env=env)
+        local = json.loads((proj / ".claude" / "settings.local.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(local["hooks"]["PreToolUse"]), 1)
+        command = local["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        self.assertIn("orchestrator_guard.py", command)
+        self.assertTrue((proj / ".claude" / "skills" / "mvm-orchestrator" / "SKILL.md").exists())
+        # 取り除くと、入れたものだけが消える
+        self.mvm("orchestrator", "uninstall", "claude", env=env)
+        data = json.loads(settings.read_text(encoding="utf-8"))
+        self.assertEqual((data["model"], data["permissions"]["allow"]), ("opus", ["Bash(git status)"]))
+        self.assertFalse((self.home / ".claude" / "skills" / "mvm-orchestrator").exists())
+        self.mvm("orchestrator", "uninstall", "claude", "--dir", str(proj), env=env)
+        local = json.loads((proj / ".claude" / "settings.local.json").read_text(encoding="utf-8"))
+        self.assertEqual((local["hooks"]["PreToolUse"], local["permissions"]["allow"]), ([], []))
+        # 壊れた設定ファイルは上書きしない
+        settings.write_text("{broken", encoding="utf-8")
+        rc, _, err = self.mvm("orchestrator", "install", "claude", env=env, check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("書き換えずに止めました", err)
+        self.assertEqual(settings.read_text(encoding="utf-8"), "{broken")
+
+    def test_orchestrator_install_for_codex(self):
+        codex_home = Path(self.tmp.name) / "codex-home"
+        env = dict(self.env, CODEX_HOME=str(codex_home))
+        _, out, _ = self.mvm("orchestrator", "install", "codex", env=env)
+        self.assertTrue((codex_home / "skills" / "mvm-orchestrator" / "SKILL.md").exists())
+        self.assertIn("[sandbox_workspace_write]\nnetwork_access = true", out.replace("\r\n", "\n"))
+        proj = Path(self.tmp.name) / "proj"
+        proj.mkdir()
+        (proj / "AGENTS.md").write_text("# 既存の決まり\n\n- テストを書く\n", encoding="utf-8")
+        self.mvm("orchestrator", "install", "codex", "--dir", str(proj), env=env)
+        self.mvm("orchestrator", "install", "codex", "--dir", str(proj), env=env)
+        agents_md = (proj / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertTrue(agents_md.startswith("# 既存の決まり\n\n- テストを書く\n"))
+        self.assertEqual(agents_md.count("## この PC は司令塔"), 1)
+        self.assertTrue((proj / ".agents" / "skills" / "mvm-orchestrator" / "SKILL.md").exists())
+        self.mvm("orchestrator", "uninstall", "codex", "--dir", str(proj), env=env)
+        self.assertEqual((proj / "AGENTS.md").read_text(encoding="utf-8"), "# 既存の決まり\n\n- テストを書く\n")
+        self.assertFalse((proj / ".agents" / "skills" / "mvm-orchestrator").exists())
+
     def test_ssh_proxy_pipes_binary_stdio(self):
         """ssh の ProxyCommand と同じ使い方で、標準入出力がバイナリのまま中継されることを確かめる。"""
         server = EchoWebSocketServer()
