@@ -345,10 +345,19 @@ elif ! grep -q '^notify *=.*/opt/pmva/notify.sh' "$codex_cfg"; then
 fi
 # Codex の接続先 (--codex-auth bedrock など)。前回の起動で書いたもの (スナップショットから戻る) を消してから書き直す
 sed -i '/^# pmva:provider begin/,/^# pmva:provider end/d' "$codex_cfg"
+# 同じキーを 2 回書くと Codex が config.toml を読めずに起動しなくなるので、重なるときは書かずに警告する
+codex_conflict=""
+if [ -n "$CODEX_PROVIDER_ID" ]; then
+  grep -qE "^(model_provider *=|\\[model_providers\\.$CODEX_PROVIDER_ID)" "$codex_cfg" && codex_conflict=model_provider
+elif [ -n "$CODEX_PROVIDER" ]; then
+  # custom (codexConfig): 書くトップレベルのキーが、利用者の設定にすでにあるか
+  while IFS= read -r key; do
+    if grep -qE "^${key//./\\.}[[:space:]]*=" "$codex_cfg"; then codex_conflict="$key"; break; fi
+  done < <(printf '%s\n' "$CODEX_PROVIDER" | sed -nE 's/^([A-Za-z0-9_.-]+)[[:space:]]*=.*/\1/p')
+fi
 if [ -n "$CODEX_PROVIDER" ]; then
-  # custom (codexConfig) は利用者が書いた設定なので、重なりの確認はしない
-  if [ -n "$CODEX_PROVIDER_ID" ] && grep -qE "^(model_provider *=|\\[model_providers\\.$CODEX_PROVIDER_ID)" "$codex_cfg"; then
-    warn "codex model_provider is already set in config.toml; --codex-auth $CODEX_AUTH was not applied"
+  if [ -n "$codex_conflict" ]; then
+    warn "codex config.toml already sets $codex_conflict; --codex-auth $CODEX_AUTH was not applied"
   else
     { echo "# pmva:provider begin (mvm up --codex-auth $CODEX_AUTH が起動のたびに書き直す)"
       [ -z "$CODEX_PROVIDER_ID" ] || echo "model_provider = \"$CODEX_PROVIDER_ID\""

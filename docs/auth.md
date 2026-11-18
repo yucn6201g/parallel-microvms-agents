@@ -278,6 +278,7 @@ mvm up c1 --agent codex --codex-auth custom
 - 書いた設定が正しいかは、エージェントが起動してから分かります。うまく動かないときは `mvm ssh` で接続し、エージェントのエラーや `~/.pmva/bootstrap.log` を確認してください
 - `claudeSettings` は `~/.claude/settings.json` に残り、スナップショットにも含まれます。キーなどの秘密の値は `claudeSettings` に直接書かず、`files` や `env` に入れてください。別の方式で起動し直しても、足した設定は残ります
 - `codexConfig` はトップレベルのキーだけを書いてください (`[テーブル]` を書くと、その後ろにある利用者の設定がテーブルの中に入ってしまいます)。`model_providers.corp.name = ...` のように、ドットでつないだ名前で書けます
+- `codexConfig` のキーが、利用者の `~/.codex/config.toml` (スナップショットから戻したものを含む) にすでにあるときは、書かずに警告します。同じキーが 2 回あると、Codex が設定を読めずに起動しないためです
 - 実行ロールが読めるシークレットは、Claude Code は `anthropic-` / `claude-`、Codex は `openai-` / `codex-` で始まる名前だけです (`{{files}}` のスクリプトから Secrets Manager を読む場合も同じ)
 
 ## VM の中でログインする (mvm login)
