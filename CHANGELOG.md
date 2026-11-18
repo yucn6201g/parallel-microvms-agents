@@ -24,6 +24,7 @@
 - `mvm login <name> [claude|codex]`: VM の中のエージェントに、手元のブラウザでログインする。Codex は手元の 1455 番ポートを VM につないで `codex login` を動かし、ログインの URL を手元のブラウザで開く (`--device` でコードを入力する方式)。Claude Code は `claude auth login` (`--console`)
 - Codex の認証方式 `--codex-auth access-token` (Codex のアクセストークン) と `gateway` (Responses API と同じ形の接続先。キーを Bearer か任意のヘッダーで送る、URL のパラメータ、追加のヘッダー)
 - 認証方式 `--claude-auth custom` / `--codex-auth custom`: シークレットに書いた環境変数、ファイル (`~/.pmva/secrets/` に権限 600)、エージェントの設定 (`~/.claude/settings.json` に足す設定、`~/.codex/config.toml` の接続先) をそのまま入れる。一覧にない方式や、エージェントの新しい版で増えた方式に使う
+- `mvm doctor` が、AWS の構成 (スタック) が手元のテンプレートと `config.env` のとおりか、イメージの元が最後のビルドから変わっていないか、既定の認証方式のシークレットと設定がそろっているかを確かめ、`mvm infra deploy` / `mvm image build` のやり直し忘れや登録漏れを知らせる。操作用ポリシーに `cloudformation:GetTemplate` を追加 (`mvm infra deploy` が必要)
 - `mvm forward <name> <port>`: VM の中のポート (開発サーバーなど) を手元の PC のポートにつなぐ
 - CI の `image` ワークフロー: 本物のイメージを ARM64 でビルドし、ツール、headless の Chromium、起動時の初期化を確かめる
 - CI の `agents-e2e`: 固定した版の Claude Code / Codex を LLM API の代わりにつないで動かし、フックと会話の記録の読み取りを確かめる

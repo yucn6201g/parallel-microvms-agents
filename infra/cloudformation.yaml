@@ -436,7 +436,8 @@ Resources:
             Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda-microvms/*"
           - Sid: ReadStack
             Effect: Allow
-            Action: cloudformation:DescribeStacks
+            # GetTemplate: mvm doctor が、AWS の構成が手元のテンプレートのとおりかを確かめる
+            Action: [cloudformation:DescribeStacks, cloudformation:GetTemplate]
             Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*"
 
   # ---- 作業中の MicroVM を起こし続ける定期処理 (手元 PC を閉じても作業が止まらないようにする)

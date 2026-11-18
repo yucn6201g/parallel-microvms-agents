@@ -28,6 +28,17 @@ mvm doctor
 前提ツール (Python、AWS CLI、ssh)、AWS の認証、リージョンで Lambda MicroVMs が使えるか、MicroVM メモリのクォータ (同時に何台まで起動できるか)、SSH 公開鍵を確認します。
 使っている認証情報がルートユーザー・管理者権限 (`AdministratorAccess`)・作成から 90 日を超えたアクセスキーなら `!!` で警告します。問題がなければ終了コード 0 です。
 
+次のやり直し忘れや登録漏れも、起動する前に `!!` で知らせます。
+
+| 確認すること | 知らせる場合 | 直し方 |
+|---|---|---|
+| AWS の構成 (CloudFormation のスタック) | スタックが無い (`NG`)、失敗した状態、手元のテンプレートと違う (mvm を更新した後など)、`config.env` の変更 (`ENABLE_BEDROCK` など) が反映されていない | `mvm infra deploy` |
+| イメージ | `image/` や `IMAGE_*`・`MEMORY_MIB` などの設定が、この PC から最後に `mvm image build` したときから変わった | `mvm image build` (動いている VM には `mvm renew`) |
+| 既定の認証方式 | `DEFAULT_CLAUDE_AUTH` / `DEFAULT_CODEX_AUTH`・`USE_GITHUB_TOKEN`・`NOTIFY_WEBHOOK` のシークレットが無い。`ENABLE_BEDROCK` / `ENABLE_ANTHROPIC_AWS` / `ANTHROPIC_AWS_WORKSPACE_ID` が足りない | `mvm secret set <kind>`、`config.env` |
+
+- テンプレートとの比較には、操作用ポリシーの `cloudformation:GetTemplate` が要ります。古い構成では `--` (比べられない) と出るので、一度 `mvm infra deploy` をやり直してください
+- イメージの比較は、この PC でビルドしたときの記録 (`.state/image-build.json`) と比べます。別の PC でビルドした場合は `--` と出ます
+
 ### infra
 
 ```bash

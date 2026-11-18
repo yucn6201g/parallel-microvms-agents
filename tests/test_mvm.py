@@ -1289,6 +1289,58 @@ class CliTest(unittest.TestCase):
         calls = (self.stub_dir / "calls.jsonl").read_text(encoding="utf-8")
         self.assertIn('"--role-name", "AWSReservedSSO_AdministratorAccess_x"', calls)
 
+    def add_config(self, text):
+        cfg = Path(self.env["PMVA_CONFIG"])
+        cfg.write_text(cfg.read_text(encoding="utf-8") + text, encoding="utf-8")
+
+    def test_doctor_compares_infra_with_local(self):
+        _, out, _ = self.mvm("doctor", check=False)
+        self.assertIn("--   AWS の構成を手元と比べられません", out, "deploy 前 (GetTemplate の権限がない) は比べない")
+        self.mvm("infra", "deploy")
+        _, out, _ = self.mvm("doctor", check=False)
+        self.assertIn("ok   AWS の構成 (スタック pmva) は手元のテンプレートと設定のとおりです", out)
+        self.add_config("ENABLE_ANTHROPIC_AWS=true\n")
+        _, out, _ = self.mvm("doctor", check=False)
+        self.assertIn("!!   AWS の構成に、設定の変更が反映されていません: EnableAnthropicAws (false → true)", out)
+        self.assertIn("mvm infra deploy", out)
+        self.add_config("INFRA_TEMPLATE=minimal\n")
+        _, out, _ = self.mvm("doctor", check=False)
+        self.assertIn("!!   AWS の構成が、手元のテンプレート (cloudformation-minimal.yaml) と違います", out)
+        self.mvm("infra", "deploy")
+        _, out, _ = self.mvm("doctor", env=dict(self.env, PMVA_STUB_STACK_STATUS="UPDATE_ROLLBACK_COMPLETE"), check=False)
+        self.assertIn("!!   スタック pmva の状態が UPDATE_ROLLBACK_COMPLETE です", out)
+
+    def test_doctor_checks_image_build(self):
+        self.env["PMVA_STUB_QUOTA_GB"] = "100"
+        _, out, _ = self.mvm("doctor", check=False)
+        self.assertIn("--   この PC からイメージをビルドした記録がありません", out)
+        self.mvm("image", "build")
+        _, out, _ = self.mvm("doctor", check=False)
+        self.assertIn("ok   イメージは、最後にビルドしたときから変わっていません (バージョン 2.0)", out)
+        self.add_config("IMAGE_EXTRA_PACKAGES=git-lfs\n")
+        _, out, _ = self.mvm("doctor", check=False)
+        self.assertIn("!!   イメージの元 (image/ と IMAGE_* などの設定) が、最後にビルドしたときから変わっています", out)
+        self.assertIn("mvm image build", out)
+
+    def test_doctor_checks_default_auth(self):
+        _, out, _ = self.mvm("doctor", check=False)
+        self.assertIn("!!   既定の認証方式 (DEFAULT_CLAUDE_AUTH=oauth-token) のシークレット pmva/claude-oauth-token がありません。"
+                      "mvm secret set claude-oauth-token で登録してください", out)
+        self.assertIn("!!   USE_GITHUB_TOKEN=true のシークレット pmva/github-token がありません", out)
+        self.mvm("secret", "set", "claude-oauth-token", input=b"sk-ant-oat01-x")
+        self.mvm("secret", "set", "github-token", input=b"ghp_x")
+        _, out, _ = self.mvm("doctor", check=False)
+        self.assertIn("ok   シークレット pmva/claude-oauth-token (DEFAULT_CLAUDE_AUTH=oauth-token)", out)
+        self.assertIn("ok   シークレット pmva/github-token (USE_GITHUB_TOKEN=true)", out)
+        self.add_config("DEFAULT_AGENT=both\nDEFAULT_CLAUDE_AUTH=anthropic-aws\nDEFAULT_CODEX_AUTH=bedrock\nENABLE_BEDROCK=false\n")
+        _, out, _ = self.mvm("doctor", check=False)
+        self.assertIn("!!   DEFAULT_CLAUDE_AUTH=anthropic-aws には ANTHROPIC_AWS_WORKSPACE_ID が必要です", out)
+        self.assertIn("!!   DEFAULT_CLAUDE_AUTH=anthropic-aws には ENABLE_ANTHROPIC_AWS=true", out)
+        self.assertIn("!!   DEFAULT_CODEX_AUTH=bedrock には ENABLE_BEDROCK=true", out)
+        self.add_config("DEFAULT_CLAUDE_AUTH=interactive\nDEFAULT_CODEX_AUTH=none\n")
+        _, out, _ = self.mvm("doctor", check=False)
+        self.assertIn("--   DEFAULT_CLAUDE_AUTH=interactive は起動後にログインします (mvm login)", out)
+
     def test_api_error_does_not_mark_session_terminated(self):
         self.mvm("up", "u1")
         _, out, _ = self.mvm("ls", env=dict(self.env, PMVA_STUB_GET_DENIED="1"))
