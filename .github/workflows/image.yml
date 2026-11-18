@@ -6,9 +6,11 @@ name: Image
 on:
   push:
     branches: [main]
-    paths: ["image/**", "bin/mvm.py", "tests/test_image.py", "tests/mock_llm.py", ".github/workflows/image.yml"]
+    paths: ["image/**", "bin/mvm.py", "tests/test_image.py", "tests/test_local_vm.py", "tests/local_microvms.py",
+            "tests/aws_stub.py", "tests/mock_llm.py", ".github/workflows/image.yml"]
   pull_request:
-    paths: ["image/**", "bin/mvm.py", "tests/test_image.py", "tests/mock_llm.py", ".github/workflows/image.yml"]
+    paths: ["image/**", "bin/mvm.py", "tests/test_image.py", "tests/test_local_vm.py", "tests/local_microvms.py",
+            "tests/aws_stub.py", "tests/mock_llm.py", ".github/workflows/image.yml"]
   workflow_dispatch:
 
 concurrency:
@@ -45,3 +47,8 @@ jobs:
         env:
           PMVA_TEST_IMAGE: pmva-agent:test
         run: python -m unittest tests.test_image -v
+      - name: mvm against the image on local Docker
+        # Lambda MicroVMs の代わりに Docker でイメージを動かし、mvm のコマンドを通しで動かす (tests/local_microvms.py)
+        env:
+          PMVA_TEST_IMAGE: pmva-agent:test
+        run: python -m unittest tests.test_local_vm -v

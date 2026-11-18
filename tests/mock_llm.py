@@ -18,7 +18,7 @@ def sse(events):
 
 
 class MockServer(http.server.ThreadingHTTPServer):
-    def __init__(self, command):
+    def __init__(self, command, port=0):
         self.command = command   # エージェントに実行させるシェルのコマンド
         self.requests = []
         self.headers = []        # requests と同じ順の、要求ヘッダー (認証の確かめ用。名前は小文字)
@@ -50,7 +50,7 @@ class MockServer(http.server.ThreadingHTTPServer):
                                            ensure_ascii=False) + "\n")
                 srv.handle_post(self, body)
 
-        super().__init__(("127.0.0.1", 0), Handler)
+        super().__init__(("127.0.0.1", port), Handler)   # port=0 なら空いているポート
         self.url = f"http://127.0.0.1:{self.server_address[1]}"
         threading.Thread(target=self.serve_forever, daemon=True).start()
 

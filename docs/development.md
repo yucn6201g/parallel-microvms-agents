@@ -42,6 +42,7 @@ python -m unittest discover -s tests -v
 | `tests/test_supervisor.py` | `supervisor.py` と `bootstrap.sh` などを、パスとポートを差し替えてローカルで動かす結合テスト (認証方式ごとの初期化、送信、作業の判定、通知、保存の中身) | Linux で `tmux` と `jq` があるときだけ |
 | `tests/test_templates.py` | 標準と最小構成のテンプレートで、共通のリソース・出力・パラメータが同じ内容か | すべて |
 | `tests/test_keepalive.py` | テンプレートに書いた Lambda (キープアライブ、毎晩の停止) のコードを取り出し、模擬 API で動かす | すべて |
+| `tests/test_local_vm.py` | Lambda MicroVMs の代わりに、本物のイメージを手元の Docker で動かし、`mvm` のコマンド (`up` / `wait` / `result` / `follow` / `peek` / `top` / `send` / `ssh` / `forward` / `login` / `save` / `suspend` / `resume` / `stop`、保存からの復元) を通しで動かす。受け口の代わり (トークンを確かめてコンテナのポートにつなぐ) と、Docker を使う `lambda-microvms` の代わりは `tests/local_microvms.py` | Docker と ssh があり、ビルドしたイメージを `PMVA_TEST_IMAGE` で指定したときだけ (CI の `image` ワークフロー) |
 | `tests/test_image.py` | `image/Dockerfile` で作った本物のイメージを Docker で動かす (ツール、headless の Chromium と日本語フォント、uv / pmva-node、起動時の初期化と `.pmva/setup.sh`)。MicroVM と同じ起動の流れで、イメージに入っている本物の Claude Code / Codex を LLM API の代わりにつないで動かし、状態・結果・会話記録の API、`/send`、作業内容の保存と復元までを通す (AWS の応答は `aws` の代わりのスクリプトが返す) | Docker があり、ビルドしたイメージを `PMVA_TEST_IMAGE` で指定したときだけ (CI の `image` ワークフロー) |
 | `tests/test_pmva_node.py` | `pmva-node` の版の選び方とチェックサムの確認 (nodejs.org の代わりにローカルのサーバー) | Linux で `jq` があるとき |
 | `tests/test_agents_e2e.py` | 本物の Claude Code / Codex を LLM API の代わり (`tests/mock_llm.py`) につないで動かし、フックによる状態の記録と、会話の記録の読み取りを確かめる | Linux で、エージェントの実行ファイルを `PMVA_E2E_CLAUDE` / `PMVA_E2E_CODEX` で指定したときだけ (CI の `agents-e2e`) |
