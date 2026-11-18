@@ -680,7 +680,7 @@ class SupervisorTest(unittest.TestCase):
         (self.home / ".codex").mkdir(exist_ok=True)
         (self.home / ".codex" / "config.toml").write_text('model_provider = "my-gateway"\n', encoding="utf-8")
         st = self.run_session(agent="codex", region="ap-northeast-1", codexAuth="bedrock")
-        self.assertIn("model_provider is already set", st["bootstrap"])
+        self.assertIn("codex config.toml already sets model_provider", st["bootstrap"])
         cfg, _ = self.codex_config()
         self.assertEqual(cfg["model_provider"], "my-gateway")
 
@@ -768,6 +768,16 @@ class SupervisorTest(unittest.TestCase):
         self.assertTrue(cfg["notify"][0].endswith("notify.sh"))
         self.assertIn("# pmva:provider begin", text)
 
+    def test_codex_custom_auth_keeps_users_own_keys(self):
+        (self.home / ".codex").mkdir(exist_ok=True)
+        (self.home / ".codex" / "config.toml").write_text('model = "my-model"\n', encoding="utf-8")
+        self.add_secret("pmva/codex-custom-auth", json.dumps({"codexConfig": 'model = "corp-model"\nmodel_provider = "corp"\n'}))
+        st = self.run_session(agent="codex", codexAuth="custom", codexSecret="pmva/codex-custom-auth")
+        self.assertIn("codex config.toml already sets model", st["bootstrap"])
+        cfg, _ = self.codex_config()   # 同じキーを 2 回書かない (書くと Codex が設定を読めずに起動しない)
+        self.assertEqual(cfg["model"], "my-model")
+        self.assertNotIn("model_provider", cfg)
+
     def test_custom_auth_rejects_bad_names(self):
         self.add_secret("pmva/claude-custom-auth", json.dumps({
             "env": {"PATH": "/evil", "bad-name": "x", "OK_NAME": "1"}, "files": {"../escape": "x", "ok.txt": "1"}}))
@@ -805,7 +815,8 @@ class SupervisorTest(unittest.TestCase):
 
     def test_missing_secret_fails_bootstrap(self):
         # 登録していないシークレットを指定したら、空のトークンで「準備完了」にせず失敗にする
-        for auth, secret in (("oauth-token", "pmva/claude-oauth-token"), ("api-key", "pmva/anthropic-api-key")):
+        for auth, secret in (("oauth-token", "pmva/claude-oauth-token"), ("api-key", "pmva/anthropic-api-key"),
+                             ("custom", "pmva/claude-custom-auth")):
             st = self.run_session(claudeAuth=auth, claudeSecret=secret)
             self.assertTrue(st["bootstrap"].startswith("failed"), (auth, st["bootstrap"]))
 
