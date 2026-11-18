@@ -25,6 +25,7 @@
 - Codex の認証方式 `--codex-auth access-token` (Codex のアクセストークン) と `gateway` (Responses API と同じ形の接続先。キーを Bearer か任意のヘッダーで送る、URL のパラメータ、追加のヘッダー)
 - 認証方式 `--claude-auth custom` / `--codex-auth custom`: シークレットに書いた環境変数、ファイル (`~/.pmva/secrets/` に権限 600)、エージェントの設定 (`~/.claude/settings.json` に足す設定、`~/.codex/config.toml` の接続先) をそのまま入れる。一覧にない方式や、エージェントの新しい版で増えた方式に使う
 - `mvm doctor` が、AWS の構成 (スタック) が手元のテンプレートと `config.env` のとおりか、イメージの元が最後のビルドから変わっていないか、既定の認証方式のシークレットと設定がそろっているかを確かめ、`mvm infra deploy` / `mvm image build` のやり直し忘れや登録漏れを知らせる。操作用ポリシーに `cloudformation:GetTemplate` を追加 (`mvm infra deploy` が必要)
+- `mvm` をエージェント (Codex など) のサンドボックスの中で動かして、状態の保存先に書けない・VM に接続できないときは、足すべき設定 (`writable_roots`、`network_access`) を案内する
 - `mvm forward <name> <port>`: VM の中のポート (開発サーバーなど) を手元の PC のポートにつなぐ
 - CI の `image` ワークフロー: 本物のイメージを ARM64 でビルドし、ツール、headless の Chromium、起動時の初期化を確かめる
 - CI の `agents-e2e`: 固定した版の Claude Code / Codex を LLM API の代わりにつないで動かし、フックと会話の記録の読み取りを確かめる
