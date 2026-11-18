@@ -307,6 +307,8 @@ class ImageTest(unittest.TestCase):
         code, r = self.request(ports[8080], "POST", "/snapshot", {})
         self.assertEqual((code, r.get("ok")), (200, True), r)
         latest = test_dir / "s3-out" / "latest.tar.gz"
+        # 保存したファイルは VM の agent (uid 1000) の権限 600。テストを動かす利用者 (CI では root ではない) も読めるようにする
+        docker("exec", name, "chmod", "644", "/opt/pmva-test/s3-out/latest.tar.gz")
         with tarfile.open(latest) as tar:
             names = tar.getnames()
         for expected in ("work/made-by-claude.txt", "work/made-by-codex.txt", ".codex/config.toml", ".claude/settings.json"):
@@ -315,7 +317,7 @@ class ImageTest(unittest.TestCase):
 
         # 保存からの復元 (mvm renew / --restore): 別の VM で作業が戻り、接続先の設定は重ならずに書き直される
         shutil.copy(latest, test_dir / "s3" / "latest.tar.gz")
-        (test_dir / "s3" / "latest.tar.gz").chmod(0o644)   # 保存されたファイルは権限 600 (別の VM の agent が読めるように)
+        (test_dir / "s3" / "latest.tar.gz").chmod(0o644)   # 別の VM の agent が読めるように
         docker("rm", "-f", name)   # 前の VM は止める (手元でホストのネットワークを使うときに、ポートが重ならないように)
         name2, ports2 = self.start_vm("-v", f"{test_dir}:/opt/pmva-test", "-e", f"PATH={path}")
         restore = dict(payload, name="e2e2", prompt="", restore="s3://bkt/workspaces/e2e/latest.tar.gz")
