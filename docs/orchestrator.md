@@ -54,7 +54,12 @@ network_access = true
 writable_roots = ["<このリポジトリ>/.state", "<ホーム>/.aws"]
 ```
 
-この設定でサンドボックスの中から `mvm` が動くかは、まだ確かめていません (開発に使った環境ではサンドボックスが効かず、確認できませんでした)。動かないときは `--sandbox danger-full-access` で起動するか、`mvm` を実行するたびに承認します。
+Codex 0.165.0 で、この設定を足すとサンドボックスの中から `mvm` (状態の保存と VM への接続) が動くこと、足りないと止まることを確かめています (`tests/test_agents_e2e.py`)。
+
+- `writable_roots` が無いと、`mvm` は「状態の保存先 … に書き込めません」と案内して止まります
+- `network_access` が無いと、「接続できません」と案内して止まります
+- `workspace-write` は `/tmp` にも書けます。`mvm` の状態の保存先 (`.state`) は既定でこのリポジトリの中なので、`writable_roots` に足す必要があります
+- それでも動かない場合は、`--sandbox danger-full-access` で起動するか、`mvm` を実行するたびに承認してください
 
 ## 使い方
 

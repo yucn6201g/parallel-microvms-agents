@@ -11,6 +11,7 @@
 import argparse
 import base64
 import collections
+import errno
 import getpass
 import hashlib
 import io
@@ -105,6 +106,10 @@ CODEX_AUTH_SECRETS = {
 CLAUDE_AUTHS_NEED_BEDROCK = ("bedrock", "mantle")
 CODEX_AUTHS_NEED_BEDROCK = ("bedrock",)
 
+# mvm をエージェントのサンドボックスの中で動かすときの案内 (mvm orchestrator install codex も同じ設定を表示する)
+SANDBOX_HINT = (" (Codex なら ~/.codex/config.toml の [sandbox_workspace_write] に network_access = true と writable_roots。"
+                "mvm orchestrator install codex が設定を表示します。docs/orchestrator.md)")
+
 C = {}  # 読み込んだ設定
 
 
@@ -165,10 +170,15 @@ def load_config():
     C["BASE_IMAGE_ARN"] = C["BASE_IMAGE_ARN"] or f"arn:aws:lambda:{C['AWS_REGION']}:aws:microvm-image:al2023-1"
     C["BEDROCK_REGION"] = C["BEDROCK_REGION"] or C["AWS_REGION"]
     C["ANTHROPIC_AWS_REGION"] = C["ANTHROPIC_AWS_REGION"] or C["AWS_REGION"]
-    (STATE_DIR / "sessions").mkdir(parents=True, exist_ok=True)
-    (STATE_DIR / "tokens").mkdir(parents=True, exist_ok=True)
-    for p in (STATE_DIR, STATE_DIR / "tokens"):
-        os.chmod(p, 0o700)
+    try:
+        (STATE_DIR / "sessions").mkdir(parents=True, exist_ok=True)
+        (STATE_DIR / "tokens").mkdir(parents=True, exist_ok=True)
+        for p in (STATE_DIR, STATE_DIR / "tokens"):
+            os.chmod(p, 0o700)
+    except OSError as e:
+        die(f"状態の保存先 {STATE_DIR} に書き込めません ({e.strerror})。"
+            f"エージェント (Codex など) のサンドボックスの中で動かしているなら、writable_roots に {STATE_DIR} を足してください"
+            f"{SANDBOX_HINT}")
 
 
 def as_bool(v):
@@ -388,7 +398,12 @@ def vm_api(name, method, path, body=None, timeout=30):
         except ValueError:
             die(f"{name}: HTTP {e.code} {text[:200]}")
     except (urllib.error.URLError, OSError) as e:
-        die(f"{name}: 接続できません ({e})")
+        # サンドボックスがネットワークを止めていると、接続そのものが許されない (EPERM / EACCES)
+        reason = getattr(e, "reason", e)
+        blocked = isinstance(reason, OSError) and reason.errno in (errno.EPERM, errno.EACCES)
+        hint = (f"。エージェント (Codex など) のサンドボックスの中で動かしているなら、ネットワークを許してください{SANDBOX_HINT}"
+                if blocked else "")
+        die(f"{name}: 接続できません ({e}){hint}")
 
 
 # ---------------------------------------------------------------- WebSocket クライアント

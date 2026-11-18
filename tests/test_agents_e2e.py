@@ -363,6 +363,68 @@ class AgentE2ETest(unittest.TestCase):
         outputs = self.run_claude(mock)
         self.assertIn("no-config.env がありません", outputs[0][2], outputs)
 
+    @unittest.skipUnless(CODEX, "PMVA_E2E_CODEX が必要")
+    def test_codex_sandbox_runs_mvm_with_printed_config(self):
+        """司令塔の Codex を workspace-write のサンドボックスで動かし、中から mvm を実行する。
+
+        mvm orchestrator install codex が表示する設定 (network_access と writable_roots) を足せば動き、
+        足りなければ、足すべき設定を案内して止まることを確かめる。
+        workspace-write は /tmp にも書けるので、mvm の状態は /tmp の外 (ホーム) に置く。
+        """
+        sys.path.insert(0, str(ROOT / "tests"))
+        from test_mvm import StatusApi
+        base = Path(tempfile.mkdtemp(prefix="pmva-sandbox-", dir=os.path.expanduser("~")))
+        self.addCleanup(shutil.rmtree, base, True)
+        bindir, state, stub = base / "bin", base / "state", base / "stub"
+        bindir.mkdir()
+        (self.home / ".aws").mkdir()
+        (bindir / "aws").write_text(f'#!/bin/sh\nexec "{sys.executable}" "{ROOT / "tests" / "aws_stub.py"}" "$@"\n',
+                                    encoding="utf-8")
+        (bindir / "aws").chmod(0o755)
+        cfg = base / "config.env"
+        cfg.write_text("AWS_REGION=ap-northeast-1\nUSE_GITHUB_TOKEN=false\n", encoding="utf-8")
+        api = StatusApi()
+        self.addCleanup(api.shutdown)
+        env = self.agent_env(PATH=f"{bindir}:{os.environ.get('PATH', '')}", PMVA_CONFIG=str(cfg), PMVA_STATE_DIR=str(state),
+                             PMVA_STUB_DIR=str(stub), PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}",
+                             CODEX_HOME=str(self.home / ".codex"), MOCK_API_KEY="x")
+        mvm = str(ROOT / "bin" / "mvm")
+        subprocess.run([mvm, "up", "s1", "--no-github"], env=env, check=True, capture_output=True)
+        out = subprocess.run([sys.executable, str(MVM), "orchestrator", "install", "codex"], env=env,
+                             check=True, capture_output=True, text=True).stdout
+        printed = out[out.index("[sandbox_workspace_write]"):].split("\n\n")[0]
+        self.assertIn(json.dumps(state.as_posix()), printed)
+
+        def run_in_sandbox(extra_config):
+            mock = OpenAIResponsesMock(f"{mvm} peek s1 --json")
+            self.addCleanup(mock.shutdown)
+            (self.home / ".codex" / "config.toml").write_text(
+                'model = "gpt-mock"\nmodel_provider = "mock"\napproval_policy = "never"\nsandbox_mode = "workspace-write"\n'
+                f'[model_providers.mock]\nname = "mock"\nbase_url = "{mock.url}/v1"\nwire_api = "responses"\n'
+                f'env_key = "MOCK_API_KEY"\n{extra_config}\n', encoding="utf-8")
+            p = subprocess.run([CODEX, "exec", "--skip-git-repo-check", "状態を見て"], cwd=self.work, env=env,
+                               stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+            outputs = [str(i.get("output")) for _, body in mock.requests for i in body.get("input") or []
+                       if isinstance(i, dict) and i.get("type") == "function_call_output"]
+            self.assertEqual(len(outputs), 1, outputs)
+            return outputs[0]
+
+        # 設定なし: 状態の保存先に書けない。足すべき設定を案内する
+        output = run_in_sandbox("")
+        self.assertIn("に書き込めません", output)
+        self.assertIn("writable_roots", output)
+        self.assertNotIn("Traceback", output)
+        # 表示された設定どおり (テスト用の AWS のスタブが記録を書く場所だけ足す): 中から mvm が動く
+        with_stub = printed.replace("writable_roots = [", f"writable_roots = [{json.dumps(stub.as_posix())}, ")
+        output = run_in_sandbox(with_stub)
+        self.assertIn("こんにちは", output)
+        self.assertEqual(api.headers_seen[-1].get("x-aws-proxy-auth"), "TOKEN-microvm-0000")
+        # ネットワークを許さないと、VM に接続できない。足すべき設定を案内する
+        output = run_in_sandbox(with_stub.replace("network_access = true", "network_access = false"))
+        self.assertIn("接続できません", output)
+        self.assertIn("network_access = true", output)
+
     # ---------------------------------------------------------------- Codex
 
     @unittest.skipUnless(CODEX, "PMVA_E2E_CODEX が必要")
