@@ -22,6 +22,7 @@ class MockServer(http.server.ThreadingHTTPServer):
         self.command = command   # エージェントに実行させるシェルのコマンド
         self.requests = []
         self.headers = []        # requests と同じ順の、要求ヘッダー (認証の確かめ用。名前は小文字)
+        self.log_path = None     # 指定すると、要求を 1 行 1 件の JSON で追記する (別のプロセスから確かめる用)
         srv = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -43,6 +44,10 @@ class MockServer(http.server.ThreadingHTTPServer):
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
                 srv.headers.append({k.lower(): v for k, v in self.headers.items()})
                 srv.requests.append((self.path, body))
+                if srv.log_path:
+                    with open(srv.log_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps({"path": self.path, "headers": srv.headers[-1], "body": body},
+                                           ensure_ascii=False) + "\n")
                 srv.handle_post(self, body)
 
         super().__init__(("127.0.0.1", 0), Handler)

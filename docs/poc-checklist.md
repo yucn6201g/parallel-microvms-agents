@@ -167,7 +167,12 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 - [ ] Lambda MicroVMs の上でのイメージのビルド (`mvm image build`) と、ブラウザ・`setup.sh` の動作: 未確認
 - [x] 手元の設定 (`mvm profile push`): 送るものの選び方と除外、VM での置き方 (自動テスト)。固定した版の Claude Code / Codex が `~/.claude/CLAUDE.md` / `~/.codex/AGENTS.md` を読むことを確認 (`tests/test_agents_e2e.py`)
 - [ ] S3 経由での `mvm profile push` → VM での取得: 未確認 (実行ロールの `profiles/*` の読み取りを含む)
-- [ ] MicroVM の上での `mvm wait` / `result` / `follow` / `view` / `top`: 未確認 (イメージの作り直しが必要)。Codex の対話モード (tmux の中) での `notify` も未確認 (`codex exec` では確認済み)
+- [x] 本物のイメージの中での通しの動作 (2026-11-18、Docker。`tests/test_image.py`、CI の `image` ワークフロー): MicroVM と同じ run フックから、シークレットの取得 (`aws` の代わり)、設定のまとまりの取り込み、`--claude-auth custom` / `--codex-auth custom` で LLM API の代わりにつないだ本物の Claude Code / Codex を tmux の中で起動し、両方が完了するまで
+  - 状態 (完了と最後の応答)、`/result`、`/events` (mvm follow)、メモリと多く使っているプロセス (mvm top) が答えること
+  - Codex の対話モード (tmux の中) での `notify` で完了になること
+  - `/send` (mvm send) で次の指示を送ると、作業中 → 完了 になり、会話の記録に指示が残ること
+  - 作業内容の保存に作業と設定が入り、認証情報と `~/.pmva` が入らないこと。別の VM で復元すると作業が戻り、Codex の接続先の設定と pmva のフックが重ならないこと
+- [ ] Lambda MicroVMs の上での `mvm wait` / `result` / `follow` / `view` / `top`: 未確認 (中身は上の Docker で確認済み。MicroVM のプロキシ経由の接続、サスペンドとの組み合わせが残る)
 - [ ] メモリ不足による強制終了の検出 (`/proc/vmstat` の `oom_kill`): 自動テストでファイルを差し替えて確認したのみ。MicroVM のカーネルでこの値が使えるかは未確認
 
 ## I. AWS の認証方式の追加 (2026-11-16)

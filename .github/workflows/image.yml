@@ -6,9 +6,9 @@ name: Image
 on:
   push:
     branches: [main]
-    paths: ["image/**", "bin/mvm.py", "tests/test_image.py", ".github/workflows/image.yml"]
+    paths: ["image/**", "bin/mvm.py", "tests/test_image.py", "tests/mock_llm.py", ".github/workflows/image.yml"]
   pull_request:
-    paths: ["image/**", "bin/mvm.py", "tests/test_image.py", ".github/workflows/image.yml"]
+    paths: ["image/**", "bin/mvm.py", "tests/test_image.py", "tests/mock_llm.py", ".github/workflows/image.yml"]
   workflow_dispatch:
 
 concurrency:
