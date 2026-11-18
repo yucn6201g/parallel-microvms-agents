@@ -6,6 +6,7 @@
   <microvmId>.term     terminate 済みの印
   secret-<name>        create-secret / put-secret-value で受け取った値
   s3/<bucket>/<key>    s3 cp で S3 に置いたファイル
+  deployed.json        cloudformation deploy で受け取ったテンプレートとパラメータ (describe-stacks / get-template が返す)
 """
 
 import json
@@ -57,8 +58,18 @@ if cmd == "lambda get-function":  # PMVA_STUB_LAMBDA=exists / denied
     if mode == "exists":
         out({"Configuration": {"FunctionName": opt("--function-name")}})
     fail("AccessDeniedException" if mode == "denied" else "ResourceNotFoundException")
+deployed_file = D / "deployed.json"
+deployed = json.loads(deployed_file.read_text(encoding="utf-8")) if deployed_file.exists() else None
+if cmd == "cloudformation get-template":  # deploy する前は権限がない場合と同じく失敗する
+    if not deployed:
+        fail("An error occurred (AccessDenied) when calling the GetTemplate operation")
+    out({"TemplateBody": deployed["template"], "StagesAvailable": ["Original", "Processed"]})
 if cmd == "cloudformation describe-stacks":
-    out({"Stacks": [{"Outputs": [{"OutputKey": k, "OutputValue": v} for k, v in {
+    extra = {}
+    if deployed:
+        extra = {"StackStatus": os.environ.get("PMVA_STUB_STACK_STATUS", "UPDATE_COMPLETE"),
+                 "Parameters": [{"ParameterKey": k, "ParameterValue": v} for k, v in deployed["parameters"].items()]}
+    out({"Stacks": [{**extra, "Outputs": [{"OutputKey": k, "OutputValue": v} for k, v in {
         "ArtifactBucketName": "pmva-bucket",
         "BuildRoleArn": "arn:aws:iam::123456789012:role/build",
         "ExecutionRoleArn": "arn:aws:iam::123456789012:role/exec",
@@ -73,6 +84,10 @@ if cmd == "lambda-microvms list-managed-microvm-images":
     out({"items": [{"imageArn": "arn:aws:lambda:ap-northeast-1:aws:microvm-image:al2023-1"}]})
 if cmd == "lambda-microvms list-microvm-images":
     out({"items": [{"name": "pmva-agent", "imageArn": "arn:img", "state": "CREATED"}]})
+if cmd in ("lambda-microvms create-microvm-image", "lambda-microvms update-microvm-image"):
+    out({"imageArn": "arn:img", "imageVersion": "2.0"})
+if cmd == "lambda-microvms get-microvm-image-version":
+    out({"state": "SUCCESSFUL"})
 if cmd == "lambda-microvms get-microvm-image":
     out({"latestActiveImageVersion": "1.0"})
 if cmd == "lambda-microvms run-microvm":
@@ -142,7 +157,14 @@ if cmd == "s3api head-object":
     if obj.exists():
         out({"ContentLength": obj.stat().st_size})
     fail("An error occurred (404) when calling the HeadObject operation: Not Found")
-if cmd in ("s3 rm", "cloudformation deploy"):
+if cmd == "cloudformation deploy":
+    params = a[a.index("--parameter-overrides") + 1:]
+    params = params[:next((i for i, x in enumerate(params) if x.startswith("--")), len(params))]
+    deployed_file.write_text(json.dumps({
+        "template": Path(opt("--template-file")).read_text(encoding="utf-8"),
+        "parameters": dict(x.split("=", 1) for x in params)}), encoding="utf-8")
+    sys.exit(0)
+if cmd == "s3 rm":
     sys.exit(0)
 if cmd == "ce get-cost-and-usage":  # 2 ページに分けて返す
     def group(service, amount):

@@ -91,7 +91,26 @@ SECRET_KINDS = ("anthropic-api-key", "claude-oauth-token", "anthropic-gateway", 
                 "codex-bedrock-api-key", "codex-gateway", "claude-custom-auth", "codex-custom-auth",
                 "github-token", "notify-webhook")
 
+# 認証方式 → 使うシークレットの種類 (既定の名前は <PMVA_PREFIX>/<種類>)。ここに無い方式はシークレットを使わない
+CLAUDE_AUTH_SECRETS = {
+    "api-key": "anthropic-api-key", "oauth-token": "claude-oauth-token", "gateway": "anthropic-gateway",
+    "bedrock-api-key": "claude-bedrock-api-key", "anthropic-aws-api-key": "anthropic-aws-api-key",
+    "custom": "claude-custom-auth",
+}
+CODEX_AUTH_SECRETS = {
+    "api-key": "openai-api-key", "chatgpt": "codex-auth-json", "bedrock-api-key": "codex-bedrock-api-key",
+    "access-token": "codex-access-token", "gateway": "codex-gateway", "custom": "codex-custom-auth",
+}
+# 実行ロールの権限 (mvm infra deploy の設定) が要る認証方式
+CLAUDE_AUTHS_NEED_BEDROCK = ("bedrock", "mantle")
+CODEX_AUTHS_NEED_BEDROCK = ("bedrock",)
+
 C = {}  # 読み込んだ設定
+
+
+def default_secret(table, auth):
+    kind = table.get(auth)
+    return f"{C['PMVA_PREFIX']}/{kind}" if kind else ""
 
 
 def die(msg):
@@ -721,6 +740,10 @@ def cmd_doctor(_args):
     else:
         print(f"  NG   {C['AWS_REGION']} で list-managed-microvm-images に失敗: {p.stderr.strip()[:200]}")
         ok = False
+    if ident:
+        for line in infra_findings() + image_findings() + auth_findings():
+            print(line)
+            ok = ok and not line.startswith("  NG")
     quota = memory_quota_mib()
     if quota is None:
         print("  --   MicroVM のメモリ上限を取得できません (servicequotas:GetServiceQuota の権限が必要)")
@@ -743,6 +766,109 @@ def cmd_doctor(_args):
         print("  --   SSH 公開鍵なし (mvm ssh は使えません。mvm shell かコンソールの Connect を使用)")
     print("準備 OK" if ok else "上記の NG を解消してください")
     return 0 if ok else 1
+
+
+def infra_findings():
+    """AWS の構成 (CloudFormation のスタック) が、手元のテンプレートと config.env のとおりかを doctor 用の行で返す。
+
+    テンプレートを更新した後や設定を変えた後に、mvm infra deploy のやり直しを忘れていないかを確かめる。
+    """
+    stack = C["STACK_NAME"]
+    r = aws("cloudformation", "describe-stacks", "--stack-name", stack, check=False)
+    if not r:
+        return [f"  NG   AWS の構成 (スタック {stack}) がありません。mvm infra deploy を実行してください (管理者の権限が必要)"]
+    info = r["Stacks"][0]
+    lines = []
+    status = info.get("StackStatus", "")
+    if status and (not status.endswith("_COMPLETE") or "ROLLBACK" in status):
+        lines.append(f"  !!   スタック {stack} の状態が {status} です。CloudFormation のコンソールで原因を確認し、"
+                     "mvm infra deploy をやり直してください")
+    template = infra_template()
+    body = aws("cloudformation", "get-template", "--stack-name", stack, "--template-stage", "Original", check=False)
+    if not body:
+        return lines + ["  --   AWS の構成を手元と比べられません (操作用ポリシーに cloudformation:GetTemplate がありません。"
+                        "mvm infra deploy をやり直すと付きます)"]
+
+    def normalize(text):
+        return "\n".join(line.rstrip() for line in str(text).replace("\r\n", "\n").strip().splitlines())
+    if normalize(body.get("TemplateBody", "")) != normalize(template.read_text(encoding="utf-8")):
+        lines.append(f"  !!   AWS の構成が、手元のテンプレート ({template.name}) と違います "
+                     "(mvm を更新した、または INFRA_TEMPLATE を変えた)。mvm infra deploy を実行してください")
+    deployed = {p["ParameterKey"]: p.get("ParameterValue", "") for p in info.get("Parameters", [])}
+    declared = template_parameters(template)
+    changed = []
+    for item in infra_parameters():
+        key, value = item.split("=", 1)
+        if key in declared and key in deployed and deployed[key] != value:
+            changed.append(f"{key} ({deployed[key] or '空'} → {value or '空'})")
+    if changed:
+        lines.append(f"  !!   AWS の構成に、設定の変更が反映されていません: {', '.join(changed)}。mvm infra deploy を実行してください")
+    return lines or [f"  ok   AWS の構成 (スタック {stack}) は手元のテンプレートと設定のとおりです"]
+
+
+IMAGE_BUILD_RECORD = "image-build.json"   # .state/ に置く、最後に mvm image build したときのイメージの元の指紋
+
+
+def image_digest():
+    """イメージの元 (image/ の中身、Dockerfile に書き込む config.env の値、メモリ、ベースイメージ) の指紋。"""
+    h = hashlib.sha256()
+    with tempfile.TemporaryDirectory() as tmp:
+        zip_path = Path(tmp) / "image.zip"
+        build_artifact_zip(zip_path)
+        with zipfile.ZipFile(zip_path) as z:
+            for name in sorted(z.namelist()):
+                h.update(name.encode("utf-8") + b"\0" + z.read(name) + b"\0")
+    h.update(f"{C['MEMORY_MIB']}\0{C['BASE_IMAGE_ARN']}".encode("utf-8"))
+    return h.hexdigest()
+
+
+def image_findings():
+    record = STATE_DIR / IMAGE_BUILD_RECORD
+    try:
+        built = json.loads(record.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ["  --   この PC からイメージをビルドした記録がありません (別の PC でビルドした場合は確認できません。"
+                "まだなら mvm image build)"]
+    if built.get("image") != C["IMAGE_NAME"] or built.get("digest") != image_digest():
+        return ["  !!   イメージの元 (image/ と IMAGE_* などの設定) が、最後にビルドしたときから変わっています。"
+                "mvm image build を実行してください (動いている VM には、mvm renew で反映)"]
+    return [f"  ok   イメージは、最後にビルドしたときから変わっていません (バージョン {built.get('version', '?')})"]
+
+
+def auth_findings():
+    """既定の認証方式 (config.env) に要るシークレットと設定がそろっているかを doctor 用の行で返す。"""
+    agent = C["DEFAULT_AGENT"]
+    checks = []   # (設定の説明, 認証方式の表, 認証方式, 実行ロールに Bedrock が要る方式)
+    if agent in ("claude", "both"):
+        checks.append(("DEFAULT_CLAUDE_AUTH", CLAUDE_AUTH_SECRETS, C["DEFAULT_CLAUDE_AUTH"], CLAUDE_AUTHS_NEED_BEDROCK))
+    if agent in ("codex", "both"):
+        checks.append(("DEFAULT_CODEX_AUTH", CODEX_AUTH_SECRETS, C["DEFAULT_CODEX_AUTH"], CODEX_AUTHS_NEED_BEDROCK))
+    lines, secrets = [], []
+    for key, table, auth, need_bedrock in checks:
+        setting = f"{key}={auth}"
+        if auth in ("interactive", "none"):
+            lines.append(f"  --   {setting} は起動後にログインします (mvm login)" if auth == "interactive"
+                         else f"  --   {setting} (認証しない)")
+        if table.get(auth):
+            secrets.append((default_secret(table, auth), table[auth], setting, f"既定の認証方式 ({setting})"))
+        if auth in need_bedrock and not as_bool(C["ENABLE_BEDROCK"]):
+            lines.append(f"  !!   {setting} には ENABLE_BEDROCK=true (実行ロールの Bedrock の権限) が必要です。"
+                         "config.env を直して mvm infra deploy を実行してください")
+        if auth.startswith("anthropic-aws") and not C["ANTHROPIC_AWS_WORKSPACE_ID"]:
+            lines.append(f"  !!   {setting} には ANTHROPIC_AWS_WORKSPACE_ID が必要です (docs/auth.md)")
+        if auth == "anthropic-aws" and not as_bool(C["ENABLE_ANTHROPIC_AWS"]):
+            lines.append(f"  !!   {setting} には ENABLE_ANTHROPIC_AWS=true (実行ロールの権限) が必要です。"
+                         "config.env を直して mvm infra deploy を実行してください")
+    if as_bool(C["USE_GITHUB_TOKEN"]):
+        secrets.append((f"{C['PMVA_PREFIX']}/github-token", "github-token", "USE_GITHUB_TOKEN=true", "USE_GITHUB_TOKEN=true"))
+    if as_bool(C["NOTIFY_WEBHOOK"]):
+        secrets.append((f"{C['PMVA_PREFIX']}/notify-webhook", "notify-webhook", "NOTIFY_WEBHOOK=true", "NOTIFY_WEBHOOK=true"))
+    for name, kind, setting, why in secrets:
+        if aws("secretsmanager", "describe-secret", "--secret-id", name, check=False):
+            lines.append(f"  ok   シークレット {name} ({setting})")
+        else:
+            lines.append(f"  !!   {why} のシークレット {name} がありません。mvm secret set {kind} で登録してください")
+    return lines
 
 
 ACCESS_KEY_MAX_AGE_DAYS = 90
@@ -1259,6 +1385,10 @@ def cmd_image(args):
         if state == "SUCCESSFUL":
             print(file=sys.stderr)
             log(f"ビルド成功: バージョン {ver}")
+            # mvm doctor が、イメージの元が変わったか (ビルドし直しが要るか) を確かめるのに使う
+            (STATE_DIR / IMAGE_BUILD_RECORD).write_text(json.dumps(
+                {"image": C["IMAGE_NAME"], "version": ver, "digest": image_digest(), "builtAt": int(time.time())}),
+                encoding="utf-8")
             return 0
         if state == "FAILED":
             print(file=sys.stderr)
@@ -1347,22 +1477,8 @@ def build_payload(name, a):
     if codex_auth not in CODEX_AUTHS:
         die(f"--codex-auth は {' | '.join(CODEX_AUTHS)} のいずれかを指定してください")
     prefix = C["PMVA_PREFIX"]
-    claude_secret = a.claude_secret or {
-        "api-key": f"{prefix}/anthropic-api-key",
-        "oauth-token": f"{prefix}/claude-oauth-token",
-        "gateway": f"{prefix}/anthropic-gateway",
-        "bedrock-api-key": f"{prefix}/claude-bedrock-api-key",
-        "anthropic-aws-api-key": f"{prefix}/anthropic-aws-api-key",
-        "custom": f"{prefix}/claude-custom-auth",
-    }.get(claude_auth, "")
-    codex_secret = a.codex_secret or {
-        "api-key": f"{prefix}/openai-api-key",
-        "chatgpt": f"{prefix}/codex-auth-json",
-        "bedrock-api-key": f"{prefix}/codex-bedrock-api-key",
-        "access-token": f"{prefix}/codex-access-token",
-        "gateway": f"{prefix}/codex-gateway",
-        "custom": f"{prefix}/codex-custom-auth",
-    }.get(codex_auth, "")
+    claude_secret = a.claude_secret or default_secret(CLAUDE_AUTH_SECRETS, claude_auth)
+    codex_secret = a.codex_secret or default_secret(CODEX_AUTH_SECRETS, codex_auth)
     # Claude Platform on AWS はワークスペース ID が必須 (リクエストごとに送る)
     anthropic_aws = {}
     if claude_auth.startswith("anthropic-aws"):
