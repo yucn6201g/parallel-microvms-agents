@@ -2351,7 +2351,13 @@ def ssh_binary(name):
 
 def cmd_ssh(args):
     ssh = ssh_binary(args.name)
-    command = [c for c in args.remote_command if c != "--"]
+    # 名前の後ろはすべて remote_command に入る (argparse.REMAINDER)。-- より前の --no-reconnect はオプションとして扱い、
+    # -- の後ろはそのままコマンドにする (mvm ssh a1 --no-reconnect、mvm ssh a1 --no-reconnect -- ls -la)
+    rest = list(args.remote_command)
+    while rest and rest[0] == "--no-reconnect":
+        args.no_reconnect = True
+        rest.pop(0)
+    command = rest[1:] if rest[:1] == ["--"] else rest
     if command:
         return subprocess.call([ssh, *ssh_options(args.name), f"agent@pmva-{args.name}", *command])
     return attach_tmux(args.name, ["agent-attach"], args.no_reconnect)

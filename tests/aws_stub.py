@@ -80,6 +80,14 @@ if cmd == "cloudformation describe-stacks":
     }.items()]}]})
 if cmd == "service-quotas get-service-quota":
     out({"Quota": {"QuotaCode": opt("--quota-code"), "Value": float(os.environ.get("PMVA_STUB_QUOTA_GB", "8"))}})
+if os.environ.get("PMVA_STUB_DOCKER_IMAGE"):   # 手元の Docker を MicroVM の代わりにする (tests/local_microvms.py)
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import local_microvms
+    if cmd in local_microvms.HANDLED:
+        try:
+            out(local_microvms.handle(cmd, opt, D))
+        except RuntimeError as e:
+            fail(str(e))
 if cmd == "lambda-microvms list-managed-microvm-images":
     out({"items": [{"imageArn": "arn:aws:lambda:ap-northeast-1:aws:microvm-image:al2023-1"}]})
 if cmd == "lambda-microvms list-microvm-images":

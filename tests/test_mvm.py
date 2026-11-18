@@ -943,6 +943,21 @@ class CliTest(unittest.TestCase):
             (fake / "ssh").chmod(0o755)
         return dict(self.env, PATH=str(fake) + os.pathsep + self.env["PATH"]), record
 
+    def test_ssh_no_reconnect_after_name(self):
+        """ドキュメントの書き方 (mvm ssh <name> --no-reconnect) で、オプションをコマンドとして ssh に渡さない。"""
+        env, record = self.fake_ssh()
+        self.mvm("up", "s1", env=env)
+        self.mvm("ssh", "s1", "--no-reconnect", env=env)
+        args = json.loads(record.read_text(encoding="utf-8"))
+        self.assertNotIn("--no-reconnect", args)
+        self.assertEqual(args[-2:], ["agent@pmva-s1", "agent-attach"])
+        self.mvm("ssh", "s1", "--no-reconnect", "--", "ls", "-la", env=env)
+        args = json.loads(record.read_text(encoding="utf-8"))
+        self.assertNotIn("--no-reconnect", args)
+        self.assertEqual(args[-3:], ["agent@pmva-s1", "ls", "-la"])
+        self.mvm("ssh", "s1", "--", "echo", "--no-reconnect", env=env)   # -- の後ろはそのままコマンド
+        self.assertEqual(json.loads(record.read_text(encoding="utf-8"))[-2:], ["echo", "--no-reconnect"])
+
     def test_forward_ports(self):
         env, record = self.fake_ssh()
         self.mvm("up", "f1", env=env)

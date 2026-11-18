@@ -33,6 +33,7 @@
 ### 修正
 
 - `mvm follow`: Codex がリポジトリの `AGENTS.md` を読み込んだとき、その中身を利用者の指示として表示していた
+- `mvm ssh <name> --no-reconnect` (名前の後ろにオプションを書く、ドキュメントの書き方) で、`--no-reconnect` が ssh にコマンドとして渡り、接続できなかった
 
 ### 変更
 

@@ -172,7 +172,9 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
   - Codex の対話モード (tmux の中) での `notify` で完了になること
   - `/send` (mvm send) で次の指示を送ると、作業中 → 完了 になり、会話の記録に指示が残ること
   - 作業内容の保存に作業と設定が入り、認証情報と `~/.pmva` が入らないこと。別の VM で復元すると作業が戻り、Codex の接続先の設定と pmva のフックが重ならないこと
-- [ ] Lambda MicroVMs の上での `mvm wait` / `result` / `follow` / `view` / `top`: 未確認 (中身は上の Docker で確認済み。MicroVM のプロキシ経由の接続、サスペンドとの組み合わせが残る)
+- [x] `mvm` のコマンドを、本物のイメージを動かす手元の Docker に対して通しで動かした (2026-11-18。`tests/test_local_vm.py`、CI の `image` ワークフロー)。受け口の代わり (トークンとポートを確かめてコンテナにつなぐ) を通して、`up` / `wait` / `result` / `follow` / `peek` / `top` / `send` / `ssh` (SSH over WebSocket) / `forward` / `login` (手元の 1455 番から VM の `codex login` に届く) / `save` / `suspend` / `resume` / `stop`、`--restore latest` での復元
+  - 途中で見つけた不具合: `mvm ssh <name> --no-reconnect` (ドキュメントの書き方) で、オプションが ssh にコマンドとして渡っていた。直した
+- [ ] Lambda MicroVMs の上での上記: 未確認 (本物の受け口とプロキシ、サスペンドしたときの自動レジューム、トークンの期限が残る)
 - [ ] メモリ不足による強制終了の検出 (`/proc/vmstat` の `oom_kill`): 自動テストでファイルを差し替えて確認したのみ。MicroVM のカーネルでこの値が使えるかは未確認
 
 ## I. AWS の認証方式の追加 (2026-11-16)
