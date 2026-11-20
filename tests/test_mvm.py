@@ -693,6 +693,27 @@ class CliTest(unittest.TestCase):
         rc, _, err = self.mvm("secret", "set", "github-token", "--name", "other/x", input=b"v", check=False)
         self.assertNotEqual(rc, 0)
 
+    def test_secret_set_removes_whitespace_inside_tokens(self):
+        # 端末の折り返しごとコピーすると、トークンの途中に空白や改行が入る。トークンに空白は含まれないので取り除く
+        _, _, err = self.mvm("secret", "set", "claude-oauth-token", input=b"sk-ant-oat01-ab\ncd ef\r\n")
+        self.assertEqual((self.stub_dir / "secret-pmva_claude-oauth-token").read_text(encoding="utf-8"),
+                         "sk-ant-oat01-abcdef")
+        self.assertIn("空白や改行を 2 個取り除きました", err)
+        self.assertNotIn("abcdef", err, "値はログに出さない")
+        self.mvm("secret", "set", "github-token", input=b"ghp_ab cd")
+        self.assertEqual((self.stub_dir / "secret-pmva_github-token").read_text(encoding="utf-8"), "ghp_abcd")
+        # JSON や URL の種類は中身を変えない
+        gw = '{"baseUrl": "https://gw.example.com", "authToken": "t"}'
+        self.mvm("secret", "set", "anthropic-gateway", input=gw.encode())
+        self.assertEqual((self.stub_dir / "secret-pmva_anthropic-gateway").read_text(encoding="utf-8"), gw)
+
+    def test_secret_set_warns_when_oauth_token_looks_wrong(self):
+        _, _, err = self.mvm("secret", "set", "claude-oauth-token", input=b"sk-ant-api03-x")
+        self.assertIn("sk-ant-oat01-", err)
+        self.assertIn("claude setup-token", err)
+        _, _, err = self.mvm("secret", "set", "claude-oauth-token", input=b"sk-ant-oat01-x")
+        self.assertNotIn("claude setup-token", err)
+
     def test_ssh_config_install_is_idempotent(self):
         self.mvm("up", "s1")
         cfg = self.home / ".ssh" / "config"

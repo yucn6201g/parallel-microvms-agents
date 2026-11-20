@@ -91,6 +91,9 @@ SECRET_KINDS = ("anthropic-api-key", "claude-oauth-token", "anthropic-gateway", 
                 "anthropic-aws-api-key", "openai-api-key", "codex-auth-json", "codex-access-token",
                 "codex-bedrock-api-key", "codex-gateway", "claude-custom-auth", "codex-custom-auth",
                 "github-token", "notify-webhook")
+# 1 行のトークン (JSON や URL ではない) の種類。途中の空白や改行は取り除いて登録する
+SECRET_TOKEN_KINDS = ("anthropic-api-key", "claude-oauth-token", "claude-bedrock-api-key", "anthropic-aws-api-key",
+                      "openai-api-key", "codex-access-token", "codex-bedrock-api-key", "github-token")
 
 # 認証方式 → 使うシークレットの種類 (既定の名前は <PMVA_PREFIX>/<種類>)。ここに無い方式はシークレットを使わない
 CLAUDE_AUTH_SECRETS = {
@@ -1212,6 +1215,15 @@ def cmd_secret(args):
     value = value.strip()
     if not value:
         die("値が空です")
+    if kind in SECRET_TOKEN_KINDS:
+        # 端末の折り返しごとコピーすると途中に空白や改行が入り、認証が 401 で失敗する。トークンに空白は含まれない
+        spaces = len(re.findall(r"\s", value))
+        if spaces:
+            value = re.sub(r"\s", "", value)
+            log(f"値の途中にあった空白や改行を {spaces} 個取り除きました (端末の折り返しが入ったと思われます)")
+    if kind == "claude-oauth-token" and not value.startswith("sk-ant-oat01-"):
+        log("注意: claude setup-token で作ったトークンは sk-ant-oat01- で始まりますが、この値は違います。"
+            "そのまま登録します。認証に失敗したら、claude setup-token の出力をもう一度登録してください")
     if kind == "anthropic-gateway":
         try:
             v = json.loads(value)
