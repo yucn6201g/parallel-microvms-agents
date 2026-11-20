@@ -110,11 +110,12 @@ Claude Code の hooks と Codex の `notify` から `image/notify.sh` を呼び�
 | `bootstrap.sh` がエージェントを起動した | 最初の指示があれば `working`、なければ `ready` |
 | `mvm send` で指示を送った (`/send`) / Claude Code の `UserPromptSubmit`、`PostToolUse` | `working` |
 | Claude Code の `Stop` / Codex の `agent-turn-complete` | `done` (最後の応答の文章も記録し、`/result` で返す) |
-| Claude Code の `Notification` (許可・入力待ち) | `waiting`。応答の後にしばらく入力がないときの通知 (`idle_prompt`) では `done` のまま |
+| Claude Code の `StopFailure` (認証の失敗、利用上限など API のエラーで応答が終わった) | `error` (エラーの種類 `error` とエラーの文章も記録する) |
+| Claude Code の `Notification` (許可・入力待ち) | `waiting`。応答の後にしばらく入力がないときの通知 (`idle_prompt`) では `done` / `error` のまま |
 | tmux のウィンドウがシェルに戻った (`/status` を返すときに調べる) | `exited` |
 
 フックは通知の設定にかかわらず常に入れます。利用者が `~/.claude/settings.json` に書いたフックは残し、pmva のものだけを入れ直します。スナップショットの復元で設定が上書きされるので、復元の後に入れます。
-通知 (`--notify`) が有効なら、`done` と `waiting` のときに Webhook にも 1 行の通知を送ります。Webhook の URL は他の認証情報と同じく Secrets Manager に置きます。
+通知 (`--notify`) が有効なら、`done`、`waiting`、`error` のときに Webhook にも 1 行の通知を送ります。Webhook の URL は他の認証情報と同じく Secrets Manager に置きます。
 
 ### 手元の設定を VM に渡す (`mvm profile`)
 

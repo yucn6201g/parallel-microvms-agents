@@ -836,6 +836,16 @@ class CliTest(unittest.TestCase):
             rc, out, _ = self.mvm("wait", "a1", "--interval", "0.05", env=env)
             self.assertIn("a1               waiting  (claude: 許可・入力待ち)", out)
             self.assertIn("claude: Claude needs your permission to use Bash", out)
+            # API のエラー (認証の失敗など) で止まったら、その内容と次にやることを返す
+            message = "Failed to authenticate. API Error: 401 OAuth access token is invalid."
+            api.statuses = [self.status(claude={"state": "error", "error": "authentication_failed", "message": message})]
+            rc, out, _ = self.mvm("wait", "a1", "--interval", "0.05", env=env)
+            self.assertEqual(rc, 0)
+            self.assertIn("a1               error  (claude: エラーで止まった)", out)
+            self.assertIn(f"claude: authentication_failed: {message}", out)
+            self.assertIn("mvm secret set", out)
+            rc, out, _ = self.mvm("wait", "a1", "--interval", "0.05", "--json", env=env)
+            self.assertEqual(json.loads(out)["sessions"][0]["state"], "error")
             # 時間切れなら終了コード 2 で返る (司令塔のエージェントは呼び直す)
             api.statuses = [self.status(claude="working")]
             rc, _, err = self.mvm("wait", "a1", "--timeout", "0.3", "--interval", "0.05", env=env, check=False)
@@ -866,6 +876,9 @@ class CliTest(unittest.TestCase):
             api.statuses = [self.status(claude="done", codex="working"), self.status(claude="done", codex="exited")]
             rc, out, _ = self.mvm("wait", "a1", "--interval", "0.05", "--json", env=env)
             self.assertEqual(json.loads(out)["sessions"][0]["state"], "exited")
+            api.statuses = [self.status(claude="error", codex="exited")]
+            rc, out, _ = self.mvm("wait", "a1", "--interval", "0.05", "--json", env=env)
+            self.assertEqual(json.loads(out)["sessions"][0]["state"], "error", "エラーは終了より優先して知らせる")
             # 名前を省略すると動いている全セッション。サスペンド中の VM は作業していないので API を呼ばずに終わり扱い
             (self.stub_dir / "microvm-0000.suspended").touch()
             api.statuses = [self.status(claude="working")]
@@ -915,6 +928,15 @@ class CliTest(unittest.TestCase):
             self.assertIn("(まだ codex の応答がありません)", out)
             _, out, _ = self.mvm("result", "a1", "--json", "--agent", "claude", env=env)
             self.assertEqual(json.loads(out)["text"], "PR を作りました: #12")
+            # API のエラーで止まったときは、エラーの内容と次にやることを出し、終了コード 1
+            api.results["claude"] = {"agent": "claude", "state": "error", "error": "rate_limit",
+                                     "text": "API Error: Rate limit reached"}
+            rc, out, err = self.mvm("result", "a1", "--agent", "claude", env=env, check=False)
+            self.assertEqual(rc, 1)
+            self.assertIn("(エラーで止まりました: rate_limit) API Error: Rate limit reached", out)
+            self.assertIn("mvm send", err)
+            _, out, _ = self.mvm("result", "a1", "--json", "--agent", "claude", env=env, check=False)
+            self.assertEqual((json.loads(out)["state"], json.loads(out)["error"]), ("error", "rate_limit"))
             # ls / peek も JSON で出せる (司令塔のエージェントが読み取りやすいように)
             _, out, _ = self.mvm("ls", "--json", env=env)
             rows = json.loads(out)

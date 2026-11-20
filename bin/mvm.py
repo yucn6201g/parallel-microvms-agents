@@ -1867,7 +1867,27 @@ def cmd_save(args):
 AGENT_STATE_LABELS = {
     "starting": "起動の準備中", "working": "作業中", "done": "応答が終わった", "waiting": "許可・入力待ち",
     "ready": "最初の指示待ち", "exited": "エージェントが終了した", "failed": "起動の準備に失敗", "unknown": "不明",
+    "error": "エラーで止まった",
 }
+
+
+def agent_error_hint(name, kind):
+    """エージェントが API のエラー (Claude Code の StopFailure の error) で止まったときに、次にやること。"""
+    relogin = (f"mvm secret set <種類> で登録し直し、mvm stop {name} --no-save の後に"
+               " mvm up で起動し直します (認証情報は起動時に読み込むため)。詳しくは docs/auth.md")
+    if kind == "authentication_failed":
+        return "認証情報を確かめてください。" + relogin
+    if kind == "invalid_request":
+        return ("エラーの文章を確かめてください。認証情報の形の問題 (途中に改行が入っているなど) なら、" + relogin
+                + f"。それ以外なら mvm peek {name} で画面を確かめてください")
+    if kind == "rate_limit":
+        return (f"利用上限に達しました。時間をおいて mvm send {name} \"続けてください\" で再開するか、"
+                "同時に動かす台数を減らしてください (同じサブスクリプションの上限は全台で分け合います)")
+    if kind == "billing_error":
+        return "支払いやプランの状態を確かめてください (Claude のアカウントの設定画面)"
+    if kind == "server_error":
+        return f"API 側の一時的な障害の可能性があります。時間をおいて mvm send {name} \"続けてください\" で再開してください"
+    return f"mvm peek {name} で画面を確かめてください"
 
 
 def gib(mib):
@@ -1924,8 +1944,12 @@ def cmd_result(args):
         for r in results:
             if len(results) > 1:
                 print(f"--- {r['agent']} ({r.get('state')}) ---")
-            print(r.get("text") if r.get("text") else f"(まだ {r['agent']} の応答がありません)")
-    return 0 if all(r.get("text") for r in results) else 1
+            if r.get("state") == "error":
+                print(f"(エラーで止まりました: {r.get('error') or 'unknown'}) {r.get('text') or ''}".rstrip())
+                log(agent_error_hint(args.name, r.get("error")))
+            else:
+                print(r.get("text") if r.get("text") else f"(まだ {r['agent']} の応答がありません)")
+    return 0 if all(r.get("text") and r.get("state") != "error" for r in results) else 1
 
 
 # ---------------------------------------------------------------- 会話記録の流れ (mvm follow)
@@ -2290,7 +2314,7 @@ def cmd_orchestrator(args):
 
 
 # mvm wait が「終わった」とみなすエージェントの状態と、まとめるときの優先順 (先にあるものを代表にする)
-WAIT_FINISHED = ("failed", "exited", "waiting", "ready", "done")
+WAIT_FINISHED = ("failed", "error", "exited", "waiting", "ready", "done")
 
 
 def wait_check(name, idle_limit):
@@ -2347,6 +2371,9 @@ def format_wait(r):
     for a, v in agents.items():
         if v.get("state") == "waiting" and v.get("message"):
             line += f"\n    {a}: {v['message']}"
+        if v.get("state") == "error":
+            line += f"\n    {a}: {v.get('error') or 'unknown'}: {v.get('message') or ''}".rstrip()
+            line += f"\n    → {agent_error_hint(r['name'], v.get('error'))}"
     return line
 
 

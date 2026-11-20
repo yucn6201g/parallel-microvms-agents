@@ -4,6 +4,7 @@
 #     notify.sh claude-prompt        指示を受け取った (UserPromptSubmit)     → 作業中
 #     notify.sh claude-tool          ツールを実行した (PostToolUse)          → 作業中
 #     notify.sh claude-stop          応答が終わった (Stop)                   → 完了
+#     notify.sh claude-stop-failure  API のエラーで止まった (StopFailure)    → エラー (認証の失敗、利用上限など)
 #     notify.sh claude-notification  許可待ち・入力待ち (Notification)       → 入力待ち
 #   Codex: config.toml の notify から呼ばれ、イベントの JSON を最後の引数で受け取る
 #     notify.sh codex '<json>'       応答が終わった (agent-turn-complete)    → 完了
@@ -40,11 +41,22 @@ case "$kind" in
     record claude "done" "$(jq -c '{transcript: (.transcript_path // ""), message: (.last_assistant_message // "")}' <<<"$event" 2>/dev/null)"
     msg="Claude Code の応答が終わりました"
     ;;
+  claude-stop-failure)
+    event="$(cat)"
+    # error はエラーの種類 (authentication_failed / rate_limit / billing_error / invalid_request / server_error など)、
+    # last_assistant_message は画面に出たエラーの文章
+    record claude error "$(jq -c '{error: (.error // "unknown"), transcript: (.transcript_path // ""),
+                                   message: (.last_assistant_message // "")}' <<<"$event" 2>/dev/null)"
+    detail="$(jq -r '"(\(.error // "unknown"))" + (if (.last_assistant_message // "") != "" then ": " + .last_assistant_message[0:300] else "" end)' \
+      <<<"$event" 2>/dev/null)"
+    msg="Claude Code がエラーで止まりました ${detail:-(unknown)}"
+    ;;
   claude-notification)
     event="$(cat)"
     message="$(jq -r '.message // "入力を待っています"' <<<"$event" 2>/dev/null)"
-    # 応答が終わってしばらく入力がないときの通知 (idle_prompt) では、「完了」を「入力待ち」で上書きしない
-    if [ "$(jq -r '.notification_type // empty' <<<"$event" 2>/dev/null)" != idle_prompt ] || [ "$(current claude)" != "done" ]; then
+    # 応答が終わってしばらく入力がないときの通知 (idle_prompt) では、「完了」「エラー」を「入力待ち」で上書きしない
+    now="$(current claude)"
+    if [ "$(jq -r '.notification_type // empty' <<<"$event" 2>/dev/null)" != idle_prompt ] || { [ "$now" != done ] && [ "$now" != error ]; }; then
       record claude waiting "$(jq -nc --arg m "$message" '{message: $m}')"
     fi
     msg="Claude Code: $message"

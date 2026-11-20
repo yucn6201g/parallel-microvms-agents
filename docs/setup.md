@@ -315,7 +315,7 @@ MicroVM は、エンドポイントへの受信通信が `IDLE_MAX_SECONDS` (既
 
 | エージェント | 通知されるとき | 仕組み |
 |---|---|---|
-| Claude Code | 応答の完了 (`Stop`)、許可・入力待ち (`Notification`) | `~/.claude/settings.json` の hooks から `/opt/pmva/notify.sh` を呼ぶ |
+| Claude Code | 応答の完了 (`Stop`)、API のエラーで止まった (`StopFailure`)、許可・入力待ち (`Notification`) | `~/.claude/settings.json` の hooks から `/opt/pmva/notify.sh` を呼ぶ |
 | Codex | 応答の完了 (`agent-turn-complete`) | `~/.codex/config.toml` の `notify` から呼ぶ |
 
 通知は `[<セッション名>] Claude Code の応答が終わりました` のような 1 行です。通知に失敗してもエージェントは止まりません。

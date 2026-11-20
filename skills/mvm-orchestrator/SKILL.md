@@ -60,6 +60,7 @@ mvm の呼び方 (このまま使う):
 |---|---|---|
 | `done` | 応答が終わった | 5 へ |
 | `waiting` | 許可・入力を待っている (`message` に内容) | `{{MVM}} peek <name> 40` で画面を見て、`{{MVM}} send <name> "<答え>"` で答える (許可の選択肢は番号を送る)。判断できなければユーザーに聞く |
+| `error` | 認証の失敗や利用上限など、API のエラーで止まった (`error` に種類、`message` に文章) | `authentication_failed` / `billing_error` はユーザーに知らせる (認証情報やプランの問題なので、送り直しても直らない)。`invalid_request` は `message` を読み、認証情報の問題ならユーザーに知らせ、それ以外なら `peek` で確かめる。`rate_limit` / `server_error` は時間をおいて `{{MVM}} send <name> "続けてください"` で再開する。同時に動かす台数が多ければ減らす |
 | `ready` | 最初の指示がない | `send` で指示を送る |
 | `stalled` | 画面も CPU も長く動いていない | `peek` で画面を確かめる |
 | `exited` / `failed` | エージェントが終了した / 起動の準備に失敗した | `peek` で確かめ、ユーザーに知らせる |

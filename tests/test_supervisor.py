@@ -258,10 +258,13 @@ class SupervisorTest(unittest.TestCase):
         subprocess.run([notify, "codex", json.dumps({"type": "agent-turn-complete", "last-assistant-message": "テスト完了"})],
                        env=self.env, check=True)
         subprocess.run([notify, "codex", json.dumps({"type": "other"})], env=self.env, check=True)
+        subprocess.run([notify, "claude-stop-failure"], input=json.dumps(
+            {"error": "rate_limit", "last_assistant_message": "API Error: Rate limit reached"}).encode(), env=self.env, check=True)
         texts = [b["text"] for b in self.webhook.bodies]
         self.assertEqual(texts, ["[nt] Claude Code の応答が終わりました",
                                  "[nt] Claude Code: Claude needs your permission to use Bash",
-                                 "[nt] Codex の応答が終わりました: テスト完了"])
+                                 "[nt] Codex の応答が終わりました: テスト完了",
+                                 "[nt] Claude Code がエラーで止まりました (rate_limit): API Error: Rate limit reached"])
 
     # ---------------------------------------------------------------- エージェントの状態と最後の応答 (mvm wait / result)
 
@@ -324,6 +327,33 @@ class SupervisorTest(unittest.TestCase):
                 break
             time.sleep(0.1)
         self.assertEqual(self.agents()["codex"], "exited")
+
+    def test_agent_error_state_from_stop_failure(self):
+        # 認証の失敗や利用上限など API のエラーで応答が終わると、Claude Code は Stop ではなく StopFailure を呼ぶ
+        payload = {"name": "er", "agent": "claude", "claudeAuth": "none", "prompt": "テストして"}
+        self.hook("run", {"microvmId": "m", "runHookPayload": json.dumps(payload)})
+        self.wait_ready()
+        hooks = json.loads((self.home / ".claude" / "settings.json").read_text(encoding="utf-8"))["hooks"]
+        self.assertEqual([h["hooks"][0]["command"] for h in hooks["StopFailure"]],
+                         ["/opt/pmva/notify.sh claude-stop-failure"])
+        self.assertEqual(self.agents(), {"claude": "working"})
+        message = "Failed to authenticate. API Error: 401 OAuth access token is invalid."
+        self.notify("claude-stop-failure", stdin=json.dumps(
+            {"hook_event_name": "StopFailure", "error": "authentication_failed", "last_assistant_message": message}))
+        _, st = self.get("/status?lines=0")
+        claude = st["agents"]["claude"]
+        self.assertEqual((claude["state"], claude["error"], claude["message"]), ("error", "authentication_failed", message))
+        # 応答の後にしばらく入力がないときの通知では、エラーを「入力待ち」で上書きしない
+        self.notify("claude-notification", stdin=json.dumps({"message": "Claude is waiting for your input",
+                                                             "notification_type": "idle_prompt"}))
+        self.assertEqual(self.agents()["claude"], "error")
+        _, r = self.get("/result?agent=claude")
+        self.assertEqual((r["state"], r["error"], r["text"]), ("error", "authentication_failed", message))
+        # 次の指示を受け取れば作業中に戻る
+        self.notify("claude-prompt", stdin="{}")
+        self.assertEqual(self.agents()["claude"], "working")
+        _, st = self.get("/status?lines=0")
+        self.assertNotIn("error", st["agents"]["claude"])
 
     def test_agent_state_before_first_prompt(self):
         self.hook("run", {"microvmId": "m", "runHookPayload": json.dumps({"name": "r", "agent": "claude"})})

@@ -244,7 +244,8 @@ def agent_states(session, windows):
 
     starting  起動の準備中         working  作業中         done     応答が終わった
     waiting   許可・入力待ち       ready    最初の指示待ち  exited   エージェントが終了した (シェルに戻った)
-    failed    起動の準備に失敗     unknown  記録がない
+    failed    起動の準備に失敗     error    API のエラー (認証の失敗、利用上限など) で止まった。error に種類
+    unknown   記録がない
     """
     boot = read_text(STATE_FILE, "not-started")
     commands = {w["name"]: w.get("command") for w in windows}
@@ -262,6 +263,8 @@ def agent_states(session, windows):
         message = st.get("message")
         if isinstance(message, str) and message:
             info["message"] = message[:STATUS_MESSAGE_CHARS]
+        if state == "error" and isinstance(st.get("error"), str):
+            info["error"] = st["error"]
         result[agent] = info
     return result
 
@@ -339,7 +342,10 @@ def agent_result(agent):
                 text = (last_claude_text if agent == "claude" else last_codex_text)(transcript)
             except OSError as e:
                 log(f"read transcript failed: {e}")
-    return {"agent": agent, "state": st.get("state") or "unknown", "since": st.get("at"), "text": text}
+    r = {"agent": agent, "state": st.get("state") or "unknown", "since": st.get("at"), "text": text}
+    if r["state"] == "error" and isinstance(st.get("error"), str):
+        r["error"] = st["error"]   # text は画面に出たエラーの文章
+    return r
 
 
 # ---------------------------------------------------------------- 会話記録の流れ (mvm follow)
