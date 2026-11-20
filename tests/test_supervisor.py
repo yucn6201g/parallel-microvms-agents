@@ -54,6 +54,9 @@ def free_port():
 @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("tmux") and shutil.which("jq"),
                      "Linux と tmux / jq が必要")
 class SupervisorTest(unittest.TestCase):
+    # テスト名 → supervisor の起動を遅らせる秒数
+    SLOW_START = {"test_setup_waits_for_slow_supervisor_start": 6}
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         t = Path(self.tmp.name)
@@ -70,6 +73,10 @@ class SupervisorTest(unittest.TestCase):
         src = src.replace('"/proc/vmstat"', repr(str(self.vmstat)))
         # テストでは作業判定と状態の書き出しを 1 秒ごとにする
         src = src.replace("ACTIVITY_INTERVAL = 30", "ACTIVITY_INTERVAL = 1").replace("PUBLISH_INTERVAL = 60", "PUBLISH_INTERVAL = 1")
+        # 混んだ CI のマシンで supervisor の起動が遅れる場合を真似る (test_setup_waits_for_slow_supervisor_start だけ)
+        delay = self.SLOW_START.get(self._testMethodName)
+        if delay:
+            src = src.replace("def main():\n", f"def main():\n    time.sleep({delay})\n", 1)
         (opt / "supervisor.py").write_text(src, encoding="utf-8")
         for name in ("bootstrap.sh", "snapshot.sh", "notify.sh"):
             shutil.copy(ROOT / "image" / name, opt / name)
@@ -163,6 +170,12 @@ class SupervisorTest(unittest.TestCase):
                 return st
             time.sleep(0.2)
         self.fail("bootstrap did not finish")
+
+    def test_setup_waits_for_slow_supervisor_start(self):
+        """起動に 5 秒以上かかっても、setUp は API とフックの両方のポートが開くまで待つ (CI で Connection refused になっていた)。"""
+        code, _ = self.get("/healthz")
+        self.assertEqual(code, 200)
+        socket.create_connection(("127.0.0.1", self.hook_port), timeout=5).close()
 
     def test_validate_answers_503_then_200(self):
         codes = []
