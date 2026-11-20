@@ -168,8 +168,11 @@ if cmd == "s3api head-object":
 if cmd == "cloudformation deploy":
     params = a[a.index("--parameter-overrides") + 1:]
     params = params[:next((i for i, x in enumerate(params) if x.startswith("--")), len(params))]
+    # 本物の CloudFormation は、テンプレートの ASCII 以外の文字 (日本語のコメントや Description) を
+    # 1 文字ずつ ? に置き換えて保存する (2026-11-20 に実機で確認)
+    template = Path(opt("--template-file")).read_text(encoding="utf-8")
     deployed_file.write_text(json.dumps({
-        "template": Path(opt("--template-file")).read_text(encoding="utf-8"),
+        "template": "".join(c if ord(c) < 128 else "?" for c in template),
         "parameters": dict(x.split("=", 1) for x in params)}), encoding="utf-8")
     sys.exit(0)
 if cmd == "s3 rm":
