@@ -805,7 +805,10 @@ def infra_findings():
                         "mvm infra deploy をやり直すと付きます)"]
 
     def normalize(text):
-        return "\n".join(line.rstrip() for line in str(text).replace("\r\n", "\n").strip().splitlines())
+        # CloudFormation は ASCII 以外の文字 (日本語のコメントや Description) を 1 文字ずつ ? にして保存するので、
+        # 手元の側も同じようにそろえてから比べる (そろえないと deploy 直後でも「違う」と出る)
+        text = "".join(c if ord(c) < 128 else "?" for c in str(text))
+        return "\n".join(line.rstrip() for line in text.replace("\r\n", "\n").strip().splitlines())
     if normalize(body.get("TemplateBody", "")) != normalize(template.read_text(encoding="utf-8")):
         lines.append(f"  !!   AWS の構成が、手元のテンプレート ({template.name}) と違います "
                      "(mvm を更新した、または INFRA_TEMPLATE を変えた)。mvm infra deploy を実行してください")
