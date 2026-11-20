@@ -99,6 +99,7 @@ class EchoWebSocketServer:
         conn.sendall(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                       f"Sec-WebSocket-Accept: {accept}\r\nSec-WebSocket-Protocol: lambda-microvms\r\n\r\n").encode())
         conn.sendall(bytes([0x89, 0]))  # クライアントの pong 応答を試すため ping を送る
+        self._on_open(conn)
         for _ in range(self.flood // 65536):
             conn.sendall(bytes([0x82, 127]) + (65536).to_bytes(8, "big") + os.urandom(65536))
         try:
@@ -120,18 +121,63 @@ class EchoWebSocketServer:
                 if opcode == 0x8:
                     conn.sendall(bytes([0x88, 0]))
                     break
-                if opcode in (0x1, 0x2):
-                    if len(data) < 126:
-                        frame = bytes([0x82, len(data)])
-                    elif len(data) < 65536:
-                        frame = bytes([0x82, 126]) + len(data).to_bytes(2, "big")
-                    else:
-                        frame = bytes([0x82, 127]) + len(data).to_bytes(8, "big")
-                    conn.sendall(frame + data)
+                if opcode in (0x1, 0x2) and not self._on_data(conn, data):
+                    break
         except (EOFError, OSError):
             pass
         finally:
             conn.close()
+
+    @staticmethod
+    def _frame(data, opcode=0x2):
+        if len(data) < 126:
+            return bytes([0x80 | opcode, len(data)]) + data
+        if len(data) < 65536:
+            return bytes([0x80 | opcode, 126]) + len(data).to_bytes(2, "big") + data
+        return bytes([0x80 | opcode, 127]) + len(data).to_bytes(8, "big") + data
+
+    def _on_open(self, conn):
+        pass
+
+    def _on_data(self, conn, data):
+        """受け取ったデータフレームの処理。False を返すと接続を閉じる。"""
+        conn.sendall(self._frame(data))
+        return True
+
+
+class ShellWebSocketServer(EchoWebSocketServer):
+    """Lambda MicroVMs のシェル接続 (/shell) の代わり。
+
+    接続直後に制御メッセージ (session_init) を送り、受け取った行に少し遅れて応答する (本物も応答に時間がかかる)。
+    exit の行か、行頭の Ctrl-D (\\x04) で接続を閉じる (本物はシェルが終わると閉じる。2026-11-20 に実機で確認)。
+    """
+
+    def __init__(self, delay=0.5):
+        self.delay, self.inputs, self.pending = delay, [], {}
+        super().__init__()
+
+    def _on_open(self, conn):
+        conn.sendall(self._frame(b'{"type":"session_init","session_id":"test"}', 0x1))
+        conn.sendall(self._frame(b"$ "))
+        self.pending[id(conn)] = b""
+
+    def _on_data(self, conn, data):
+        self.inputs.append(data)
+        pending = self.pending[id(conn)] + data
+        while b"\n" in pending:
+            line, pending = pending.split(b"\n", 1)
+            line = line.rstrip(b"\r")
+            time.sleep(self.delay)
+            if line in (b"exit", b"\x04"):
+                conn.sendall(self._frame(b"exit\r\n") + bytes([0x88, 0]))
+                return False
+            conn.sendall(self._frame(b"OUT:" + line + b"\r\n$ "))
+        if pending == b"\x04":
+            time.sleep(self.delay)
+            conn.sendall(self._frame(b"exit\r\n") + bytes([0x88, 0]))
+            return False
+        self.pending[id(conn)] = pending
+        return True
 
 
 class ConnectProxy:
@@ -668,6 +714,26 @@ class CliTest(unittest.TestCase):
         self.assertEqual(renewed["restore"], "s3://pmva-bucket/workspaces/r1/latest.tar.gz")
         self.assertNotIn("prompt", renewed)
 
+    def test_renew_picks_up_ssh_key_created_after_up(self):
+        # mvm ssh は「SSH_PUBLIC_KEY_FILE を設定して mvm renew」と案内する。鍵なしで up した後に鍵を作ったら、
+        # renew で鍵付きに起動し直せること
+        key = self.home / ".ssh" / "id_ed25519.pub"
+        key.unlink()
+        self.mvm("up", "k1")
+        self.assertNotIn("sshPublicKey", self.payloads()[-1])
+        key.write_text("ssh-ed25519 AAAANEW new@pc\n", encoding="utf-8")
+        self.mvm("stop", "k1", "--no-save")
+        self.mvm("renew", "k1")
+        self.assertEqual(self.payloads()[-1]["sshPublicKey"], "ssh-ed25519 AAAANEW new@pc")
+        session = Path(self.env["PMVA_STATE_DIR"]) / "sessions" / "k1.json"
+        self.assertEqual(json.loads(session.read_text(encoding="utf-8"))["payload"]["sshPublicKey"],
+                         "ssh-ed25519 AAAANEW new@pc", "mvm ssh が見るセッションにも鍵が入る")
+        # 鍵ファイルが見つからなくなっても、前回の鍵はそのまま使う
+        key.unlink()
+        self.mvm("stop", "k1", "--no-save")
+        self.mvm("renew", "k1")
+        self.assertEqual(self.payloads()[-1]["sshPublicKey"], "ssh-ed25519 AAAANEW new@pc")
+
     def test_infra_delete_waits_for_termination(self):
         self.mvm("up", "d1")
         self.mvm("stop", "d1", "--no-save")
@@ -692,6 +758,27 @@ class CliTest(unittest.TestCase):
         self.assertEqual(list(state.glob("secret.*")), [], "一時ファイルが残っていない")
         rc, _, err = self.mvm("secret", "set", "github-token", "--name", "other/x", input=b"v", check=False)
         self.assertNotEqual(rc, 0)
+
+    def test_secret_set_removes_whitespace_inside_tokens(self):
+        # 端末の折り返しごとコピーすると、トークンの途中に空白や改行が入る。トークンに空白は含まれないので取り除く
+        _, _, err = self.mvm("secret", "set", "claude-oauth-token", input=b"sk-ant-oat01-ab\ncd ef\r\n")
+        self.assertEqual((self.stub_dir / "secret-pmva_claude-oauth-token").read_text(encoding="utf-8"),
+                         "sk-ant-oat01-abcdef")
+        self.assertIn("空白や改行を 2 個取り除きました", err)
+        self.assertNotIn("abcdef", err, "値はログに出さない")
+        self.mvm("secret", "set", "github-token", input=b"ghp_ab cd")
+        self.assertEqual((self.stub_dir / "secret-pmva_github-token").read_text(encoding="utf-8"), "ghp_abcd")
+        # JSON や URL の種類は中身を変えない
+        gw = '{"baseUrl": "https://gw.example.com", "authToken": "t"}'
+        self.mvm("secret", "set", "anthropic-gateway", input=gw.encode())
+        self.assertEqual((self.stub_dir / "secret-pmva_anthropic-gateway").read_text(encoding="utf-8"), gw)
+
+    def test_secret_set_warns_when_oauth_token_looks_wrong(self):
+        _, _, err = self.mvm("secret", "set", "claude-oauth-token", input=b"sk-ant-api03-x")
+        self.assertIn("sk-ant-oat01-", err)
+        self.assertIn("claude setup-token", err)
+        _, _, err = self.mvm("secret", "set", "claude-oauth-token", input=b"sk-ant-oat01-x")
+        self.assertNotIn("claude setup-token", err)
 
     def test_ssh_config_install_is_idempotent(self):
         self.mvm("up", "s1")
@@ -960,6 +1047,31 @@ class CliTest(unittest.TestCase):
         self.assertEqual(args[-3:], ["agent@pmva-s1", "ls", "-la"])
         self.mvm("ssh", "s1", "--", "echo", "--no-reconnect", env=env)   # -- の後ろはそのままコマンド
         self.assertEqual(json.loads(record.read_text(encoding="utf-8"))[-2:], ["echo", "--no-reconnect"])
+
+    def test_ssh_known_hosts_file_is_not_devnull(self):
+        """Windows の OpenSSH は nul を普通のファイル名として扱い、カレントフォルダに nul を作ってしまう。
+        ホスト鍵は .state の下のセッションごとのファイルに書き、VM を作り直したら消す。"""
+        env, record = self.fake_ssh()
+        self.mvm("up", "s1", env=env)
+        self.mvm("ssh", "s1", "--", "true", env=env)
+        args = json.loads(record.read_text(encoding="utf-8"))
+        opts = [args[i + 1] for i, a in enumerate(args) if a == "-o"]
+        known = [o.split("=", 1)[1].strip('"') for o in opts if o.startswith("UserKnownHostsFile=")]
+        self.assertEqual(len(known), 1, opts)
+        self.assertNotEqual(known[0], os.devnull)
+        path = Path(known[0])
+        self.assertTrue(path.is_absolute(), path)
+        self.assertEqual(path.parent, (Path(self.env["PMVA_STATE_DIR"]) / "known_hosts").resolve())
+        self.assertTrue(path.parent.is_dir(), "ssh はフォルダを作らないので、先に作っておく")
+        # VM を作り直すとホスト鍵が変わるので、前の VM の鍵を消す (残すと警告が出て、ポート転送が止められる)
+        path.write_text("pmva-s1 ssh-ed25519 AAAAOLD\n", encoding="utf-8")
+        self.mvm("stop", "s1", "--no-save", env=env)
+        self.mvm("up", "s1", env=env)
+        self.assertFalse(path.exists())
+        # VS Code 用の ~/.ssh/config も同じファイルを使う
+        _, out, _ = self.mvm("ssh-config", env=env)
+        self.assertNotIn(f"UserKnownHostsFile {os.devnull}\n", out)
+        self.assertIn(path.as_posix(), out)
 
     def test_forward_ports(self):
         env, record = self.fake_ssh()
@@ -1246,6 +1358,30 @@ class CliTest(unittest.TestCase):
         self.mvm("orchestrator", "uninstall", "codex", "--dir", str(proj), env=env)
         self.assertEqual((proj / "AGENTS.md").read_text(encoding="utf-8"), "# 既存の決まり\n\n- テストを書く\n")
         self.assertFalse((proj / ".agents" / "skills" / "mvm-orchestrator").exists())
+
+    def test_shell_with_piped_stdin_waits_for_output(self):
+        """printf '...' | mvm shell のように標準入力がすぐ閉じても、VM 側が閉じるまで出力を受け取って表示する。
+
+        以前は標準入力が閉じた時点で接続を閉じていたので、コマンドは VM で動いても何も表示されなかった。
+        """
+        server = ShellWebSocketServer()
+        try:
+            self.mvm("up", "sh1")
+            env = dict(self.env, PMVA_WS_BASE_URL=f"ws://127.0.0.1:{server.port}")
+            started = time.time()
+            rc, out, _ = self.mvm("shell", "sh1", input="echo one\nexit\n".encode(), env=env)
+            self.assertEqual(rc, 0)
+            self.assertIn("OUT:echo one", out)
+            self.assertNotIn("session_init", out)
+            self.assertLess(time.time() - started, 30)
+            # exit を書かなくても、最後に Ctrl-D を送ってシェルを終わらせる。改行で終わっていなければ改行を足す
+            rc, out, _ = self.mvm("shell", "sh1", input=b"echo two", env=env)
+            self.assertEqual(rc, 0)
+            self.assertIn("OUT:echo two", out)
+            self.assertEqual(b"".join(server.inputs[-2:])[-2:], b"\n\x04")
+            self.assertIn("/shell", server.paths[0])
+        finally:
+            server.close()
 
     def test_ssh_proxy_pipes_binary_stdio(self):
         """ssh の ProxyCommand と同じ使い方で、標準入出力がバイナリのまま中継されることを確かめる。"""

@@ -91,6 +91,9 @@ SECRET_KINDS = ("anthropic-api-key", "claude-oauth-token", "anthropic-gateway", 
                 "anthropic-aws-api-key", "openai-api-key", "codex-auth-json", "codex-access-token",
                 "codex-bedrock-api-key", "codex-gateway", "claude-custom-auth", "codex-custom-auth",
                 "github-token", "notify-webhook")
+# 1 行のトークン (JSON や URL ではない) の種類。途中の空白や改行は取り除いて登録する
+SECRET_TOKEN_KINDS = ("anthropic-api-key", "claude-oauth-token", "claude-bedrock-api-key", "anthropic-aws-api-key",
+                      "openai-api-key", "codex-access-token", "codex-bedrock-api-key", "github-token")
 
 # 認証方式 → 使うシークレットの種類 (既定の名前は <PMVA_PREFIX>/<種類>)。ここに無い方式はシークレットを使わない
 CLAUDE_AUTH_SECRETS = {
@@ -677,11 +680,13 @@ def ws_protocols(token, port):
     return [f"lambda-microvms.authentication.{token}", "lambda-microvms", f"lambda-microvms.port.{port}"]
 
 
-def pump(ws, read_input, skip=None, on_close=None):
+def pump(ws, read_input, skip=None, on_close=None, eof=None):
     """標準入力 → WebSocket、WebSocket → 標準出力 を中継する。どちらかが閉じたら終了。
 
     skip: 表示しないメッセージを判定する関数 (シェル接続の制御メッセージ用)
     on_close: 相手が切断したときに、プロセス終了前に呼ぶ関数 (端末設定の復元用)
+    eof: 指定すると、標準入力が閉じたときにこのバイト列を送り (最後の行が改行で終わっていなければ改行を足す)、
+         相手が閉じるまで出力を受け続ける。指定しなければ、標準入力が閉じた時点で接続を閉じる
     """
     def to_stdout():
         while True:
@@ -704,18 +709,29 @@ def pump(ws, read_input, skip=None, on_close=None):
                 debug(f"ping failed: {e!r}")
                 return
 
-    threading.Thread(target=to_stdout, daemon=True).start()
+    reader = threading.Thread(target=to_stdout, daemon=True)
+    reader.start()
     threading.Thread(target=keepalive, daemon=True).start()
+    last = b"\n"
     while True:
         data = read_input()
         if not data:
             debug("stdin closed")
+            if eof is not None:
+                try:
+                    ws.send((b"" if last in (b"\n", b"\r") else b"\n") + eof)
+                    # 相手が閉じると to_stdout がプロセスを終える。Ctrl-C で止められるよう、短い間隔で待つ
+                    while reader.is_alive():
+                        reader.join(0.5)
+                except OSError as e:
+                    debug(f"send failed: {e!r}")
             break
         try:
             ws.send(data)
         except OSError as e:
             debug(f"send failed: {e!r}")
             break
+        last = data[-1:]
     ws.close()
 
 
@@ -849,7 +865,10 @@ def infra_findings():
                         "mvm infra deploy をやり直すと付きます)"]
 
     def normalize(text):
-        return "\n".join(line.rstrip() for line in str(text).replace("\r\n", "\n").strip().splitlines())
+        # CloudFormation は ASCII 以外の文字 (日本語のコメントや Description) を 1 文字ずつ ? にして保存するので、
+        # 手元の側も同じようにそろえてから比べる (そろえないと deploy 直後でも「違う」と出る)
+        text = "".join(c if ord(c) < 128 else "?" for c in str(text))
+        return "\n".join(line.rstrip() for line in text.replace("\r\n", "\n").strip().splitlines())
     if normalize(body.get("TemplateBody", "")) != normalize(template.read_text(encoding="utf-8")):
         lines.append(f"  !!   AWS の構成が、手元のテンプレート ({template.name}) と違います "
                      "(mvm を更新した、または INFRA_TEMPLATE を変えた)。mvm infra deploy を実行してください")
@@ -1262,6 +1281,15 @@ def cmd_secret(args):
     value = value.strip()
     if not value:
         die("値が空です")
+    if kind in SECRET_TOKEN_KINDS:
+        # 端末の折り返しごとコピーすると途中に空白や改行が入り、認証が 401 で失敗する。トークンに空白は含まれない
+        spaces = len(re.findall(r"\s", value))
+        if spaces:
+            value = re.sub(r"\s", "", value)
+            log(f"値の途中にあった空白や改行を {spaces} 個取り除きました (端末の折り返しが入ったと思われます)")
+    if kind == "claude-oauth-token" and not value.startswith("sk-ant-oat01-"):
+        log("注意: claude setup-token で作ったトークンは sk-ant-oat01- で始まりますが、この値は違います。"
+            "そのまま登録します。認証に失敗したら、claude setup-token の出力をもう一度登録してください")
     if kind == "anthropic-gateway":
         try:
             v = json.loads(value)
@@ -1573,10 +1601,7 @@ def build_payload(name, a):
         if not aws("s3api", "head-object", "--bucket", bucket, "--key", f"{PROFILE_PREFIX}{profile}.tar.gz", check=False):
             die(f"設定のまとまり {profile} がまだありません。mvm profile push --name {profile} で送ってください "
                 "(使わないなら --no-profile)")
-    ssh_key = ""
-    key_file = expand_path(C["SSH_PUBLIC_KEY_FILE"])
-    if key_file and key_file.exists():
-        ssh_key = key_file.read_text(encoding="utf-8").strip().splitlines()[0]
+    ssh_key = read_ssh_public_key()
     payload = {
         "name": name, "agent": agent, "region": C["AWS_REGION"],
         "claudeAuth": claude_auth, "claudeSecret": claude_secret,
@@ -1596,6 +1621,15 @@ def build_payload(name, a):
         **anthropic_aws,
     }
     return {k: v for k, v in payload.items() if v != ""}
+
+
+def read_ssh_public_key():
+    """SSH_PUBLIC_KEY_FILE の 1 行目。ファイルが無い・空なら空文字。"""
+    key_file = expand_path(C["SSH_PUBLIC_KEY_FILE"])
+    if not key_file or not key_file.exists():
+        return ""
+    lines = key_file.read_text(encoding="utf-8").strip().splitlines()
+    return lines[0].strip() if lines else ""
 
 
 def launch(name, payload, idle, max_duration):
@@ -1647,6 +1681,10 @@ def launch(name, payload, idle, max_duration):
         "idle": str(idle), "maxDuration": str(max_duration), "payload": payload, "terminated": False,
     })
     clear_tokens(name)
+    try:   # 前の VM のホスト鍵を残すと、鍵が変わったとして ssh が警告し、ポート転送 (VS Code、mvm forward) を止める
+        known_hosts_path(name).unlink()
+    except FileNotFoundError:
+        pass
     log(f"起動しました: {name} ({resp['microvmId']})")
     log(f"  様子を見る: mvm peek {name}   接続: mvm ssh {name} (または mvm shell {name})")
 
@@ -1798,6 +1836,11 @@ def cmd_renew(args):
     payload = dict(s["payload"])
     payload["restore"] = f"s3://{bucket}/workspaces/{args.name}/latest.tar.gz"
     payload.pop("prompt", None)
+    # up の後に作った鍵も使えるようにする (mvm ssh は「鍵を用意して mvm renew」と案内している)。
+    # 鍵ファイルが見つからないときは、前回の鍵をそのまま使う
+    ssh_key = read_ssh_public_key()
+    if ssh_key:
+        payload["sshPublicKey"] = ssh_key
     stop(args.name, require_save=True)  # 保存できないまま作り直すと、古いスナップショットに戻ってしまう
     launch(args.name, payload, s.get("idle") or C["IDLE_MAX_SECONDS"], s.get("maxDuration") or C["MAX_DURATION_SECONDS"])
     return 0
@@ -2388,9 +2431,12 @@ def cmd_shell(args):
     def is_control(data):
         return data.startswith(b'{"type":"session_') and data.rstrip().endswith(b"}")
 
+    # 標準入力がパイプやファイル (printf '...' | mvm shell) なら、読み終えたら Ctrl-D でシェルを終わらせ、
+    # VM 側が閉じるまで出力を受け取る (すぐ閉じると、コマンドは VM で動いても結果が表示されない)
+    eof = None if sys.stdin.isatty() else b"\x04"
     with RawTerminal() as term:
         pump(ws, lambda: os.read(0, 4096), skip=is_control,
-             on_close=lambda: term.restore and term.restore())
+             on_close=lambda: term.restore and term.restore(), eof=eof)
     return 0
 
 
@@ -2399,10 +2445,26 @@ def proxy_command(name):
     return f'"{py}" "{SCRIPT.as_posix()}" _ssh-proxy {name}'
 
 
+def known_hosts_path(name):
+    """VM のホスト鍵を書くファイル。
+
+    os.devnull は Windows では nul になり、Windows の OpenSSH はそれを普通のファイル名として扱って
+    カレントフォルダに nul を作ってしまうので使わない。VM を作り直すと鍵が変わるので、起動のたびに消す。
+    """
+    return (STATE_DIR / "known_hosts").resolve() / name
+
+
+def known_hosts_option(name):
+    path = known_hosts_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)   # ssh はフォルダを作らない
+    text = path.as_posix()
+    return f'"{text}"' if re.search(r"\s", text) else text
+
+
 def ssh_options(name):
     return [
         "-o", f"ProxyCommand={proxy_command(name)}",
-        "-o", "StrictHostKeyChecking=no", "-o", f"UserKnownHostsFile={os.devnull}",
+        "-o", "StrictHostKeyChecking=no", "-o", f"UserKnownHostsFile={known_hosts_option(name)}",
         "-o", "LogLevel=ERROR", "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=4",
     ]
 
@@ -2584,7 +2646,7 @@ def render_ssh_config():
             "  User agent",
             f"  ProxyCommand {proxy_command(name)}",
             "  StrictHostKeyChecking no",
-            f"  UserKnownHostsFile {os.devnull}",
+            f"  UserKnownHostsFile {known_hosts_option(name)}",
             "  LogLevel ERROR",
             "  ServerAliveInterval 30",
             "  ServerAliveCountMax 4",
