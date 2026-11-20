@@ -8,7 +8,7 @@
 | 反映 | 意味 |
 |---|---|
 | すぐ | 次に `mvm` を実行したときから効く |
-| 起動時 | 次に `mvm up` / `fleet` / `renew` で起動したセッションから効く。起動中のセッションは変わらない |
+| 起動時 | 次に `mvm up` / `fleet` で起動したセッションから効く。起動中のセッションは変わらない。`mvm renew` は前回の起動時の値を引き継ぐ (`SSH_PUBLIC_KEY_FILE` と `INGRESS_CONNECTORS` だけは今の値を使う) |
 | image build | `mvm image build` で新しいイメージを作ると効く |
 | infra deploy | 管理者の権限で `mvm infra deploy` をやり直すと効く |
 
@@ -77,7 +77,7 @@
 | 項目 | 既定 | 反映 | 説明 |
 |---|---|---|---|
 | `GIT_USER_NAME` / `GIT_USER_EMAIL` | (空) | 起動時 | VM 内の git のコミット作成者。空なら git の既定のまま |
-| `SSH_PUBLIC_KEY_FILE` | `~/.ssh/id_ed25519.pub` | 起動時 | `mvm ssh` で使う公開鍵。`~` は macOS ではホーム、Windows では `%USERPROFILE%`。ファイルが無ければ SSH の受け口を作らない (`mvm shell` は使える) |
+| `SSH_PUBLIC_KEY_FILE` | `~/.ssh/id_ed25519.pub` | 起動時 | `mvm ssh` で使う公開鍵。`~` は macOS ではホーム、Windows では `%USERPROFILE%`。ファイルが無ければ SSH の受け口を作らない (`mvm shell` は使える)。鍵なしで起動した後に鍵を作ったら `mvm renew` で鍵付きに起動し直せる |
 
 ## 例: 用途別の設定
 

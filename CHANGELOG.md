@@ -34,6 +34,7 @@
 
 - `mvm follow`: Codex がリポジトリの `AGENTS.md` を読み込んだとき、その中身を利用者の指示として表示していた
 - `mvm ssh <name> --no-reconnect` (名前の後ろにオプションを書く、ドキュメントの書き方) で、`--no-reconnect` が ssh にコマンドとして渡り、接続できなかった
+- `mvm renew`: SSH 公開鍵なしで起動した後に鍵を作っても、鍵付きにならなかった (`mvm ssh` は「鍵を用意して `mvm renew`」と案内していた)。renew のときに `SSH_PUBLIC_KEY_FILE` を読み直す
 
 ### 変更
 
