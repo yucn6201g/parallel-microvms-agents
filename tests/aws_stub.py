@@ -117,6 +117,8 @@ if cmd == "lambda-microvms get-microvm":
         out({"state": "TERMINATING"})
     if os.environ.get("PMVA_STUB_GET_DENIED"):
         fail("AccessDeniedException")
+    if os.environ.get("PMVA_STUB_GET_ERROR"):   # AWS CLI のエラー文をそのまま返す (認証切れ、通信エラーなど)
+        fail(os.environ["PMVA_STUB_GET_ERROR"])
     if (D / f"{vid}.term").exists():
         out({"state": "TERMINATED"})
     out({"state": "SUSPENDED" if (D / f"{vid}.suspended").exists() else "RUNNING"})

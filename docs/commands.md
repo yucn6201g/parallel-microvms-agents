@@ -170,8 +170,8 @@ mvm fleet <台数> [--prefix <接頭辞>] [--prompts-file <ファイル>] [up �
 mvm ls [--all] [--json]
 ```
 
-セッションの一覧 (名前、状態、エージェント、認証方式、起動時刻、MicroVM の ID) です。`--all` で終了済みも表示します。状態は `RUNNING` / `SUSPENDED` / `TERMINATED` などで、AWS から状態を取れなかったときは `UNKNOWN` と表示します (終了扱いにはしません)。
-`--json` で、リポジトリと作業ブランチも含めて JSON の配列で出力します (スクリプトや、手元のエージェントから読むとき)。
+セッションの一覧 (名前、状態、エージェント、認証方式、起動時刻、MicroVM の ID) です。`--all` で終了済みも表示します。状態は `RUNNING` / `SUSPENDED` / `TERMINATED` などで、AWS から状態を取れなかったときは `UNKNOWN` と表示し (終了扱いにはしません)、一覧の後に理由とやるべきこと (`aws sso login` でログインし直す、`AWS_PROFILE` を確かめる、`mvm doctor` で確かめる、など) を標準エラーに出します。`watch` / `wait` / `top` も同じ理由を表示します。
+`--json` で、リポジトリと作業ブランチも含めて JSON の配列で出力します (スクリプトや、手元のエージェントから読むとき)。`UNKNOWN` の行には、理由とやるべきことを `stateError` に入れます。
 
 ### peek
 
@@ -281,6 +281,7 @@ mvm wait [<name>...] [--timeout <秒>] [--any] [--idle <秒>] [--interval <秒>]
 | `failed` | 起動の準備 (bootstrap) に失敗した | 返る |
 
 ほかに、セッション全体として `stalled` (上の `--idle`)、`suspended` (VM がサスペンド中。作業中の VM はサスペンドしないので、作業していない)、`terminated` (VM が終了した) でも返ります。`--agent both` のセッションは、両方のエージェントが終わるまで待ちます。
+AWS や VM から状態を取れないときは `unreachable` として待ち続けます。AWS の認証切れなどが理由のときは、`--json` の `error` と時間切れのときの表示に、理由とやるべきことを出します。
 
 - Codex は、許可・入力待ちを知らせる仕組みがないため、`waiting` になりません。承認待ちで止まったときは `--idle` の秒数が過ぎてから `stalled` で返ります。無人で動かすなら、承認を求めない設定 (`--codex-args "--dangerously-bypass-approvals-and-sandbox"` など) にしておきます
 - 待っている間は状態を確かめる通信をするので、そのセッションはサスペンドされません (終わった台は確かめるのをやめます)

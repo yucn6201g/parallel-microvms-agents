@@ -925,6 +925,9 @@ class CliTest(unittest.TestCase):
             api.statuses = [{"name": "a1", "agent": "claude", "bootstrap": "ready", "windows": []}]
             _, out, _ = self.mvm("top", "a1", env=env)
             self.assertIn("古いイメージ", out)
+            _, out, _ = self.mvm("top", "a1", env=dict(env, PMVA_STUB_GET_ERROR=self.SSO_EXPIRED))
+            self.assertIn("[a1] UNKNOWN", out)
+            self.assertIn("aws sso login", out)
         finally:
             api.shutdown()
 
@@ -1364,7 +1367,80 @@ class CliTest(unittest.TestCase):
         self.assertIn("RUNNING", out, "一時的なエラーで終了扱いにしない")
         rc, _, err = self.mvm("infra", "delete", input=b"y\n", env=dict(self.env, PMVA_STUB_GET_DENIED="1"), check=False)
         self.assertNotEqual(rc, 0)
+        # 状態を取れないときは「起動中」と決めつけず、取れない理由を出して止める
+        self.assertIn("u1 の状態を AWS から取得できません", err)
+        self.assertIn("権限", err)
+        rc, _, err = self.mvm("infra", "delete", input=b"y\n", check=False)
+        self.assertNotEqual(rc, 0)
         self.assertIn("stop-all", err)
+
+    SSO_EXPIRED = ("Error when retrieving token from sso: Token has expired and refresh failed\n")
+
+    def test_unknown_state_shows_reason_and_next_step(self):
+        """状態を取れなかったとき、UNKNOWN だけでなく理由とやるべきことを出す。"""
+        self.mvm("up", "u1")
+        self.mvm("up", "u2")
+        cases = [
+            (self.SSO_EXPIRED, "認証", "aws sso login"),
+            ("\nUnable to locate credentials. You can configure credentials by running \"aws configure\".\n",
+             "認証", "AWS_PROFILE"),
+            ("\nAn error occurred (ExpiredTokenException) when calling the GetMicrovm operation: "
+             "The security token included in the request is expired\n", "認証", "aws sso login"),
+            ("\nAn error occurred (AccessDeniedException) when calling the GetMicrovm operation: User: "
+             "arn:aws:iam::123456789012:user/x is not authorized to perform: lambda:GetMicrovm\n", "権限", "mvm doctor"),
+            ("\nCould not connect to the endpoint URL: \"https://lambda.ap-northeast-1.amazonaws.com/\"\n",
+             "接続", "ネットワーク"),
+            ("\nAn error occurred (InternalFailure) when calling the GetMicrovm operation: boom\n",
+             "InternalFailure", "mvm doctor"),
+        ]
+        for error, reason, action in cases:
+            with self.subTest(error=error.strip()[:40]):
+                env = dict(self.env, PMVA_STUB_GET_ERROR=error)
+                _, out, err = self.mvm("ls", env=env)
+                self.assertIn("UNKNOWN", out)
+                self.assertIn(reason, err)
+                self.assertIn(action, err)
+                self.assertEqual(err.count(reason), 1, f"同じ理由は 1 回だけ出す:\n{err}")
+                self.assertIn("u1", err)
+                self.assertIn("u2", err)
+                _, out, _ = self.mvm("ls", "--json", env=env)
+                rows = json.loads(out)
+                self.assertEqual(rows[0]["state"], "UNKNOWN")
+                self.assertIn(reason, rows[0]["stateError"])
+                self.assertIn(action, rows[0]["stateError"])
+        _, out, _ = self.mvm("ls", "--json")
+        self.assertNotIn("stateError", json.loads(out)[0], "取れたときは付けない")
+
+    def test_wait_reports_why_state_is_unknown(self):
+        self.mvm("up", "u1")
+        env = dict(self.env, PMVA_STUB_GET_ERROR=self.SSO_EXPIRED)
+        rc, out, _ = self.mvm("wait", "u1", "--timeout", "0.3", "--interval", "0.05", "--json", env=env, check=False)
+        r = json.loads(out)["sessions"][0]
+        self.assertEqual((rc, r["state"]), (2, "unreachable"))
+        self.assertIn("aws sso login", r["error"])
+        rc, _, err = self.mvm("wait", "u1", "--timeout", "0.3", "--interval", "0.05", env=env, check=False)
+        self.assertEqual(rc, 2)
+        self.assertIn("aws sso login", err)
+
+    def test_watch_shows_why_state_is_unknown(self):
+        self.mvm("up", "u1")
+        env = dict(self.env, PMVA_STUB_GET_ERROR=self.SSO_EXPIRED, TERM="dumb")
+        p = subprocess.Popen([sys.executable, str(MVM), "watch", "1"], stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, env=env)
+        try:
+            seen = b""
+            deadline = time.time() + 60
+            while b"(1 " not in seen and time.time() < deadline:
+                line = p.stdout.readline()
+                if not line:
+                    break
+                seen += line
+        finally:
+            p.kill()
+            p.communicate()
+        text = seen.decode("utf-8", "replace")
+        self.assertIn("[u1] UNKNOWN", text)
+        self.assertIn("aws sso login", text)
 
     def test_renew_keeps_vm_when_save_fails(self):
         api = StatusApi()
@@ -1381,6 +1457,7 @@ class CliTest(unittest.TestCase):
             rc, _, err = self.mvm("renew", "w1", env=dict(env, PMVA_STUB_GET_DENIED="1"), check=False)
             self.assertNotEqual(rc, 0)
             self.assertIn("UNKNOWN", err)
+            self.assertIn("権限", err, "状態を取れなかった理由も出す")
             self.assertFalse((self.stub_dir / "microvm-0000.term").exists())
             api.snapshot_ok = True
             self.mvm("renew", "w1", env=env)
