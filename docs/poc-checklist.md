@@ -119,7 +119,7 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 - [x] サスペンド → 自動レジュームで、tmux・バックグラウンドのプロセス・`/tmp` のファイルが残っていた。`peek` 1 回でレジュームし、応答まで 1.4 秒
   - エージェントが API を呼んでいる最中のサスペンドからの再接続は未確認 (Bedrock が使えなかったため)
 - [x] `mvm save` で S3 に保存 (12.8 秒) され、`mvm renew` で別の VM に復元された (保存 → 終了 → 起動 → 復元まで 19 秒。git の履歴も復元)
-- [x] terminate フックで保存される (`--no-save` で止めた VM の保存ファイルが `workspace-history/` に残っていた)
+- [x] terminate フックで保存される (`--no-save` で止めた VM の保存ファイルが `workspace-history/` に残っていた。`--no-save` でも保存していたのは不具合で、修正 26 で直した)
 - [ ] `--idle off` で 8 時間後に終了する (確認を取りやめた)
 
 ## F. 並列化
@@ -162,7 +162,7 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
   VM の中から実際に読む確認は未実施
 - [x] 毎晩の自動停止 (2026-11-20、`cron(0 23 * * ? *)`、Asia/Tokyo): 23:00:06 に Lambda `pmva-nightly-stop` が起動し、動いていた 2 台 (test-01、test-02) を保存してから終了した (`{"stopped": [...]}`、`save failed` は出ていない)。S3 の `workspaces/<名前>/latest.tar.gz` と `workspace-history/` に 23:00 の保存物があり、`mvm ls --all` で 2 台とも `TERMINATED`
   - 未修正: 終了のたびに 2 回保存している。Lambda (または `mvm stop`) が保存した約 3 秒後に、VM の terminate フックがもう一度保存する (test-02 は 14:00:07Z と 14:00:10Z)。保存の履歴と終了にかかる時間が倍になる
-  - 未修正: `mvm stop --no-save` でも、VM の terminate フックが保存し、`workspaces/<名前>/latest.tar.gz` を上書きする (test-err、test-ws で確認)。docs/commands.md の「保存せずに終了します」と食い違い、`--no-save` の後に `--restore latest` で「最後に保存できた時点に戻る」という mvm の案内も成り立たない
+  - 修正 26: `mvm stop --no-save` でも、VM の terminate フックが保存し、`workspaces/<名前>/latest.tar.gz` を上書きしていた (test-err、test-ws で確認)。docs/commands.md の「保存せずに終了します」と食い違い、`--no-save` の後に `--restore latest` で「最後に保存できた時点に戻る」という mvm の案内も成り立たなかった → 終了の前に `POST /terminate-save {"save": false}` で VM に伝え、terminate フックでも保存しない。実機での確認は未実施 (イメージの作り直しが要る)
 - [x] Claude Code / Codex の版の固定: `image/Dockerfile` で 2.1.312 / 0.165.0 に固定し、`mvm image versions` で npm レジストリの最新版と比べられることを確認。固定した版でのイメージのビルドも 2026-11-20 に実施 (VM の中で Claude Code v2.1.312 を確認)
 - [x] `mvm cost --actual`: 実際の Cost Explorer から取得できた (2026-10-27〜28 のアカウント全体で $0.01)
 - [x] インストールスクリプト (`scripts/install.sh` / `install.ps1`): CI で Windows / macOS / Linux それぞれ 2 回実行し、エイリアスが 1 行だけ登録されることを確認
