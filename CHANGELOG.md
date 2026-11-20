@@ -37,6 +37,7 @@
 - `mvm ssh <name> --no-reconnect` (名前の後ろにオプションを書く、ドキュメントの書き方) で、`--no-reconnect` が ssh にコマンドとして渡り、接続できなかった
 - `mvm doctor`: `mvm infra deploy` の直後でも「AWS の構成が、手元のテンプレートと違います」と出ていた。CloudFormation がテンプレートの日本語を `?` に置き換えて保存するため。比べる前に手元の側もそろえるようにした
 - `printf '...' | mvm shell <name>` のように標準入力をパイプやファイルにすると、コマンドは VM で動いても結果が表示されずに終わっていた。読み終えたら Ctrl-D でシェルを終わらせ、VM 側が閉じるまで出力を表示するようにした (`exit` を書かなくても終わる)
+- `mvm renew`: SSH 公開鍵なしで起動した後に鍵を作っても、鍵付きにならなかった (`mvm ssh` は「鍵を用意して `mvm renew`」と案内していた)。renew のときに `SSH_PUBLIC_KEY_FILE` を読み直す
 
 ### 変更
 

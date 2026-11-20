@@ -714,6 +714,26 @@ class CliTest(unittest.TestCase):
         self.assertEqual(renewed["restore"], "s3://pmva-bucket/workspaces/r1/latest.tar.gz")
         self.assertNotIn("prompt", renewed)
 
+    def test_renew_picks_up_ssh_key_created_after_up(self):
+        # mvm ssh は「SSH_PUBLIC_KEY_FILE を設定して mvm renew」と案内する。鍵なしで up した後に鍵を作ったら、
+        # renew で鍵付きに起動し直せること
+        key = self.home / ".ssh" / "id_ed25519.pub"
+        key.unlink()
+        self.mvm("up", "k1")
+        self.assertNotIn("sshPublicKey", self.payloads()[-1])
+        key.write_text("ssh-ed25519 AAAANEW new@pc\n", encoding="utf-8")
+        self.mvm("stop", "k1", "--no-save")
+        self.mvm("renew", "k1")
+        self.assertEqual(self.payloads()[-1]["sshPublicKey"], "ssh-ed25519 AAAANEW new@pc")
+        session = Path(self.env["PMVA_STATE_DIR"]) / "sessions" / "k1.json"
+        self.assertEqual(json.loads(session.read_text(encoding="utf-8"))["payload"]["sshPublicKey"],
+                         "ssh-ed25519 AAAANEW new@pc", "mvm ssh が見るセッションにも鍵が入る")
+        # 鍵ファイルが見つからなくなっても、前回の鍵はそのまま使う
+        key.unlink()
+        self.mvm("stop", "k1", "--no-save")
+        self.mvm("renew", "k1")
+        self.assertEqual(self.payloads()[-1]["sshPublicKey"], "ssh-ed25519 AAAANEW new@pc")
+
     def test_infra_delete_waits_for_termination(self):
         self.mvm("up", "d1")
         self.mvm("stop", "d1", "--no-save")

@@ -1551,10 +1551,7 @@ def build_payload(name, a):
         if not aws("s3api", "head-object", "--bucket", bucket, "--key", f"{PROFILE_PREFIX}{profile}.tar.gz", check=False):
             die(f"設定のまとまり {profile} がまだありません。mvm profile push --name {profile} で送ってください "
                 "(使わないなら --no-profile)")
-    ssh_key = ""
-    key_file = expand_path(C["SSH_PUBLIC_KEY_FILE"])
-    if key_file and key_file.exists():
-        ssh_key = key_file.read_text(encoding="utf-8").strip().splitlines()[0]
+    ssh_key = read_ssh_public_key()
     payload = {
         "name": name, "agent": agent, "region": C["AWS_REGION"],
         "claudeAuth": claude_auth, "claudeSecret": claude_secret,
@@ -1574,6 +1571,15 @@ def build_payload(name, a):
         **anthropic_aws,
     }
     return {k: v for k, v in payload.items() if v != ""}
+
+
+def read_ssh_public_key():
+    """SSH_PUBLIC_KEY_FILE の 1 行目。ファイルが無い・空なら空文字。"""
+    key_file = expand_path(C["SSH_PUBLIC_KEY_FILE"])
+    if not key_file or not key_file.exists():
+        return ""
+    lines = key_file.read_text(encoding="utf-8").strip().splitlines()
+    return lines[0].strip() if lines else ""
 
 
 def launch(name, payload, idle, max_duration):
@@ -1768,6 +1774,11 @@ def cmd_renew(args):
     payload = dict(s["payload"])
     payload["restore"] = f"s3://{bucket}/workspaces/{args.name}/latest.tar.gz"
     payload.pop("prompt", None)
+    # up の後に作った鍵も使えるようにする (mvm ssh は「鍵を用意して mvm renew」と案内している)。
+    # 鍵ファイルが見つからないときは、前回の鍵をそのまま使う
+    ssh_key = read_ssh_public_key()
+    if ssh_key:
+        payload["sshPublicKey"] = ssh_key
     stop(args.name, require_save=True)  # 保存できないまま作り直すと、古いスナップショットに戻ってしまう
     launch(args.name, payload, s.get("idle") or C["IDLE_MAX_SECONDS"], s.get("maxDuration") or C["MAX_DURATION_SECONDS"])
     return 0
