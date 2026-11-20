@@ -96,7 +96,10 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 
 - [x] Claude Code: `bedrock` → VM から Bedrock まで届くことを確認。ただし、このアカウントでは Bedrock の Anthropic モデル利用が有効になっていないため `API Error: 400 Access to Anthropic models is not allowed for this account.` で止まる (手元から直接呼んでも同じエラー)。Bedrock コンソールでモデルの利用申請をすれば使える見込み
   - 推論プロファイルは `jp.anthropic.claude-haiku-5-5` で確認 (Claude Code の表示は「Haiku 5.5 · Amazon Bedrock」)
-- [ ] Claude Code の `oauth-token` / `api-key` / `gateway` / `interactive` (実機は未確認)
+- [x] Claude Code の `oauth-token` (2026-11-20): `mvm up test-02 --no-github --prompt "一から五までを漢数字で一行ずつ書き、最後の行に「完了」とだけ書いてください。..."` で起動すると、`mvm wait` が `done`、`mvm result` が「一」〜「五」と「完了」を返した (Claude Code v2.1.312、Sonnet 5.5 · Claude API)
+  - 修正 24: 端末の折り返しごとコピーしたトークンを `mvm secret set` で登録すると、途中に空白や改行が入り `Not logged in · Please run /login` (401) で止まっていた (2 回続けて発生) → 登録時と VM の起動時に、トークンの途中の空白や改行を取り除く
+  - 未修正: 認証に失敗しても、bootstrap は `ready`、`mvm wait` は `waiting`、`mvm result` は「Claude is waiting for your input」と報告する。司令塔が失敗に気づけない
+- [ ] Claude Code の `api-key` / `gateway` / `interactive` (実機は未確認)
 - [ ] Codex の `api-key` / `chatgpt` / `interactive` (実機は未確認)
   - VM 内の初期化 (`bootstrap.sh`) が各方式で正しく設定することは、偽の認証情報を使った自動テスト (`tests/test_supervisor.py`) で確認済み: apiKeyHelper、`CLAUDE_CODE_OAUTH_TOKEN`、ゲートウェイの環境変数、Codex の `auth.json` と `codex login --with-api-key`、GitHub トークン、ファイルの権限 (600)、保存 (スナップショット) に認証情報が入らないこと
   - 修正 15: 登録していないシークレットを `oauth-token` に指定すると、空のトークンのまま「準備完了」になっていた → 失敗として扱う (このテストで発見)
