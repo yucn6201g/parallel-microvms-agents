@@ -33,6 +33,7 @@
 ### 修正
 
 - `mvm follow`: Codex がリポジトリの `AGENTS.md` を読み込んだとき、その中身を利用者の指示として表示していた
+- Windows で `mvm ssh` / `view` / `forward` / `login` を使うと、カレントフォルダに `nul` という名前のファイル (VM のホスト鍵) ができていた。ホスト鍵は `.state/known_hosts/<name>` に書き、VM を起動するたびに消す。`mvm ssh-config --install` で書いた設定も同じなので、入れ直す。前の版で作られた `nul` は消してよい (Git Bash なら `rm nul`)
 - `mvm ssh <name> --no-reconnect` (名前の後ろにオプションを書く、ドキュメントの書き方) で、`--no-reconnect` が ssh にコマンドとして渡り、接続できなかった
 
 ### 変更

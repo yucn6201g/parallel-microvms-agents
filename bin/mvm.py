@@ -1597,6 +1597,10 @@ def launch(name, payload, idle, max_duration):
         "idle": str(idle), "maxDuration": str(max_duration), "payload": payload, "terminated": False,
     })
     clear_tokens(name)
+    try:   # 前の VM のホスト鍵を残すと、鍵が変わったとして ssh が警告し、ポート転送 (VS Code、mvm forward) を止める
+        known_hosts_path(name).unlink()
+    except FileNotFoundError:
+        pass
     log(f"起動しました: {name} ({resp['microvmId']})")
     log(f"  様子を見る: mvm peek {name}   接続: mvm ssh {name} (または mvm shell {name})")
 
@@ -2334,10 +2338,26 @@ def proxy_command(name):
     return f'"{py}" "{SCRIPT.as_posix()}" _ssh-proxy {name}'
 
 
+def known_hosts_path(name):
+    """VM のホスト鍵を書くファイル。
+
+    os.devnull は Windows では nul になり、Windows の OpenSSH はそれを普通のファイル名として扱って
+    カレントフォルダに nul を作ってしまうので使わない。VM を作り直すと鍵が変わるので、起動のたびに消す。
+    """
+    return (STATE_DIR / "known_hosts").resolve() / name
+
+
+def known_hosts_option(name):
+    path = known_hosts_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)   # ssh はフォルダを作らない
+    text = path.as_posix()
+    return f'"{text}"' if re.search(r"\s", text) else text
+
+
 def ssh_options(name):
     return [
         "-o", f"ProxyCommand={proxy_command(name)}",
-        "-o", "StrictHostKeyChecking=no", "-o", f"UserKnownHostsFile={os.devnull}",
+        "-o", "StrictHostKeyChecking=no", "-o", f"UserKnownHostsFile={known_hosts_option(name)}",
         "-o", "LogLevel=ERROR", "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=4",
     ]
 
@@ -2519,7 +2539,7 @@ def render_ssh_config():
             "  User agent",
             f"  ProxyCommand {proxy_command(name)}",
             "  StrictHostKeyChecking no",
-            f"  UserKnownHostsFile {os.devnull}",
+            f"  UserKnownHostsFile {known_hosts_option(name)}",
             "  LogLevel ERROR",
             "  ServerAliveInterval 30",
             "  ServerAliveCountMax 4",

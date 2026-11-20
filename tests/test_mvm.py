@@ -958,6 +958,31 @@ class CliTest(unittest.TestCase):
         self.mvm("ssh", "s1", "--", "echo", "--no-reconnect", env=env)   # -- の後ろはそのままコマンド
         self.assertEqual(json.loads(record.read_text(encoding="utf-8"))[-2:], ["echo", "--no-reconnect"])
 
+    def test_ssh_known_hosts_file_is_not_devnull(self):
+        """Windows の OpenSSH は nul を普通のファイル名として扱い、カレントフォルダに nul を作ってしまう。
+        ホスト鍵は .state の下のセッションごとのファイルに書き、VM を作り直したら消す。"""
+        env, record = self.fake_ssh()
+        self.mvm("up", "s1", env=env)
+        self.mvm("ssh", "s1", "--", "true", env=env)
+        args = json.loads(record.read_text(encoding="utf-8"))
+        opts = [args[i + 1] for i, a in enumerate(args) if a == "-o"]
+        known = [o.split("=", 1)[1].strip('"') for o in opts if o.startswith("UserKnownHostsFile=")]
+        self.assertEqual(len(known), 1, opts)
+        self.assertNotEqual(known[0], os.devnull)
+        path = Path(known[0])
+        self.assertTrue(path.is_absolute(), path)
+        self.assertEqual(path.parent, (Path(self.env["PMVA_STATE_DIR"]) / "known_hosts").resolve())
+        self.assertTrue(path.parent.is_dir(), "ssh はフォルダを作らないので、先に作っておく")
+        # VM を作り直すとホスト鍵が変わるので、前の VM の鍵を消す (残すと警告が出て、ポート転送が止められる)
+        path.write_text("pmva-s1 ssh-ed25519 AAAAOLD\n", encoding="utf-8")
+        self.mvm("stop", "s1", "--no-save", env=env)
+        self.mvm("up", "s1", env=env)
+        self.assertFalse(path.exists())
+        # VS Code 用の ~/.ssh/config も同じファイルを使う
+        _, out, _ = self.mvm("ssh-config", env=env)
+        self.assertNotIn(f"UserKnownHostsFile {os.devnull}\n", out)
+        self.assertIn(path.as_posix(), out)
+
     def test_forward_ports(self):
         env, record = self.fake_ssh()
         self.mvm("up", "f1", env=env)
