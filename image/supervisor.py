@@ -10,6 +10,7 @@
                            会話記録 (指示・思考・ツールの実行と結果・応答) を、前回の続きから返す (mvm follow)
     POST /send             {"window": "claude", "text": "...", "enter": true} を tmux に送る
     POST /snapshot         ワークスペースを S3 に保存 (同期)
+    POST /terminate-save   {"save": false} で、terminate フックでの保存を止める (mvm stop --no-save)
 
 8080 へのアクセスは MicroVM のプロキシで IAM 由来の認証トークンが必須なので、ここでは認証しない。
 外部ライブラリに依存しないよう標準ライブラリのみで実装している。
@@ -39,6 +40,8 @@ HOOK_PORT = 9000
 API_PORT = 8080
 
 snapshot_lock = threading.Lock()
+# terminate フックで保存するか (mvm stop --no-save が /terminate-save で false にする)。run フックで true に戻す
+terminate_options = {"save": True}
 
 
 def log(msg):
@@ -671,6 +674,7 @@ class HookHandler(Handler):
             # 作業判定はイメージのスナップショット時点の値を引き継いでいるので、セッション開始時にリセットする
             activity.update(last=time.time(), cpu=None, screens=None)
             oom.update(base=oom_kill_count(), seen=0)
+            terminate_options["save"] = True
             os.makedirs(PMVA_DIR, mode=0o700, exist_ok=True)
             tmp = SESSION_FILE + ".tmp"
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -680,6 +684,10 @@ class HookHandler(Handler):
             start_bootstrap()
             return self.reply(200)
         if hook == "terminate":
+            if not terminate_options["save"]:
+                # mvm stop --no-save: 保存すると latest.tar.gz を上書きしてしまう (--restore latest で前の保存に戻れなくなる)
+                log("snapshot (terminate) skipped: --no-save")
+                return self.reply(200)
             # terminate フックのタイムアウト (最大 60 秒) 内でベストエフォート保存
             snapshot("terminate", timeout=50)
             return self.reply(200)
@@ -733,6 +741,16 @@ class ApiHandler(Handler):
         if url.path == "/snapshot":
             ok, out = snapshot("manual", timeout=900)
             return self.reply(200 if ok else 500, {"ok": ok, "output": out})
+        if url.path == "/terminate-save":
+            try:
+                save = json.loads(self.body() or b"{}").get("save")
+            except (ValueError, AttributeError):
+                return self.reply(400, {"error": "invalid json"})
+            if not isinstance(save, bool):
+                return self.reply(400, {"error": "save must be true or false"})
+            terminate_options["save"] = save
+            log(f"terminate snapshot: {'on' if save else 'off'}")
+            return self.reply(200, {"ok": True})
         return self.reply(404, {"error": "not found"})
 
 

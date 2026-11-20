@@ -1781,6 +1781,19 @@ def wait_running(name, timeout=60):
     return False
 
 
+def skip_terminate_save(name):
+    """--no-save: VM の terminate フックでの保存を止める (止めないと latest.tar.gz を上書きし、--restore latest で前の保存に戻れない)。"""
+    try:
+        r = vm_api(name, "POST", "/terminate-save", {"save": False}, timeout=30)
+        ok = bool(r.get("ok"))
+    except SystemExit as e:
+        print(e.code, file=sys.stderr)
+        ok = False
+    if not ok:
+        log("VM に「保存しない」と伝えられませんでした。終了時に保存されることがあります "
+            "(イメージが古ければ mvm image build で作り直してください)")
+
+
 def stop(name, save=True, require_save=False):
     """保存してから終了する。require_save=True なら、保存に失敗したときは終了せずに止める (renew 用)。"""
     state = vm_state(name)
@@ -1807,6 +1820,8 @@ def stop(name, save=True, require_save=False):
                     f"原因を確認して再実行するか、保存せずに作り直すなら mvm stop {name} --no-save → "
                     f"mvm up {name} --restore latest (最後に保存できた時点に戻ります)")
             log("保存に失敗しました (terminate フックでもう一度試みます)")
+    if not save and state in ("RUNNING", "SUSPENDED"):
+        skip_terminate_save(name)
     s = load_session(name)
     lmv("terminate-microvm", "--microvm-identifier", s["microvmId"])
     s["terminated"] = True

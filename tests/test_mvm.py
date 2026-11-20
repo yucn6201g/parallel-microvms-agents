@@ -1637,6 +1637,33 @@ class CliTest(unittest.TestCase):
         finally:
             api.shutdown()
 
+    def test_stop_no_save_tells_vm_not_to_save_on_terminate(self):
+        """--no-save でも VM の terminate フックが保存し、latest.tar.gz を上書きしていた。終了の前に VM に伝える。"""
+        api = StatusApi()
+        try:
+            env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}")
+            self.mvm("up", "n1", env=env)
+            self.mvm("stop", "n1", "--no-save", env=env)
+            self.assertIn(("/terminate-save", {"save": False}), api.received)
+            self.assertNotIn("/snapshot", [p for p, _ in api.received])
+            self.assertTrue((self.stub_dir / "microvm-0000.term").exists())
+            # ふだんの stop は保存するので、terminate フックの保存も止めない
+            api.received.clear()
+            self.mvm("up", "n2", env=env)
+            self.mvm("stop", "n2", env=env)
+            self.assertNotIn("/terminate-save", [p for p, _ in api.received])
+        finally:
+            api.shutdown()
+        # VM の API に届かなくても終了はする。終了時に保存されうることを伝える
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            closed = s.getsockname()[1]
+        env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{closed}")
+        self.mvm("up", "n3", env=env)
+        _, _, err = self.mvm("stop", "n3", "--no-save", env=env)
+        self.assertTrue((self.stub_dir / "microvm-0002.term").exists())
+        self.assertIn("終了時に保存されることがあります", err)
+
     def test_infra_delete_retains_undeletable_lambda(self):
         env = dict(self.env, PMVA_STUB_UNDELETABLE="KeepalivePermission,KeepaliveFunction")
         rc, _, err = self.mvm("infra", "delete", input=b"y\n", env=env)

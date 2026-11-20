@@ -180,7 +180,12 @@ class LocalVmTest(unittest.TestCase):
         self.mvm("up", "v1", "--restore", "latest")
         self.mvm("wait", "v1", "--timeout", "120", "--interval", "2")
         self.assertIn("made-by-claude.txt", self.vm_shell("v1", "ls ~/work"))
+        # --no-save なら terminate フックも保存せず、最後の保存 (latest.tar.gz) をそのまま残す
+        latest = next((self.stub / "s3").rglob("workspaces/v1/latest.tar.gz"))
+        saved = latest.read_bytes()
+        self.vm_shell("v1", "echo discard > ~/work/discard-me.txt")
         self.mvm("stop", "v1", "--no-save")
+        self.assertEqual(latest.read_bytes(), saved, "--no-save でも latest.tar.gz が上書きされた")
         self.assertEqual(self.ingress.rejected and [r for r in self.ingress.rejected if r[1] is None], [],
                          "トークンなしの要求はしない")
 

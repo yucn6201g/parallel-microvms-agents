@@ -147,7 +147,7 @@ Claude Code の hooks と Codex の `notify` から `image/notify.sh` を呼び�
 - `snapshot.sh` が `~/work` (リポジトリ)、`~/.claude`、`~/.codex` (会話履歴) を tar.gz にして S3 に保存します。認証情報ファイルは除外します。
   - 定期保存: `SNAPSHOT_INTERVAL_SECONDS` (既定 30 分)
   - 手動保存: `mvm save`。`mvm stop` も既定で終了前に保存
-  - 終了直前: terminate フック (最大 60 秒) で可能な範囲で保存
+  - 終了直前: terminate フック (最大 60 秒) で可能な範囲で保存。`mvm stop --no-save` は終了の前に `POST /terminate-save {"save": false}` で止める
 - `mvm renew` / `mvm up --restore latest` で新しい VM に復元します。
 - 基本は **git に push すること**です。作業ブランチは `pmva/<name>`。上流は base ブランチにせず、`push.autoSetupRemote` で同名ブランチに push されます。
 

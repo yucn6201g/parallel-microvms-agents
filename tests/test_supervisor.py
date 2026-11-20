@@ -923,6 +923,21 @@ class SupervisorTest(unittest.TestCase):
             self.assertNotIn(secret, names)
         self.assertFalse([n for n in names if n.startswith((".pmva", ".git-credentials"))], names)
 
+    def test_terminate_hook_saves_unless_told_not_to(self):
+        """terminate フックはふだん保存する。mvm stop --no-save が /terminate-save で止めたら保存しない。"""
+        self.run_session(snapshotBucket="bkt", region="ap-northeast-1")
+        code, _ = self.hook("terminate")
+        self.assertEqual(code, 200)
+        self.assertTrue((self.s3_out / "latest.tar.gz").exists(), "ふだんは終了時に保存する")
+        (self.s3_out / "latest.tar.gz").unlink()
+        code, r = self.request(self.api_port, "POST", "/terminate-save", {"save": False})
+        self.assertEqual((code, r.get("ok")), (200, True), r)
+        code, _ = self.hook("terminate")
+        self.assertEqual(code, 200)
+        self.assertFalse((self.s3_out / "latest.tar.gz").exists(), "--no-save なら終了時に保存しない")
+        code, r = self.request(self.api_port, "POST", "/terminate-save", {"save": "no"})
+        self.assertEqual(code, 400, "save は真偽値だけ受け付ける")
+
 
 if __name__ == "__main__":
     unittest.main()
