@@ -608,6 +608,21 @@ class SupervisorTest(unittest.TestCase):
         self.assertIn("user.name=山田 太郎", git)
         self.assertIn("push.autosetupremote=true", git)
 
+    def test_token_secrets_drop_whitespace_from_wrapped_paste(self):
+        # 端末の折り返しごとコピーして登録したトークン (途中に空白や改行) でも、正しい値として使う
+        self.add_secret("pmva/claude-oauth-token", "sk-ant-oat01-ab\ncd ef\r\n")
+        self.add_secret("pmva/codex-access-token", "at-ab cd")
+        self.add_secret("pmva/github-token", "ghp_ab\ncd")
+        st = self.run_session(agent="both", claudeAuth="oauth-token", claudeSecret="pmva/claude-oauth-token",
+                              codexAuth="access-token", codexSecret="pmva/codex-access-token",
+                              githubSecret="pmva/github-token")
+        self.assertEqual(st["bootstrap"], "ready")
+        self.assertEqual(self.env_value("CLAUDE_CODE_OAUTH_TOKEN"), "sk-ant-oat01-abcdef")
+        self.assertEqual(self.env_value("CODEX_ACCESS_TOKEN"), "at-abcd")
+        self.assertEqual(self.env_value("GH_TOKEN"), "ghp_abcd")
+        cred = self.home / ".git-credentials"
+        self.assertEqual(cred.read_text(encoding="utf-8"), "https://x-access-token:ghp_abcd@github.com\n")
+
     def test_codex_chatgpt_auth_json_and_gateway(self):
         auth = json.dumps({"tokens": {"access_token": "chatgpt-test"}})
         self.add_secret("pmva/codex-auth-json", auth)

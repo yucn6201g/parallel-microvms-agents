@@ -33,6 +33,14 @@ AWS の認証情報がない状態で、確認できる範囲を先に検証し�
   - `Max Execution Duration of a MicroVM` は 8 時間、イメージ数 100、イメージあたりのバージョン数 50
 - [x] `mvm infra deploy` が成功した (操作者は管理者ユーザーだったので `pmva-operator` のアタッチは未確認)
 
+### A の再確認 (2026-11-20、Windows 11 の手元 PC から。同じアカウントの SSO 管理者ロール)
+
+- [x] `mvm doctor`: AWS CLI 2.37.9 が `lambda-microvms` に対応、ベースイメージ `al2023-1` (2026-11-17 更新) が見える
+- [x] Service Quotas が引き上げ済み: `Max allocated ARM_64 MicroVM memory` が **80GB** (4GB の VM なら 20 台)、`Rate of RunMicrovm API requests` が 5 回/秒 (バースト 5)。実行時間の上限は 8 時間のまま
+- [x] `mvm infra deploy` が成功 (約 2 分 17 秒)。1 回目は、2026-10-29 に削除したスタックの Lambda 関数 `pmva-keepalive` だけが残っていて、事前チェック (修正 19) で止まった。ロールやルールは残っておらず、関数を消してやり直した
+- [x] 修正 22: `mvm doctor` が deploy の直後に「AWS の構成が、手元のテンプレートと違います」と出していた (誤検知) → 比べる前に手元のテンプレートの ASCII 以外の文字も `?` にそろえる。実機の doctor で `ok` になることを確認。CloudFormation が、テンプレートの日本語を 1 文字ずつ `?` に置き換えて保存するため。AWS CLI は UTF-8 で正しく送っていることを `--debug` で確認し、日本語だけの最小テンプレートの `validate-template` でも `??????` が返った。日本語はコメントと `Description` にしかなく、埋め込んだ Lambda のコードは保存されたものも構文として正しい (動作には影響しない)
+- [x] Bedrock: 推論プロファイルは見えるが、呼ぶと `Access to Anthropic models is not allowed for this account.` (前回と同じ)。今回の PoC は Claude Code の `oauth-token` で進める
+
 ## B. イメージビルド
 
 - [x] `mvm image build` が SUCCESSFUL になる (4 回失敗して修正した上で、v5 で成功)
@@ -42,6 +50,7 @@ AWS の認証情報がない状態で、確認できる範囲を先に検証し�
   - 修正 2: validate フックで `tmux --version` (誤り。正しくは `-V`) を待って接続が切れた → 検証を裏で実行し、終わるまで 503 を返す方式に変更
   - 修正 3: `/run` フックの本文は `{"microvmId": "...", "runHookPayload": "<文字列>"}` で届く (ペイロードそのものではない) → 中身を取り出すように修正
 - [x] スナップショットのサイズを記録した: メモリ約 713MB、イメージ本体約 2.8GB、追加ディスク約 25MB。Graviton 3 と 4 向けの 2 ビルドが作られる
+- [x] 2026-11-20、Windows 11 の手元 PC から現在の `image/` で再ビルド: 1 回で SUCCESSFUL (アップロードから完了まで約 4 分 16 秒)。メモリ約 717MB、イメージ本体約 3.47GB (Chromium のライブラリ、日本語フォント、uv などを足したぶん増えた)、追加ディスク約 35MB。Windows で作った資材 (zip) でも、スクリプトの改行が LF のまま動いた
 
 ## C. 起動と接続
 
@@ -173,7 +182,7 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 - [x] Codex の `workspace-write` サンドボックスで `mvm` が動く設定 (`network_access`、`writable_roots`): Codex 0.165.0 で、`mvm orchestrator install codex` が表示する設定を足すと中から `mvm peek` が動き、`writable_roots` が無いと状態の保存先に書けず、`network_access` が無いと接続できないことを確認 (`tests/test_agents_e2e.py`。以前は `/tmp` に書けることをサンドボックスが効かないと見誤っていた)
 - [x] イメージ (`image/Dockerfile`): 公開されているベースイメージで、Docker でビルドして動かした (amd64 は開発環境、ARM64 は CI の `image` ワークフロー)。headless の Chromium (Playwright 1.64.1) が日本語フォントで表示できること、uv で Python 3.12、`pmva-node` で Node.js 20、run フックから `.pmva/setup.sh` → エージェントの起動まで通ることを確認
   - Chromium のライブラリは GTK なしで足りる (headless の Chromium は GTK を使わない)。外すとイメージが約 290MB 小さくなった
-- [ ] Lambda MicroVMs の上でのイメージのビルド (`mvm image build`) と、ブラウザ・`setup.sh` の動作: 未確認
+- [ ] Lambda MicroVMs の上でのイメージのビルド (`mvm image build`) と、ブラウザ・`setup.sh` の動作: ビルドは 2026-11-20 に成功 (B を参照)。ブラウザと `setup.sh` の動作は未確認
 - [x] 手元の設定 (`mvm profile push`): 送るものの選び方と除外、VM での置き方 (自動テスト)。固定した版の Claude Code / Codex が `~/.claude/CLAUDE.md` / `~/.codex/AGENTS.md` を読むことを確認 (`tests/test_agents_e2e.py`)
 - [ ] S3 経由での `mvm profile push` → VM での取得: 未確認 (実行ロールの `profiles/*` の読み取りを含む)
 - [x] 本物のイメージの中での通しの動作 (2026-11-18、Docker。`tests/test_image.py`、CI の `image` ワークフロー): MicroVM と同じ run フックから、シークレットの取得 (`aws` の代わり)、設定のまとまりの取り込み、`--claude-auth custom` / `--codex-auth custom` で LLM API の代わりにつないだ本物の Claude Code / Codex を tmux の中で起動し、両方が完了するまで
