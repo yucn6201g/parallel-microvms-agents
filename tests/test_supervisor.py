@@ -54,6 +54,9 @@ def free_port():
 @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("tmux") and shutil.which("jq"),
                      "Linux と tmux / jq が必要")
 class SupervisorTest(unittest.TestCase):
+    # テスト名 → supervisor の起動を遅らせる秒数
+    SLOW_START = {"test_setup_waits_for_slow_supervisor_start": 6}
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         t = Path(self.tmp.name)
@@ -70,6 +73,10 @@ class SupervisorTest(unittest.TestCase):
         src = src.replace('"/proc/vmstat"', repr(str(self.vmstat)))
         # テストでは作業判定と状態の書き出しを 1 秒ごとにする
         src = src.replace("ACTIVITY_INTERVAL = 30", "ACTIVITY_INTERVAL = 1").replace("PUBLISH_INTERVAL = 60", "PUBLISH_INTERVAL = 1")
+        # 混んだ CI のマシンで supervisor の起動が遅れる場合を真似る (test_setup_waits_for_slow_supervisor_start だけ)
+        delay = self.SLOW_START.get(self._testMethodName)
+        if delay:
+            src = src.replace("def main():\n", f"def main():\n    time.sleep({delay})\n", 1)
         (opt / "supervisor.py").write_text(src, encoding="utf-8")
         for name in ("bootstrap.sh", "snapshot.sh", "notify.sh"):
             shutil.copy(ROOT / "image" / name, opt / name)
@@ -114,14 +121,43 @@ class SupervisorTest(unittest.TestCase):
                         HISTFILE="")
         self.opt = opt
         self.env.pop("TMUX", None)
-        self.proc = subprocess.Popen([sys.executable, str(opt / "supervisor.py")], env=self.env,
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        for _ in range(50):
+        # supervisor の標準エラーは、起動に失敗したときの手がかりとしてファイルに残す
+        self.stderr_path = t / "supervisor.stderr"
+        with open(self.stderr_path, "wb") as err:
+            self.proc = subprocess.Popen([sys.executable, str(opt / "supervisor.py")], env=self.env,
+                                         stdout=subprocess.DEVNULL, stderr=err)
+        self.wait_supervisor()
+
+    def wait_supervisor(self, timeout=30):
+        """API とフックの両方のポートが開くまで待つ。
+
+        フックのサーバーは別スレッドで起動するので、API が応答してもフックがまだのことがある。
+        混んだ CI のマシンでは起動に 5 秒以上かかることがあるので、余裕を持って待ち、
+        間に合わなければ黙って進まずに失敗させる (後のテストで Connection refused になって原因が分かりにくくなるため)。
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            code = self.proc.poll()
+            if code is not None:
+                self.fail_setup(f"supervisor が起動の途中で終了しました (終了コード {code})")
             try:
+                for port in (self.api_port, self.hook_port):
+                    socket.create_connection(("127.0.0.1", port), timeout=1).close()
                 self.get("/healthz")
-                break
+                return
             except OSError:
+                if time.monotonic() > deadline:
+                    self.fail_setup(f"supervisor が {timeout} 秒たってもポートを開きません")
                 time.sleep(0.1)
+
+    def fail_setup(self, message):
+        # setUp で失敗すると tearDown は呼ばれないので、ここで後片付けしてから失敗させる
+        stderr = self.supervisor_stderr()
+        self.tearDown()
+        self.fail(f"{message}:\n{stderr}")
+
+    def supervisor_stderr(self):
+        return self.stderr_path.read_text(encoding="utf-8", errors="replace")[-2000:]
 
     def tearDown(self):
         self.webhook.shutdown()
@@ -163,6 +199,12 @@ class SupervisorTest(unittest.TestCase):
                 return st
             time.sleep(0.2)
         self.fail("bootstrap did not finish")
+
+    def test_setup_waits_for_slow_supervisor_start(self):
+        """起動に 5 秒以上かかっても、setUp は API とフックの両方のポートが開くまで待つ (CI で Connection refused になっていた)。"""
+        code, _ = self.get("/healthz")
+        self.assertEqual(code, 200)
+        socket.create_connection(("127.0.0.1", self.hook_port), timeout=5).close()
 
     def test_validate_answers_503_then_200(self):
         codes = []
