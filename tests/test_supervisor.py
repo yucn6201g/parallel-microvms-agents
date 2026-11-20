@@ -121,14 +121,43 @@ class SupervisorTest(unittest.TestCase):
                         HISTFILE="")
         self.opt = opt
         self.env.pop("TMUX", None)
-        self.proc = subprocess.Popen([sys.executable, str(opt / "supervisor.py")], env=self.env,
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        for _ in range(50):
+        # supervisor の標準エラーは、起動に失敗したときの手がかりとしてファイルに残す
+        self.stderr_path = t / "supervisor.stderr"
+        with open(self.stderr_path, "wb") as err:
+            self.proc = subprocess.Popen([sys.executable, str(opt / "supervisor.py")], env=self.env,
+                                         stdout=subprocess.DEVNULL, stderr=err)
+        self.wait_supervisor()
+
+    def wait_supervisor(self, timeout=30):
+        """API とフックの両方のポートが開くまで待つ。
+
+        フックのサーバーは別スレッドで起動するので、API が応答してもフックがまだのことがある。
+        混んだ CI のマシンでは起動に 5 秒以上かかることがあるので、余裕を持って待ち、
+        間に合わなければ黙って進まずに失敗させる (後のテストで Connection refused になって原因が分かりにくくなるため)。
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            code = self.proc.poll()
+            if code is not None:
+                self.fail_setup(f"supervisor が起動の途中で終了しました (終了コード {code})")
             try:
+                for port in (self.api_port, self.hook_port):
+                    socket.create_connection(("127.0.0.1", port), timeout=1).close()
                 self.get("/healthz")
-                break
+                return
             except OSError:
+                if time.monotonic() > deadline:
+                    self.fail_setup(f"supervisor が {timeout} 秒たってもポートを開きません")
                 time.sleep(0.1)
+
+    def fail_setup(self, message):
+        # setUp で失敗すると tearDown は呼ばれないので、ここで後片付けしてから失敗させる
+        stderr = self.supervisor_stderr()
+        self.tearDown()
+        self.fail(f"{message}:\n{stderr}")
+
+    def supervisor_stderr(self):
+        return self.stderr_path.read_text(encoding="utf-8", errors="replace")[-2000:]
 
     def tearDown(self):
         self.webhook.shutdown()
