@@ -324,20 +324,64 @@ def session_names():
     return sorted(p.stem for p in (STATE_DIR / "sessions").glob("*.json"))
 
 
+AWS_AUTH_EXPIRED = ("Token has expired", "ExpiredToken", "security token included in the request is expired",
+                    "SSO session", "Error loading SSO Token", "sso login")
+AWS_AUTH_MISSING = ("Unable to locate credentials", "could not be found", "UnrecognizedClientException",
+                    "InvalidClientTokenId", "security token included in the request is invalid", "InvalidSignature")
+AWS_NETWORK = ("Could not connect", "Connect timeout", "Read timeout", "EndpointConnectionError",
+               "Connection was closed", "SSL validation failed", "Max retries exceeded")
+
+
+def aws_error_hint(err):
+    """AWS CLI のエラー文から、利用者向けの理由と次にやることを 1 行で返す。"""
+    if any(m in err for m in AWS_AUTH_EXPIRED):
+        return ("AWS の認証が切れています → aws sso login でログインし直し (SSO でなければアクセスキーを更新し)、"
+                "mvm doctor で確かめてください")
+    if any(m in err for m in AWS_AUTH_MISSING):
+        return ("AWS の認証情報が見つからないか無効です → AWS_PROFILE (config.env または環境変数) とプロファイルの設定を確かめ、"
+                "mvm doctor で確かめてください")
+    if "AccessDenied" in err or "not authorized" in err:
+        return "VM の状態を見る権限がありません → 使っているプロファイルが正しいかを mvm doctor で確かめてください"
+    if any(m in err for m in AWS_NETWORK):
+        return "AWS に接続できません → ネットワーク (プロキシ、VPN) を確かめてください"
+    if any(m in err for m in THROTTLE_MARKERS):
+        return "AWS の API の呼び出し回数の上限に当たりました → しばらく待ってからやり直してください"
+    lines = [x.strip() for x in err.splitlines() if x.strip()]
+    first = lines[0][:160] if lines else "AWS から状態を取得できませんでした"
+    return f"{first} → mvm doctor で AWS の設定を確かめてください"
+
+
+_state_errors = {}   # vm_state が UNKNOWN を返したときの理由 (名前 → aws_error_hint の結果)
+
+
+def state_error(name):
+    return _state_errors.get(name, "")
+
+
+def unknown_notes(names):
+    """状態を取れなかったセッションを理由ごとにまとめた警告の行。"""
+    groups = {}
+    for name in names:
+        groups.setdefault(state_error(name) or aws_error_hint(""), []).append(name)
+    return [f"!! {', '.join(ns)} の状態を AWS から取得できません (UNKNOWN): {hint}" for hint, ns in groups.items()]
+
+
 def vm_state(name):
     """MicroVM の状態。存在しなければ GONE。終了していればローカル状態にも反映する。
 
     権限エラーや通信エラーで状態を取れなかったときは UNKNOWN を返し、終了扱いにはしない
-    (終了扱いにすると一覧から消え、infra delete も起動中の VM を見落とすため)。
+    (終了扱いにすると一覧から消え、infra delete も起動中の VM を見落とすため)。理由は state_error で取れる。
     """
     s = load_session(name)
     r = lmv("get-microvm", "--microvm-identifier", s["microvmId"], check=False)
+    _state_errors.pop(name, None)
     if r:
         state = r.get("state", "GONE")
     elif "ResourceNotFound" in last_aws_error():
         state = "GONE"
     else:
         debug(f"get-microvm {name} failed: {last_aws_error().strip()}")
+        _state_errors[name] = aws_error_hint(last_aws_error())
         return "UNKNOWN"
     if state in ("TERMINATED", "GONE") and not s.get("terminated"):
         s["terminated"] = True
@@ -988,7 +1032,13 @@ def cmd_infra(args):
         ans = input(f"スタック {C['STACK_NAME']} と S3 バケット {bucket} の中身を削除します。よろしいですか? [y/N] ")
         if ans.strip().lower() != "y":
             die("中止しました")
-        if active_names():
+        active = active_names()
+        unknown = [n for n in active if state_error(n)]
+        if unknown:
+            for line in unknown_notes(unknown):
+                print(line, file=sys.stderr)
+            die("終了したか確かめられないセッションがあります。上の理由を解消してから、もう一度実行してください")
+        if active:
             die("起動中のセッションがあります。先に mvm stop-all を実行してください")
         # 終了処理中の VM は terminate フックでワークスペースを S3 に保存する。
         # バケットを空にした後に書き込まれると削除に失敗するので、終了しきるまで待つ (PoC で発生)
@@ -1682,7 +1732,7 @@ def print_json(obj):
 
 def cmd_ls(args):
     fmt = "{:<16} {:<11} {:<7} {:<22} {:<22} {}"
-    rows = []
+    rows, unknown = [], []
     if not args.json:
         print(fmt.format("NAME", "STATE", "AGENT", "AUTH", "STARTED", "MICROVM"))
     for name in session_names():
@@ -1692,6 +1742,8 @@ def cmd_ls(args):
         state = vm_state(name)
         if state in ("TERMINATED", "GONE") and not args.all:
             continue
+        if state == "UNKNOWN":
+            unknown.append(name)
         p = s.get("payload", {})
         auth = f"{p.get('claudeAuth', '-')}/{p.get('codexAuth', '-')}"
         started = s.get("startedAt") or "-"
@@ -1701,10 +1753,15 @@ def cmd_ls(args):
             rows.append({"name": name, "state": state, "agent": p.get("agent"), "claudeAuth": p.get("claudeAuth"),
                          "codexAuth": p.get("codexAuth"), "repo": p.get("repo"), "branch": p.get("branch"),
                          "startedAt": started if started != "-" else None, "microvmId": s["microvmId"]})
+            if state == "UNKNOWN":
+                rows[-1]["stateError"] = state_error(name)
         else:
             print(fmt.format(name, state, p.get("agent", "-"), auth, started, s["microvmId"]))
     if args.json:
         print_json(rows)
+    sys.stdout.flush()   # 一覧を出し切ってから警告を出す (パイプでも順番を保つ)
+    for line in unknown_notes(unknown):
+        print(line, file=sys.stderr)
     return 0
 
 
@@ -1731,7 +1788,8 @@ def stop(name, save=True, require_save=False):
         log(f"{name} は既に終了しています")
         return
     if require_save and state not in ("RUNNING", "SUSPENDED"):
-        die(f"{name} の状態が {state} のため保存できません。作業内容を失わないよう、終了せずに止めました")
+        reason = f" ({state_error(name)})" if state == "UNKNOWN" else ""
+        die(f"{name} の状態が {state} のため保存できません。作業内容を失わないよう、終了せずに止めました{reason}")
     if save and state in ("RUNNING", "SUSPENDED"):
         if state == "SUSPENDED":
             # サスペンド中は保存できないので再開する (自動レジュームが無効でも保存できるように明示的に)
@@ -1959,6 +2017,8 @@ def cmd_top(args):
     for name in names:
         vm = vm_state(name)
         r = {"name": name, "vm": vm}
+        if vm == "UNKNOWN":
+            r["error"] = state_error(name)
         if vm == "RUNNING":
             try:
                 st = vm_api(name, "GET", "/status?lines=0", timeout=15)
@@ -2244,7 +2304,8 @@ def wait_check(name, idle_limit):
         # 作業中の VM はキープアライブとアイドル判定で起きているので、サスペンドしているなら作業はしていない
         return dict(r, state="suspended", finished=True)
     if vm == "UNKNOWN":
-        return dict(r, state="unreachable")   # AWS から状態を取れなかった。次の確認でもう一度試す
+        # AWS から状態を取れなかった。次の確認でもう一度試す
+        return dict(r, state="unreachable", error=state_error(name))
     if vm != "RUNNING":
         return dict(r, state="starting")
     try:
@@ -2313,6 +2374,8 @@ def cmd_wait(args):
     elif pending:
         log(("時間切れです。" if not enough else "") + "まだ終わっていないセッション: " +
             ", ".join(f"{n} ({results[n]['state']})" for n in pending))
+        for line in unknown_notes([n for n in pending if results[n].get("vm") == "UNKNOWN"]):
+            print(line, file=sys.stderr)
     return 0 if enough else 2
 
 
@@ -2342,6 +2405,8 @@ def cmd_watch(args):
                         out.append(format_status(vm_api(name, "GET", "/status?lines=6", timeout=15)))
                     except SystemExit:
                         out.append(f"[{name}] RUNNING (状態 API 応答なし)")
+                elif state == "UNKNOWN":
+                    out.append(f"[{name}] UNKNOWN: {state_error(name) or aws_error_hint('')}")
                 else:
                     out.append(f"[{name}] {state}")
             clear_screen()
