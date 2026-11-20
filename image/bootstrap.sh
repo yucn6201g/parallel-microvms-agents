@@ -32,6 +32,8 @@ export AWS_REGION="${REGION:-${AWS_REGION:-}}"
 export AWS_DEFAULT_REGION="$AWS_REGION"
 
 secret() { aws secretsmanager get-secret-value --secret-id "$1" --query SecretString --output text; }
+# 1 行のトークン。端末の折り返しごと登録された値 (途中に空白や改行) でも使えるように、空白を取り除く
+token_secret() { local v; v="$(secret "$1")" || return; printf '%s' "${v//[[:space:]]/}"; }
 addenv() { printf 'export %s=%q\n' "$1" "$2" >> "$ENV_FILE"; }
 # AWS のリージョン名 (設定ファイルに書くので、形を確かめてから使う)
 valid_region() { [[ "$1" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]+$ ]]; }
@@ -80,7 +82,7 @@ log "claude auth: $CLAUDE_AUTH"
 case "$CLAUDE_AUTH" in
   api-key)
     # apiKeyHelper を使うと起動時の「この API キーを使いますか？」確認が出ない
-    secret "$CLAUDE_SECRET" > "$SECRETS_DIR/anthropic_api_key"
+    token_secret "$CLAUDE_SECRET" > "$SECRETS_DIR/anthropic_api_key"
     printf '#!/bin/sh\ncat %q\n' "$SECRETS_DIR/anthropic_api_key" > "$PMVA/anthropic-key-helper"
     chmod 700 "$PMVA/anthropic-key-helper"
     settings="$HOME/.claude/settings.json"
@@ -90,7 +92,7 @@ case "$CLAUDE_AUTH" in
   oauth-token)
     # ローカル PC で `claude setup-token` して得た長期トークン (Pro/Max サブスクリプション)
     # addenv の引数の中で secret が失敗しても set -e では止まらないので、いったん変数に受ける
-    token="$(secret "$CLAUDE_SECRET")"
+    token="$(token_secret "$CLAUDE_SECRET")"
     addenv CLAUDE_CODE_OAUTH_TOKEN "$token"
     unset token
     ;;
@@ -101,7 +103,7 @@ case "$CLAUDE_AUTH" in
     ;;
   bedrock-api-key)
     # Amazon Bedrock の API キー (別の AWS アカウントの Bedrock を使うときなど)。実行ロールより優先される
-    key="$(secret "$CLAUDE_SECRET")"
+    key="$(token_secret "$CLAUDE_SECRET")"
     addenv CLAUDE_CODE_USE_BEDROCK 1
     addenv AWS_BEARER_TOKEN_BEDROCK "$key"
     addenv AWS_REGION "$BEDROCK_REGION"
@@ -121,7 +123,7 @@ case "$CLAUDE_AUTH" in
     anthropic_aws_region="$(j .anthropicAwsRegion)"
     addenv AWS_REGION "${anthropic_aws_region:-$AWS_REGION}"
     if [ "$CLAUDE_AUTH" = anthropic-aws-api-key ]; then
-      key="$(secret "$CLAUDE_SECRET")"
+      key="$(token_secret "$CLAUDE_SECRET")"
       addenv ANTHROPIC_AWS_API_KEY "$key"
       unset key
     fi
@@ -147,7 +149,7 @@ CODEX_PROVIDER_ID=""; CODEX_PROVIDER=""
 log "codex auth: $CODEX_AUTH"
 case "$CODEX_AUTH" in
   api-key)
-    key="$(secret "$CODEX_SECRET")"
+    key="$(token_secret "$CODEX_SECRET")"
     addenv OPENAI_API_KEY "$key"
     printf '%s' "$key" | codex login --with-api-key >/dev/null 2>&1 || warn "codex login --with-api-key failed"
     unset key
@@ -159,7 +161,7 @@ case "$CODEX_AUTH" in
   access-token)
     # ChatGPT のアカウントのアクセストークン (at- で始まる個人用のトークン、またはエージェント用の JWT)。
     # ログインの保存に失敗しても、環境変数から読める
-    token="$(secret "$CODEX_SECRET")"
+    token="$(token_secret "$CODEX_SECRET")"
     addenv CODEX_ACCESS_TOKEN "$token"
     printf '%s' "$token" | codex login --with-access-token >/dev/null 2>&1 || warn "codex login --with-access-token failed"
     unset token
@@ -211,7 +213,7 @@ case "$CODEX_AUTH" in
     else
       # API キーは環境変数に出さず、ファイルから読ませる (Claude Code の Bedrock のキーと混ざらないように)。
       # キーを使うときは aws (リージョン) を書けないので、接続先の URL でリージョンを決める
-      secret "$CODEX_SECRET" > "$SECRETS_DIR/codex_bedrock_api_key"
+      token_secret "$CODEX_SECRET" > "$SECRETS_DIR/codex_bedrock_api_key"
       CODEX_PROVIDER_ID=amazon-bedrock
       CODEX_PROVIDER="model_providers.amazon-bedrock.base_url = \"https://bedrock-mantle.$BEDROCK_REGION.api.aws/openai/v1\"
 model_providers.amazon-bedrock.auth = { command = \"cat\", args = [$(jq -rn --arg p "$SECRETS_DIR/codex_bedrock_api_key" '$p | @json')] }"
@@ -239,7 +241,7 @@ fi
 GITHUB_SECRET="$(j .githubSecret)"
 if [ -n "$GITHUB_SECRET" ]; then
   log "github token: $GITHUB_SECRET"
-  token="$(secret "$GITHUB_SECRET")"
+  token="$(token_secret "$GITHUB_SECRET")"
   printf 'https://x-access-token:%s@github.com\n' "$token" > "$HOME/.git-credentials"
   git config --global credential.helper store
   addenv GH_TOKEN "$token"
