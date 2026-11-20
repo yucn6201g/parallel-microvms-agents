@@ -56,7 +56,7 @@ case "$kind" in
     message="$(jq -r '.message // "入力を待っています"' <<<"$event" 2>/dev/null)"
     # 応答が終わってしばらく入力がないときの通知 (idle_prompt) では、「完了」「エラー」を「入力待ち」で上書きしない
     now="$(current claude)"
-    if [ "$(jq -r '.notification_type // empty' <<<"$event" 2>/dev/null)" != idle_prompt ] || { [ "$now" != done ] && [ "$now" != error ]; }; then
+    if [ "$(jq -r '.notification_type // empty' <<<"$event" 2>/dev/null)" != idle_prompt ] || { [ "$now" != "done" ] && [ "$now" != "error" ]; }; then
       record claude waiting "$(jq -nc --arg m "$message" '{message: $m}')"
     fi
     msg="Claude Code: $message"
