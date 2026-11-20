@@ -633,11 +633,13 @@ def ws_protocols(token, port):
     return [f"lambda-microvms.authentication.{token}", "lambda-microvms", f"lambda-microvms.port.{port}"]
 
 
-def pump(ws, read_input, skip=None, on_close=None):
+def pump(ws, read_input, skip=None, on_close=None, eof=None):
     """標準入力 → WebSocket、WebSocket → 標準出力 を中継する。どちらかが閉じたら終了。
 
     skip: 表示しないメッセージを判定する関数 (シェル接続の制御メッセージ用)
     on_close: 相手が切断したときに、プロセス終了前に呼ぶ関数 (端末設定の復元用)
+    eof: 指定すると、標準入力が閉じたときにこのバイト列を送り (最後の行が改行で終わっていなければ改行を足す)、
+         相手が閉じるまで出力を受け続ける。指定しなければ、標準入力が閉じた時点で接続を閉じる
     """
     def to_stdout():
         while True:
@@ -660,18 +662,29 @@ def pump(ws, read_input, skip=None, on_close=None):
                 debug(f"ping failed: {e!r}")
                 return
 
-    threading.Thread(target=to_stdout, daemon=True).start()
+    reader = threading.Thread(target=to_stdout, daemon=True)
+    reader.start()
     threading.Thread(target=keepalive, daemon=True).start()
+    last = b"\n"
     while True:
         data = read_input()
         if not data:
             debug("stdin closed")
+            if eof is not None:
+                try:
+                    ws.send((b"" if last in (b"\n", b"\r") else b"\n") + eof)
+                    # 相手が閉じると to_stdout がプロセスを終える。Ctrl-C で止められるよう、短い間隔で待つ
+                    while reader.is_alive():
+                        reader.join(0.5)
+                except OSError as e:
+                    debug(f"send failed: {e!r}")
             break
         try:
             ws.send(data)
         except OSError as e:
             debug(f"send failed: {e!r}")
             break
+        last = data[-1:]
     ws.close()
 
 
@@ -2323,9 +2336,12 @@ def cmd_shell(args):
     def is_control(data):
         return data.startswith(b'{"type":"session_') and data.rstrip().endswith(b"}")
 
+    # 標準入力がパイプやファイル (printf '...' | mvm shell) なら、読み終えたら Ctrl-D でシェルを終わらせ、
+    # VM 側が閉じるまで出力を受け取る (すぐ閉じると、コマンドは VM で動いても結果が表示されない)
+    eof = None if sys.stdin.isatty() else b"\x04"
     with RawTerminal() as term:
         pump(ws, lambda: os.read(0, 4096), skip=is_control,
-             on_close=lambda: term.restore and term.restore())
+             on_close=lambda: term.restore and term.restore(), eof=eof)
     return 0
 
 

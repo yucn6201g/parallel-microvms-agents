@@ -58,14 +58,23 @@ AWS の認証情報がない状態で、確認できる範囲を先に検証し�
 - [ ] トークンの有効期限 (60 分) を過ぎても確立済みの SSH 接続が維持されるか: 確かめられなかった。65 分の接続を試したところ、35 分 48 秒で切れた。切れた時刻は、このクラウドセッションの送信用中継が再起動した時刻 (WebSocket の close コード 1012 `server_draining`) と一致しており、AWS 側の切断ではなかった (G を参照)。`mvm ssh` は切れると再接続し、そのたびに新しいトークンを使うので、実運用では期限は問題にならない
 - [ ] VS Code Remote-SSH (未確認: C2 で手元 PC から確認する)
 
+### C の再確認 (2026-11-20、Windows 11 の手元 PC から。イメージ 1.0)
+
+- [x] `mvm up test-01 --agent none --no-github`: `run-microvm` まで約 3 秒、`bootstrap=ready` まで約 12 秒。VM の中から見えるメモリは 15.7GiB (前回と同じ)
+- [x] `mvm ls` / `peek`、`mvm send test-01 --window shell '...'` で送った日本語の指示が tmux に届き、Enter で実行された (`日本語テスト agent aarch64`)
+- [x] `mvm shell` に標準入力から送ったコマンドが root で動き、出力が返る (入力の後も標準入力を開けておいた場合)
+- [x] 修正 23: `printf 'id; exit\n' | mvm shell test-01` のように、入力を一度に流し込んで標準入力がすぐ閉じると、何も表示されずに終わっていた。入力は VM に届いて実行されていたが、標準入力が閉じた時点で `mvm shell` が接続を閉じ、応答を待たなかった → 標準入力が端末でなければ、読み終えたら Ctrl-D (`\x04`、最後の行に改行がなければ先に改行) を送り、VM 側が閉じるまで出力を受け取る。実機で、`exit` ありとなし、改行なしの入力のどちらも結果が表示されて約 1 秒で終わることを確認
+  - VM 側はシェルが終わると接続を閉じる (`exit` の直後に close を受け取ることを、生のメッセージで確認)
+- [x] `mvm watch 3`: 3 秒ごとに更新される (出力を取り込んで確認。画面の消去は Windows では `cls`。本物のコンソールでの見た目は未確認)
+
 ## C2. 手元 PC の OS ごとの確認
 
 Windows と macOS の両方で使う場合は、それぞれで確認します。
 
 | 確認項目 | Windows (PowerShell / Windows Terminal) | macOS (ターミナル / iTerm2) |
 |---|---|---|
-| `mvm doctor` が OK | [ ] | [ ] |
-| `mvm up` / `ls` / `peek` / `send` / `watch` | [ ] | [ ] |
+| `mvm doctor` が OK | [x] 2026-11-20 (Python 3.14、AWS CLI 2.37.9) | [ ] |
+| `mvm up` / `ls` / `peek` / `send` / `watch` | [x] 2026-11-20 (`watch` の見た目は未確認。C の再確認を参照) | [ ] |
 | `mvm ssh` で tmux にアタッチ、日本語の表示・入力 | [ ] | [ ] |
 | `mvm shell` (Windows はコンソールの VT モードを使う実装。表示・キー入力・Ctrl-C) | [ ] | [ ] |
 | VS Code Remote-SSH (`mvm ssh-config --install`) | [ ] | [ ] |

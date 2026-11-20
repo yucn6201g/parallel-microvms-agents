@@ -99,6 +99,7 @@ class EchoWebSocketServer:
         conn.sendall(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                       f"Sec-WebSocket-Accept: {accept}\r\nSec-WebSocket-Protocol: lambda-microvms\r\n\r\n").encode())
         conn.sendall(bytes([0x89, 0]))  # クライアントの pong 応答を試すため ping を送る
+        self._on_open(conn)
         for _ in range(self.flood // 65536):
             conn.sendall(bytes([0x82, 127]) + (65536).to_bytes(8, "big") + os.urandom(65536))
         try:
@@ -120,18 +121,63 @@ class EchoWebSocketServer:
                 if opcode == 0x8:
                     conn.sendall(bytes([0x88, 0]))
                     break
-                if opcode in (0x1, 0x2):
-                    if len(data) < 126:
-                        frame = bytes([0x82, len(data)])
-                    elif len(data) < 65536:
-                        frame = bytes([0x82, 126]) + len(data).to_bytes(2, "big")
-                    else:
-                        frame = bytes([0x82, 127]) + len(data).to_bytes(8, "big")
-                    conn.sendall(frame + data)
+                if opcode in (0x1, 0x2) and not self._on_data(conn, data):
+                    break
         except (EOFError, OSError):
             pass
         finally:
             conn.close()
+
+    @staticmethod
+    def _frame(data, opcode=0x2):
+        if len(data) < 126:
+            return bytes([0x80 | opcode, len(data)]) + data
+        if len(data) < 65536:
+            return bytes([0x80 | opcode, 126]) + len(data).to_bytes(2, "big") + data
+        return bytes([0x80 | opcode, 127]) + len(data).to_bytes(8, "big") + data
+
+    def _on_open(self, conn):
+        pass
+
+    def _on_data(self, conn, data):
+        """受け取ったデータフレームの処理。False を返すと接続を閉じる。"""
+        conn.sendall(self._frame(data))
+        return True
+
+
+class ShellWebSocketServer(EchoWebSocketServer):
+    """Lambda MicroVMs のシェル接続 (/shell) の代わり。
+
+    接続直後に制御メッセージ (session_init) を送り、受け取った行に少し遅れて応答する (本物も応答に時間がかかる)。
+    exit の行か、行頭の Ctrl-D (\\x04) で接続を閉じる (本物はシェルが終わると閉じる。2026-11-20 に実機で確認)。
+    """
+
+    def __init__(self, delay=0.5):
+        self.delay, self.inputs, self.pending = delay, [], {}
+        super().__init__()
+
+    def _on_open(self, conn):
+        conn.sendall(self._frame(b'{"type":"session_init","session_id":"test"}', 0x1))
+        conn.sendall(self._frame(b"$ "))
+        self.pending[id(conn)] = b""
+
+    def _on_data(self, conn, data):
+        self.inputs.append(data)
+        pending = self.pending[id(conn)] + data
+        while b"\n" in pending:
+            line, pending = pending.split(b"\n", 1)
+            line = line.rstrip(b"\r")
+            time.sleep(self.delay)
+            if line in (b"exit", b"\x04"):
+                conn.sendall(self._frame(b"exit\r\n") + bytes([0x88, 0]))
+                return False
+            conn.sendall(self._frame(b"OUT:" + line + b"\r\n$ "))
+        if pending == b"\x04":
+            time.sleep(self.delay)
+            conn.sendall(self._frame(b"exit\r\n") + bytes([0x88, 0]))
+            return False
+        self.pending[id(conn)] = pending
+        return True
 
 
 class ConnectProxy:
@@ -1243,6 +1289,30 @@ class CliTest(unittest.TestCase):
         self.mvm("orchestrator", "uninstall", "codex", "--dir", str(proj), env=env)
         self.assertEqual((proj / "AGENTS.md").read_text(encoding="utf-8"), "# 既存の決まり\n\n- テストを書く\n")
         self.assertFalse((proj / ".agents" / "skills" / "mvm-orchestrator").exists())
+
+    def test_shell_with_piped_stdin_waits_for_output(self):
+        """printf '...' | mvm shell のように標準入力がすぐ閉じても、VM 側が閉じるまで出力を受け取って表示する。
+
+        以前は標準入力が閉じた時点で接続を閉じていたので、コマンドは VM で動いても何も表示されなかった。
+        """
+        server = ShellWebSocketServer()
+        try:
+            self.mvm("up", "sh1")
+            env = dict(self.env, PMVA_WS_BASE_URL=f"ws://127.0.0.1:{server.port}")
+            started = time.time()
+            rc, out, _ = self.mvm("shell", "sh1", input="echo one\nexit\n".encode(), env=env)
+            self.assertEqual(rc, 0)
+            self.assertIn("OUT:echo one", out)
+            self.assertNotIn("session_init", out)
+            self.assertLess(time.time() - started, 30)
+            # exit を書かなくても、最後に Ctrl-D を送ってシェルを終わらせる。改行で終わっていなければ改行を足す
+            rc, out, _ = self.mvm("shell", "sh1", input=b"echo two", env=env)
+            self.assertEqual(rc, 0)
+            self.assertIn("OUT:echo two", out)
+            self.assertEqual(b"".join(server.inputs[-2:])[-2:], b"\n\x04")
+            self.assertIn("/shell", server.paths[0])
+        finally:
+            server.close()
 
     def test_ssh_proxy_pipes_binary_stdio(self):
         """ssh の ProxyCommand と同じ使い方で、標準入出力がバイナリのまま中継されることを確かめる。"""
