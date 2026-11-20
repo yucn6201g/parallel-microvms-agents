@@ -101,6 +101,7 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
     - 実機で確認 (2026-11-20、イメージ 2.0): 途中に改行・空白・タブが入った偽の値 (28 文字、取り除くと 24 文字) を `mvm secret set` を通さずに AWS CLI で直接登録して起動。VM のログインシェルの `CLAUDE_CODE_OAUTH_TOKEN` は 24 文字で空白を含まず、期待した値と一致した。エラーも `Not logged in` ではなく `401 OAuth access token is invalid.` (トークンとして読まれている)
   - 修正 25: 認証に失敗しても、bootstrap は `ready`、`mvm wait` は `waiting`、`mvm result` は「Claude is waiting for your input」と報告していた。司令塔が失敗に気づけない → Claude Code の `StopFailure` フックで状態 `error` を記録し、`mvm wait` / `mvm result` がエラーの種類・文章・次にやることを出す
     - 実機で確認 (2026-11-20、イメージ 2.0): 偽の値のトークンを別名のシークレットで登録し、`mvm up test-err --claude-auth oauth-token --claude-secret <そのシークレット> --no-github --prompt "..."` で起動。tmux の対話モードでも `StopFailure` が届き、`mvm wait` が約 19 秒で `error (claude: エラーで止まった)`、`authentication_failed: Please run /login · API Error: 401 OAuth access token is invalid.` と次にやることを表示して終了コード 0 で返った。`mvm result` は同じ内容を表示して終了コード 1
+  - イメージ 2.0 (修正 24・25 入り) で、本物のトークンでも従来どおり動くことを確認 (2026-11-20): 同じ指示で起動すると `mvm wait` が `done`、`mvm result` が「一」〜「五」と「完了」(どちらも終了コード 0)。`mvm send` で 2 回目の指示を送っても `done` と「六」〜「八」「完了」が返り、そのまま 90 秒置いても状態は `done` のまま (入力待ちで上書きされない)
 - [ ] Claude Code の `api-key` / `gateway` / `interactive` (実機は未確認)
 - [ ] Codex の `api-key` / `chatgpt` / `interactive` (実機は未確認)
   - VM 内の初期化 (`bootstrap.sh`) が各方式で正しく設定することは、偽の認証情報を使った自動テスト (`tests/test_supervisor.py`) で確認済み: apiKeyHelper、`CLAUDE_CODE_OAUTH_TOKEN`、ゲートウェイの環境変数、Codex の `auth.json` と `codex login --with-api-key`、GitHub トークン、ファイルの権限 (600)、保存 (スナップショット) に認証情報が入らないこと
