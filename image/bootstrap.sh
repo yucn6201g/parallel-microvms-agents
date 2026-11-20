@@ -335,7 +335,8 @@ jq 'def pmva(ev; arg):
       .hooks[ev] = ([(.hooks[ev] // [])[] | select([.hooks[]?.command? // "" | startswith("/opt/pmva/notify.sh")] | any | not)]
                     + [{"hooks": [{"type": "command", "command": ("/opt/pmva/notify.sh " + arg)}]}]);
     pmva("UserPromptSubmit"; "claude-prompt") | pmva("PostToolUse"; "claude-tool")
-    | pmva("Stop"; "claude-stop") | pmva("Notification"; "claude-notification")' \
+    | pmva("Stop"; "claude-stop") | pmva("StopFailure"; "claude-stop-failure")
+    | pmva("Notification"; "claude-notification")' \
   "$settings" > "$settings.tmp" && mv "$settings.tmp" "$settings"
 # Codex: notify はトップレベルのキーなので、テーブル ([projects...]) より前に置く
 codex_cfg="$HOME/.codex/config.toml"

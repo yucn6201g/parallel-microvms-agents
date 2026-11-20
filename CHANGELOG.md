@@ -32,6 +32,7 @@
 
 ### 修正
 
+- Claude Code が認証の失敗や利用上限などの API のエラーで止まっても、`mvm wait` が `waiting`、`mvm result` が「Claude is waiting for your input」と報告し、司令塔が失敗に気づけなかった。Claude Code の `StopFailure` フックで新しい状態 `error` を記録し、`mvm wait` / `mvm result` がエラーの種類と文章、次にやることを表示する (`mvm result` は終了コード 1)。通知 (`--notify`) も送る
 - `mvm secret set`: 端末の折り返しごとコピーしたトークンを登録すると、途中に空白や改行が入って認証が 401 で失敗していた。トークンの種類 (JSON・URL 以外) は途中の空白や改行を取り除いて登録し、VM の起動時にも取り除く (登録済みの値も、イメージを作り直せば使える)。`claude-oauth-token` が `sk-ant-oat01-` で始まらないときは注意を表示する
 - `mvm follow`: Codex がリポジトリの `AGENTS.md` を読み込んだとき、その中身を利用者の指示として表示していた
 - Windows で `mvm ssh` / `view` / `forward` / `login` を使うと、カレントフォルダに `nul` という名前のファイル (VM のホスト鍵) ができていた。ホスト鍵は `.state/known_hosts/<name>` に書き、VM を起動するたびに消す。`mvm ssh-config --install` で書いた設定も同じなので、入れ直す。前の版で作られた `nul` は消してよい (Git Bash なら `rm nul`)
