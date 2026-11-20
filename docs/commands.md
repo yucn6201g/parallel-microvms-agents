@@ -59,6 +59,8 @@ mvm secret ls
 
 エージェントの認証情報を AWS Secrets Manager に登録します。値は入力しても画面に表示されず、コマンドライン引数にも載せません (シェルの履歴に残りません)。`--file` でファイルから、パイプで標準入力からも読めます。
 
+トークンの種類 (JSON と URL 以外) は、値の途中の空白や改行を取り除いて登録します (端末の折り返しごとコピーしても使えるように)。
+
 | kind | 中身 | 使う認証方式 |
 |---|---|---|
 | `claude-oauth-token` | `claude setup-token` で発行した長期トークン | `--claude-auth oauth-token` (Pro / Max) |
