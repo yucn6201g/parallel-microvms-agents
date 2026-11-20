@@ -160,8 +160,10 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
   | `ExecutionRoleNone` | 拒否 | 拒否 | 許可 |
 
   VM の中から実際に読む確認は未実施
-- [ ] 毎晩の自動停止: 自動テスト (Lambda のコードをテンプレートから取り出して模擬 API で実行) のみ。AWS 上での動作は未確認
-- [x] Claude Code / Codex の版の固定: `image/Dockerfile` で 2.1.312 / 0.165.0 に固定し、`mvm image versions` で npm レジストリの最新版と比べられることを確認。固定した版でのイメージの再ビルドは未実施
+- [x] 毎晩の自動停止 (2026-11-20、`cron(0 23 * * ? *)`、Asia/Tokyo): 23:00:06 に Lambda `pmva-nightly-stop` が起動し、動いていた 2 台 (test-01、test-02) を保存してから終了した (`{"stopped": [...]}`、`save failed` は出ていない)。S3 の `workspaces/<名前>/latest.tar.gz` と `workspace-history/` に 23:00 の保存物があり、`mvm ls --all` で 2 台とも `TERMINATED`
+  - 未修正: 終了のたびに 2 回保存している。Lambda (または `mvm stop`) が保存した約 3 秒後に、VM の terminate フックがもう一度保存する (test-02 は 14:00:07Z と 14:00:10Z)。保存の履歴と終了にかかる時間が倍になる
+  - 未修正: `mvm stop --no-save` でも、VM の terminate フックが保存し、`workspaces/<名前>/latest.tar.gz` を上書きする (test-err、test-ws で確認)。docs/commands.md の「保存せずに終了します」と食い違い、`--no-save` の後に `--restore latest` で「最後に保存できた時点に戻る」という mvm の案内も成り立たない
+- [x] Claude Code / Codex の版の固定: `image/Dockerfile` で 2.1.312 / 0.165.0 に固定し、`mvm image versions` で npm レジストリの最新版と比べられることを確認。固定した版でのイメージのビルドも 2026-11-20 に実施 (VM の中で Claude Code v2.1.312 を確認)
 - [x] `mvm cost --actual`: 実際の Cost Explorer から取得できた (2026-10-27〜28 のアカウント全体で $0.01)
 - [x] インストールスクリプト (`scripts/install.sh` / `install.ps1`): CI で Windows / macOS / Linux それぞれ 2 回実行し、エイリアスが 1 行だけ登録されることを確認
 - [x] コードの見直し (2026-10-29): 次を修正し、自動テストを追加した
