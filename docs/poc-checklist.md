@@ -65,7 +65,7 @@ AWS の認証情報がない状態で、確認できる範囲を先に検証し�
   - 5MB の転送でハッシュが一致 (約 3.8 秒)
   - VM 内から見えるリソースは 8 vCPU / 16GB / ディスク 16GB (4GB ベースラインの 4 倍までバースト)
 - [ ] トークンの有効期限 (60 分) を過ぎても確立済みの SSH 接続が維持されるか: 確かめられなかった。65 分の接続を試したところ、35 分 48 秒で切れた。切れた時刻は、このクラウドセッションの送信用中継が再起動した時刻 (WebSocket の close コード 1012 `server_draining`) と一致しており、AWS 側の切断ではなかった (G を参照)。`mvm ssh` は切れると再接続し、そのたびに新しいトークンを使うので、実運用では期限は問題にならない
-- [ ] VS Code Remote-SSH (未確認: C2 で手元 PC から確認する)
+- [ ] VS Code Remote-SSH (Windows で下回りのみ確認。VS Code の画面からの接続は未確認。C2 を参照)
 
 ### C の再確認 (2026-11-20、Windows 11 の手元 PC から。イメージ 1.0)
 
@@ -74,7 +74,7 @@ AWS の認証情報がない状態で、確認できる範囲を先に検証し�
 - [x] `mvm shell` に標準入力から送ったコマンドが root で動き、出力が返る (入力の後も標準入力を開けておいた場合)
 - [x] 修正 23: `printf 'id; exit\n' | mvm shell test-01` のように、入力を一度に流し込んで標準入力がすぐ閉じると、何も表示されずに終わっていた。入力は VM に届いて実行されていたが、標準入力が閉じた時点で `mvm shell` が接続を閉じ、応答を待たなかった → 標準入力が端末でなければ、読み終えたら Ctrl-D (`\x04`、最後の行に改行がなければ先に改行) を送り、VM 側が閉じるまで出力を受け取る。実機で、`exit` ありとなし、改行なしの入力のどちらも結果が表示されて約 1 秒で終わることを確認
   - VM 側はシェルが終わると接続を閉じる (`exit` の直後に close を受け取ることを、生のメッセージで確認)
-- [x] `mvm watch 3`: 3 秒ごとに更新される (出力を取り込んで確認。画面の消去は Windows では `cls`。本物のコンソールでの見た目は未確認)
+- [x] `mvm watch 3`: 3 秒ごとに更新される (出力を取り込んで確認。画面の消去は Windows では `cls`。本物のコンソールでの見た目は 2026-11-21 に C2 で確認)
 
 ## C2. 手元 PC の OS ごとの確認
 
@@ -83,12 +83,24 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 | 確認項目 | Windows (PowerShell / Windows Terminal) | macOS (ターミナル / iTerm2) |
 |---|---|---|
 | `mvm doctor` が OK | [x] 2026-11-20 (Python 3.14、AWS CLI 2.37.9) | [ ] |
-| `mvm up` / `ls` / `peek` / `send` / `watch` | [x] 2026-11-20 (`watch` の見た目は未確認。C の再確認を参照) | [ ] |
-| `mvm ssh` で tmux にアタッチ、日本語の表示・入力 | [ ] | [ ] |
-| `mvm shell` (Windows はコンソールの VT モードを使う実装。表示・キー入力・Ctrl-C) | [ ] | [ ] |
-| VS Code Remote-SSH (`mvm ssh-config --install`) | [ ] | [ ] |
+| `mvm up` / `ls` / `peek` / `send` / `watch` | [x] 2026-11-20 (`watch` の見た目は 2026-11-21 に確認) | [ ] |
+| `mvm ssh` で tmux にアタッチ、日本語の表示・入力 | [x] 2026-11-21 表示のみ (日本語の表示を確認。IME での入力、Ctrl-b → d のデタッチは未確認)。修正 28 を参照 | [ ] |
+| `mvm shell` (Windows はコンソールの VT モードを使う実装。表示・キー入力・Ctrl-C) | [x] 2026-11-21 表示と Ctrl-C の転送 (矢印・Tab、`sleep` 中の Ctrl-C は未確認) | [ ] |
+| `mvm watch` の描き直し・手元 PC の CPU 使用率・Ctrl-C での終了 | [x] 2026-11-21 | [ ] |
+| VS Code Remote-SSH (`mvm ssh-config --install`) | [ ] 下回りのみ確認 (下記)。VS Code の画面からの接続は未確認 (Remote-SSH 拡張が未インストール) | [ ] |
 | 社内プロキシ環境 (`HTTPS_PROXY`) での接続 (該当する場合) | [ ] | [ ] |
 | ユーザー名に日本語やスペースを含むパスでの動作 (該当する場合) | [ ] | [ ] |
+
+### C2 の Windows での結果 (2026-11-21、Windows 11、Windows Terminal と Claude アプリの端末)
+
+- [x] `mvm ssh-config --install` の後、Windows 標準の OpenSSH 9.5 で `ssh pmva-<名前>` が通り、`uname -a` が VM (aarch64) の結果を返した (VM には `hostname` コマンドが無い)
+- [x] `ssh -L` (ポートフォワード) と `ssh -D` (SOCKS プロキシ) が使えた
+- [x] VS Code Remote-SSH の下回り: VM 上で VS Code サーバー (linux-arm64) が起動した。VS Code の画面からの接続は未確認
+- [x] `mvm ssh <名前>` の表示と日本語、`mvm watch` の描き直しと Ctrl-C での終了、`mvm shell` の表示と Ctrl-C の転送を、実際の端末で確認した。`mvm watch` 中の手元 PC の CPU 使用率は低いままだった
+- [x] 修正 28: Windows Terminal や Claude アプリの端末 (どちらも ConPTY) から `mvm ssh` でアタッチすると、シェルのプロンプトに `61;4;6;7;...c0;10;1c` のような文字列が入力されることがあった。ConPTY は、代替画面に切り替えた直後の端末の問い合わせ (DA) に応答を 2 回返すことがあり、tmux 3.6a が 2 回目をキー入力としてシェルに渡していた → `image/tmux.conf` で `smcup@:rmcup@` を設定し、tmux が代替画面に切り替えないようにした。動いている VM の tmux に設定を入れて試すと、修正前は 6 回中 5 回漏れ、修正後は 8 回中 0 回 (PR #44)
+  - 不採用にした案: `escape-time` を延ばす (原因は応答の分割ではなく重複なので効かない)、`agent-attach` で先に代替画面に切り替えて 0.3 秒待つ (8 回中 3 回漏れた)、Windows のときだけ代替画面をやめる (Windows の ssh も `TERM=xterm-256color` で区別できない)
+  - 修正入りのイメージ 4.0 で実機で確認した (2026-11-21、c28): Windows Terminal から `ssh -t pmva-c28 agent-attach` で 8 回、Claude アプリの端末から `mvm ssh c28` で 8 回、アタッチとデタッチを繰り返し、シェルに入った文字列は 0 回。同じ VM の tmux の `terminal-overrides` だけを修正前に戻すと、Windows Terminal で 6 回中 1 回漏れた (確かめ方で漏れを検出できることの確認)
+- [ ] 未確認: IME での日本語入力、`mvm shell` の矢印キー・Tab 補完・`sleep` 中の Ctrl-C、tmux の Ctrl-b → d、VS Code の画面からの Remote-SSH 接続
 
 ## D. エージェントと認証
 
@@ -133,7 +145,7 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
   - 修正 8: `mvm send <name> --window shell ...` のように名前の後に書いたオプションが指示文に混ざっていた → 修正
   - 修正 9: `-` で始まる指示を tmux がオプションとして解釈していた → `send-keys -l --` で修正し、AWS 上で確認
   - 修正 10: `stop-all` 直後の `infra delete` で、終了中の VM が terminate フックで S3 に保存したためバケットが空にならず、スタックの削除に失敗した → VM が終了しきるのを待ち、失敗時はもう一度バケットを空にして再試行するように修正
-- [ ] `mvm watch` で全台を確認できる。手元 PC の CPU 使用率が下がったことを確認する (C2 で手元 PC から確認する)
+- [x] `mvm watch` で全台を確認できる。手元 PC の CPU 使用率が下がったことを確認する (2026-11-21 に Windows で確認。C2 を参照)
 - [ ] 1 日運用した後、Cost Explorer の実費と [cost.md](cost.md) の試算を比べる
 
 ## G. 追加機能 (2026-10-29)
