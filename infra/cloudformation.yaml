@@ -664,12 +664,20 @@ Resources:
                       host = api("GET", vid)["endpoint"].split("://")[-1].rstrip("/")
                       tok = api("POST", vid + "/auth-token",
                                 {"expirationInMinutes": 15, "allowedPorts": [{"port": 8080}]})
-                      req = urllib.request.Request(f"https://{host}/snapshot", data=b"{}", method="POST", headers={
-                          "X-aws-proxy-auth": tok["authToken"]["X-aws-proxy-auth"],
-                          "X-aws-proxy-port": "8080", "Content-Type": "application/json"})
+                      h = {"X-aws-proxy-auth": tok["authToken"]["X-aws-proxy-auth"],
+                           "X-aws-proxy-port": "8080", "Content-Type": "application/json"}
+                      req = urllib.request.Request(f"https://{host}/snapshot", data=b"{}", method="POST", headers=h)
                       urllib.request.urlopen(req, timeout=300).read()
                   except Exception as e:
                       print(f"save failed {vid}: {e!r} (terminate hook will try again)")
+                  else:
+                      try:
+                          # 保存できたので terminate フックでもう一度保存しない (古いイメージでは 2 回保存になるだけ)
+                          req = urllib.request.Request(f"https://{host}/terminate-save", data=b'{"save": false}',
+                                                       method="POST", headers=h)
+                          urllib.request.urlopen(req, timeout=30).read()
+                      except Exception as e:
+                          print(f"terminate-save failed {vid}: {e!r}")
                   try:
                       api("DELETE", vid)
                       stopped.append(vid)

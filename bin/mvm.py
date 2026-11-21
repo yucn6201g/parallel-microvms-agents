@@ -1781,15 +1781,25 @@ def wait_running(name, timeout=60):
     return False
 
 
-def skip_terminate_save(name):
-    """--no-save: VM の terminate フックでの保存を止める (止めないと latest.tar.gz を上書きし、--restore latest で前の保存に戻れない)。"""
+def skip_terminate_save(name, saved=False):
+    """VM の terminate フックでの保存を止める。
+
+    --no-save: 止めないと latest.tar.gz を上書きし、--restore latest で前の保存に戻れない。
+    saved=True (保存できた直後): 止めないと、同じ内容をもう一度保存する。
+    """
     try:
         r = vm_api(name, "POST", "/terminate-save", {"save": False}, timeout=30)
         ok = bool(r.get("ok"))
     except SystemExit as e:
-        print(e.code, file=sys.stderr)
+        if not saved:
+            print(e.code, file=sys.stderr)
         ok = False
-    if not ok:
+    if ok:
+        return
+    if saved:
+        log("終了時にもう一度保存されることがあります (保存は済んでいるので問題ありません。"
+            "イメージが古ければ mvm image build で作り直すと 1 回になります)")
+    else:
         log("VM に「保存しない」と伝えられませんでした。終了時に保存されることがあります "
             "(イメージが古ければ mvm image build で作り直してください)")
 
@@ -1820,6 +1830,9 @@ def stop(name, save=True, require_save=False):
                     f"原因を確認して再実行するか、保存せずに作り直すなら mvm stop {name} --no-save → "
                     f"mvm up {name} --restore latest (最後に保存できた時点に戻ります)")
             log("保存に失敗しました (terminate フックでもう一度試みます)")
+        else:
+            # 保存できたので、terminate フックでもう一度保存しない
+            skip_terminate_save(name, saved=True)
     if not save and state in ("RUNNING", "SUSPENDED"):
         skip_terminate_save(name)
     s = load_session(name)
