@@ -10,7 +10,7 @@
                            会話記録 (指示・思考・ツールの実行と結果・応答) を、前回の続きから返す (mvm follow)
     POST /send             {"window": "claude", "text": "...", "enter": true} を tmux に送る
     POST /snapshot         ワークスペースを S3 に保存 (同期)
-    POST /terminate-save   {"save": false} で、terminate フックでの保存を止める (mvm stop --no-save)
+    POST /terminate-save   {"save": false} で、terminate フックでの保存を止める (mvm stop --no-save、終了前に保存できたとき)
 
 8080 へのアクセスは MicroVM のプロキシで IAM 由来の認証トークンが必須なので、ここでは認証しない。
 外部ライブラリに依存しないよう標準ライブラリのみで実装している。
@@ -40,7 +40,8 @@ HOOK_PORT = 9000
 API_PORT = 8080
 
 snapshot_lock = threading.Lock()
-# terminate フックで保存するか (mvm stop --no-save が /terminate-save で false にする)。run フックで true に戻す
+# terminate フックで保存するか (mvm stop --no-save と、終了前に保存できた mvm stop / 毎晩の自動停止が
+# /terminate-save で false にする)。run フックで true に戻す
 terminate_options = {"save": True}
 
 
@@ -686,7 +687,9 @@ class HookHandler(Handler):
         if hook == "terminate":
             if not terminate_options["save"]:
                 # mvm stop --no-save: 保存すると latest.tar.gz を上書きしてしまう (--restore latest で前の保存に戻れなくなる)
-                log("snapshot (terminate) skipped: --no-save")
+                # mvm stop / 毎晩の自動停止: 終了の直前に保存できたので、もう一度保存しない
+                log("snapshot (terminate) skipped: turned off by POST /terminate-save "
+                    "(mvm stop --no-save, or saved just before terminate)")
                 return self.reply(200)
             # terminate フックのタイムアウト (最大 60 秒) 内でベストエフォート保存
             snapshot("terminate", timeout=50)
