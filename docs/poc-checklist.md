@@ -99,7 +99,7 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 - [x] `mvm ssh <名前>` の表示と日本語、`mvm watch` の描き直しと Ctrl-C での終了、`mvm shell` の表示と Ctrl-C の転送を、実際の端末で確認した。`mvm watch` 中の手元 PC の CPU 使用率は低いままだった
 - [x] 修正 28: Windows Terminal や Claude アプリの端末 (どちらも ConPTY) から `mvm ssh` でアタッチすると、シェルのプロンプトに `61;4;6;7;...c0;10;1c` のような文字列が入力されることがあった。ConPTY は、代替画面に切り替えた直後の端末の問い合わせ (DA) に応答を 2 回返すことがあり、tmux 3.6a が 2 回目をキー入力としてシェルに渡していた → `image/tmux.conf` で `smcup@:rmcup@` を設定し、tmux が代替画面に切り替えないようにした。動いている VM の tmux に設定を入れて試すと、修正前は 6 回中 5 回漏れ、修正後は 8 回中 0 回 (PR #44)
   - 不採用にした案: `escape-time` を延ばす (原因は応答の分割ではなく重複なので効かない)、`agent-attach` で先に代替画面に切り替えて 0.3 秒待つ (8 回中 3 回漏れた)、Windows のときだけ代替画面をやめる (Windows の ssh も `TERM=xterm-256color` で区別できない)
-  - 修正を入れたイメージを `mvm image build` で作り直した後の実機での確認は未実施
+  - 修正入りのイメージ 4.0 で実機で確認した (2026-11-21、c28): Windows Terminal から `ssh -t pmva-c28 agent-attach` で 8 回、Claude アプリの端末から `mvm ssh c28` で 8 回、アタッチとデタッチを繰り返し、シェルに入った文字列は 0 回。同じ VM の tmux の `terminal-overrides` だけを修正前に戻すと、Windows Terminal で 6 回中 1 回漏れた (確かめ方で漏れを検出できることの確認)
 - [ ] 未確認: IME での日本語入力、`mvm shell` の矢印キー・Tab 補完・`sleep` 中の Ctrl-C、tmux の Ctrl-b → d、VS Code の画面からの Remote-SSH 接続
 
 ## D. エージェントと認証
