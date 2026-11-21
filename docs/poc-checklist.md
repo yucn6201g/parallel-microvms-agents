@@ -65,7 +65,7 @@ AWS の認証情報がない状態で、確認できる範囲を先に検証し�
   - 5MB の転送でハッシュが一致 (約 3.8 秒)
   - VM 内から見えるリソースは 8 vCPU / 16GB / ディスク 16GB (4GB ベースラインの 4 倍までバースト)
 - [ ] トークンの有効期限 (60 分) を過ぎても確立済みの SSH 接続が維持されるか: 確かめられなかった。65 分の接続を試したところ、35 分 48 秒で切れた。切れた時刻は、このクラウドセッションの送信用中継が再起動した時刻 (WebSocket の close コード 1012 `server_draining`) と一致しており、AWS 側の切断ではなかった (G を参照)。`mvm ssh` は切れると再接続し、そのたびに新しいトークンを使うので、実運用では期限は問題にならない
-- [ ] VS Code Remote-SSH (Windows で下回りのみ確認。VS Code の画面からの接続は未確認。C2 を参照)
+- [x] VS Code Remote-SSH (2026-11-22 に Windows の VS Code の画面から接続。C2 を参照)
 
 ### C の再確認 (2026-11-20、Windows 11 の手元 PC から。イメージ 1.0)
 
@@ -84,10 +84,10 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 |---|---|---|
 | `mvm doctor` が OK | [x] 2026-11-20 (Python 3.14、AWS CLI 2.37.9) | [ ] |
 | `mvm up` / `ls` / `peek` / `send` / `watch` | [x] 2026-11-20 (`watch` の見た目は 2026-11-21 に確認) | [ ] |
-| `mvm ssh` で tmux にアタッチ、日本語の表示・入力 | [x] 2026-11-21 表示のみ (日本語の表示を確認。IME での入力、Ctrl-b → d のデタッチは未確認)。修正 28 を参照 | [ ] |
-| `mvm shell` (Windows はコンソールの VT モードを使う実装。表示・キー入力・Ctrl-C) | [x] 2026-11-21 表示と Ctrl-C の転送 (矢印・Tab、`sleep` 中の Ctrl-C は未確認) | [ ] |
+| `mvm ssh` で tmux にアタッチ、日本語の表示・入力 | [x] 2026-11-21 表示、2026-11-22 日本語の入力と Ctrl-b → d (IME の変換画面そのものは未確認)。修正 28 を参照 | [ ] |
+| `mvm shell` (Windows はコンソールの VT モードを使う実装。表示・キー入力・Ctrl-C) | [x] 2026-11-21 表示と Ctrl-C の転送、2026-11-22 矢印・Tab・`sleep` 中の Ctrl-C | [ ] |
 | `mvm watch` の描き直し・手元 PC の CPU 使用率・Ctrl-C での終了 | [x] 2026-11-21 | [ ] |
-| VS Code Remote-SSH (`mvm ssh-config --install`) | [ ] 下回りのみ確認 (下記)。VS Code の画面からの接続は未確認 (Remote-SSH 拡張が未インストール) | [ ] |
+| VS Code Remote-SSH (`mvm ssh-config --install`) | [x] 2026-11-22 (VS Code 1.146、Remote-SSH 0.128) | [ ] |
 | 社内プロキシ環境 (`HTTPS_PROXY`) での接続 (該当する場合) | [ ] | [ ] |
 | ユーザー名に日本語やスペースを含むパスでの動作 (該当する場合) | [ ] | [ ] |
 
@@ -95,12 +95,22 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 
 - [x] `mvm ssh-config --install` の後、Windows 標準の OpenSSH 9.5 で `ssh pmva-<名前>` が通り、`uname -a` が VM (aarch64) の結果を返した (VM には `hostname` コマンドが無い)
 - [x] `ssh -L` (ポートフォワード) と `ssh -D` (SOCKS プロキシ) が使えた
-- [x] VS Code Remote-SSH の下回り: VM 上で VS Code サーバー (linux-arm64) が起動した。VS Code の画面からの接続は未確認
+- [x] VS Code Remote-SSH の下回り: VM 上で VS Code サーバー (linux-arm64) が起動した。VS Code の画面からの接続は 2026-11-22 に確認 (下記)
 - [x] `mvm ssh <名前>` の表示と日本語、`mvm watch` の描き直しと Ctrl-C での終了、`mvm shell` の表示と Ctrl-C の転送を、実際の端末で確認した。`mvm watch` 中の手元 PC の CPU 使用率は低いままだった
 - [x] 修正 28: Windows Terminal や Claude アプリの端末 (どちらも ConPTY) から `mvm ssh` でアタッチすると、シェルのプロンプトに `61;4;6;7;...c0;10;1c` のような文字列が入力されることがあった。ConPTY は、代替画面に切り替えた直後の端末の問い合わせ (DA) に応答を 2 回返すことがあり、tmux 3.6a が 2 回目をキー入力としてシェルに渡していた → `image/tmux.conf` で `smcup@:rmcup@` を設定し、tmux が代替画面に切り替えないようにした。動いている VM の tmux に設定を入れて試すと、修正前は 6 回中 5 回漏れ、修正後は 8 回中 0 回 (PR #44)
   - 不採用にした案: `escape-time` を延ばす (原因は応答の分割ではなく重複なので効かない)、`agent-attach` で先に代替画面に切り替えて 0.3 秒待つ (8 回中 3 回漏れた)、Windows のときだけ代替画面をやめる (Windows の ssh も `TERM=xterm-256color` で区別できない)
   - 修正入りのイメージ 4.0 で実機で確認した (2026-11-21、c28): Windows Terminal から `ssh -t pmva-c28 agent-attach` で 8 回、Claude アプリの端末から `mvm ssh c28` で 8 回、アタッチとデタッチを繰り返し、シェルに入った文字列は 0 回。同じ VM の tmux の `terminal-overrides` だけを修正前に戻すと、Windows Terminal で 6 回中 1 回漏れた (確かめ方で漏れを検出できることの確認)
-- [ ] 未確認: IME での日本語入力、`mvm shell` の矢印キー・Tab 補完・`sleep` 中の Ctrl-C、tmux の Ctrl-b → d、VS Code の画面からの Remote-SSH 接続
+
+### C2 の Windows での結果の続き (2026-11-22、イメージ 4.0、c29)
+
+キー入力は、Windows の疑似コンソール (ConPTY) の中で `mvm` を動かし、入力パイプにキーの VT シーケンスや文字を書き込んで確かめた。Windows Terminal もキー入力を同じパイプに書き込むので、`mvm` から見た入力の経路は実際の端末と同じ。人が実際にキーボードを打っての確認ではない。
+
+- [x] `mvm shell c29`: 上矢印で直前のコマンドを呼び出して書き足せた (`echo AAA` → `echo AAABBB`)。左矢印で行の途中に挿入できた (`echo XZ` → `XYZ`)。Tab で補完できた (`cat /etc/os-rel` → `/etc/os-release`)。`sleep 30` を 2 秒後の Ctrl-C で止められ、`mvm shell` は切れずに次のコマンドが動いた。`exit` で終了コード 0
+- [x] `mvm ssh c29`: tmux のシェルに `echo 日本語テスト、全角ＡＢＣ > /tmp/ja.txt` と入力すると、ファイルの中身が手元で送ったバイト列 (UTF-8) と一致し、画面にも正しく表示された。IME で確定した文字は、この形で端末から届く (IME の変換画面そのものは Windows Terminal の機能で、確認していない)
+- [x] `mvm ssh c29` で Ctrl-b → d: `[detached (from session main)]` と出て `mvm ssh` が終了コード 0 で終わり、VM 側の tmux にクライアントが残らなかった
+- [x] VS Code の画面からの Remote-SSH 接続: Remote-SSH 拡張 (0.128) を入れ、`code --remote ssh-remote+pmva-c29 /home/agent/work` で開いた。初回は接続先の OS を聞かれるので Linux を選ぶ。ステータスバーに `SSH: pmva-c29` と出て、VM 上に置いたファイルがエクスプローラーに表示され、開くと日本語の中身も正しかった
+  - 1 回目は `Connecting with SSH timed out` (接続の待ち時間 17 秒) で失敗し、開き直すと接続できた。原因は特定できていない。同じ形 (`type <台本> | ssh -T -D <ポート> pmva-c29 sh`) を手元で実行すると 1 秒かからずに通った
+  - VS Code は、PATH で先に見つかった ssh を使う。今回は Git for Windows の `ssh.exe` (OpenSSH 10.3) が使われたが問題なく接続できた。Windows 標準の OpenSSH を使わせたいときは `remote.SSH.path` を設定する
 
 ## D. エージェントと認証
 
