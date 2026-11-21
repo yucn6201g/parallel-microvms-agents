@@ -247,13 +247,14 @@ VS Code から接続する場合:
 mvm ssh-config --install   # ~/.ssh/config (Windows は %USERPROFILE%\.ssh\config) に Host pmva-<name> を書き込む
 ```
 
-書き込んだ後、VS Code の Remote-SSH で `pmva-agent-01` などに接続します。セッションを追加・作り直したら、もう一度実行してください (pmva のブロックだけが置き換わります)。
+書き込んだ後、VS Code の Remote-SSH で `pmva-agent-01` などに接続します。初めて接続するときは接続先の OS を聞かれるので、Linux を選びます。セッションを追加・作り直したら、もう一度実行してください (pmva のブロックだけが置き換わります)。
 VS Code Server は MicroVM 側で動くので、手元の負荷は小さく済みます。
 
 Windows の注意:
 
 - Python は python.org 版か `winget` 版を使ってください。Microsoft Store 版の Python は実行ファイルのパスが特殊なため、ssh の ProxyCommand から起動できないことがあります。
-- VS Code Remote-SSH の設定 `remote.SSH.path` は既定 (Windows 標準の OpenSSH) のままで使えます。
+- VS Code Remote-SSH の設定 `remote.SSH.path` は既定のままで使えます。既定では PATH で見つかった `ssh.exe` を使います (Windows 標準の OpenSSH と Git for Windows の ssh のどちらでも接続を確認済み)。
+- 初回の接続が `Connecting with SSH timed out` で失敗したときは、もう一度開き直してください。
 
 ## リポジトリごとの準備 (.pmva/setup.sh)
 
