@@ -123,9 +123,10 @@ class SupervisorTest(unittest.TestCase):
         self.env.pop("TMUX", None)
         # supervisor の標準エラーは、起動に失敗したときの手がかりとしてファイルに残す
         self.stderr_path = t / "supervisor.stderr"
-        with open(self.stderr_path, "wb") as err:
+        self.stdout_path = t / "supervisor.stdout"   # log() の出力 (VM では CloudWatch Logs に送られる)
+        with open(self.stderr_path, "wb") as err, open(self.stdout_path, "wb") as out:
             self.proc = subprocess.Popen([sys.executable, str(opt / "supervisor.py")], env=self.env,
-                                         stdout=subprocess.DEVNULL, stderr=err)
+                                         stdout=out, stderr=err)
         self.wait_supervisor()
 
     def wait_supervisor(self, timeout=30):
@@ -935,6 +936,13 @@ class SupervisorTest(unittest.TestCase):
         code, _ = self.hook("terminate")
         self.assertEqual(code, 200)
         self.assertFalse((self.s3_out / "latest.tar.gz").exists(), "--no-save なら終了時に保存しない")
+        # 止めるのは --no-save のときだけではない (mvm stop / 毎晩の自動停止が保存できた直後も止める)。
+        # ログで --no-save と決めつけると、保存できた VM を調べるときに誤解する
+        log = self.stdout_path.read_text(encoding="utf-8", errors="replace")
+        skipped = [l for l in log.splitlines() if "snapshot (terminate) skipped" in l]
+        self.assertEqual(len(skipped), 1, log)
+        self.assertNotRegex(skipped[0], r"skipped: --no-save$")
+        self.assertIn("/terminate-save", skipped[0])
         code, r = self.request(self.api_port, "POST", "/terminate-save", {"save": "no"})
         self.assertEqual(code, 400, "save は真偽値だけ受け付ける")
 
