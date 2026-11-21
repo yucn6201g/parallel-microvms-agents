@@ -332,6 +332,7 @@ mvm ssh <name> --no-reconnect     # 切れても再接続しない
 ```
 
 SSH over WebSocket で `agent` ユーザーとして接続します。tmux へのアタッチは、接続が切れると自動で再接続します (接続してすぐ切れることが 6 回続いたらあきらめます)。
+tmux は手元の端末で代替画面を使わないので、抜けた後は tmux の最後の画面が端末に残ります (Windows Terminal などで、端末の応答がシェルに入力として流れるのを防ぐため)。
 起動時に SSH 公開鍵 (`SSH_PUBLIC_KEY_FILE`) が無かったセッションには使えません (鍵を作ってから `mvm renew`)。
 
 ### forward

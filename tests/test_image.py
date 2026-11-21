@@ -99,6 +99,11 @@ class ImageTest(unittest.TestCase):
                          "/usr/local/bin/pmva-node", "/usr/local/bin/agent-attach"):
             self.assertIn(expected, out)
 
+    def test_tmux_does_not_use_alt_screen(self):
+        # Windows の端末 (ConPTY) で応答が重複して漏れるのを防ぐ設定が、イメージの tmux に効いていること (tests/test_tmux_conf.py)
+        out = self.run_in_image("set -e; tmux new-session -d -s t; tmux show-options -s terminal-overrides; tmux kill-server")
+        self.assertIn("*:smcup@:rmcup@", out)
+
     def test_headless_chromium_with_japanese_fonts(self):
         script = (f"set -e; mkdir -p /tmp/pw && cd /tmp/pw && npm init -y >/dev/null "
                   f"&& npm install --no-audit --no-fund --silent playwright@{PLAYWRIGHT_VERSION} "
