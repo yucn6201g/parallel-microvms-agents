@@ -1647,11 +1647,6 @@ class CliTest(unittest.TestCase):
             self.assertIn(("/terminate-save", {"save": False}), api.received)
             self.assertNotIn("/snapshot", [p for p, _ in api.received])
             self.assertTrue((self.stub_dir / "microvm-0000.term").exists())
-            # ふだんの stop は保存するので、terminate フックの保存も止めない
-            api.received.clear()
-            self.mvm("up", "n2", env=env)
-            self.mvm("stop", "n2", env=env)
-            self.assertNotIn("/terminate-save", [p for p, _ in api.received])
         finally:
             api.shutdown()
         # VM の API に届かなくても終了はする。終了時に保存されうることを伝える
@@ -1661,8 +1656,34 @@ class CliTest(unittest.TestCase):
         env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{closed}")
         self.mvm("up", "n3", env=env)
         _, _, err = self.mvm("stop", "n3", "--no-save", env=env)
-        self.assertTrue((self.stub_dir / "microvm-0002.term").exists())
+        self.assertTrue((self.stub_dir / "microvm-0001.term").exists())
         self.assertIn("終了時に保存されることがあります", err)
+
+    def test_stop_saves_once(self):
+        """保存の約 3 秒後に terminate フックがもう一度保存していた。保存できたら terminate フックの保存は止める。"""
+        api = StatusApi()
+        try:
+            env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}")
+            self.mvm("up", "s1", env=env)
+            self.mvm("stop", "s1", env=env)
+            self.assertEqual([p for p, _ in api.received], ["/snapshot", "/terminate-save"])
+            self.assertEqual(api.received[1], ("/terminate-save", {"save": False}))
+            self.assertTrue((self.stub_dir / "microvm-0000.term").exists())
+            # 保存に失敗したときは、terminate フックでもう一度試みる (止めない)
+            api.received.clear()
+            api.snapshot_ok = False
+            self.mvm("up", "s2", env=env)
+            self.mvm("stop", "s2", env=env)
+            self.assertEqual([p for p, _ in api.received], ["/snapshot"])
+            self.assertTrue((self.stub_dir / "microvm-0001.term").exists())
+            # renew も同じ
+            api.received.clear()
+            api.snapshot_ok = True
+            self.mvm("up", "s3", env=env)
+            self.mvm("renew", "s3", env=env)
+            self.assertEqual([p for p, _ in api.received], ["/snapshot", "/terminate-save"])
+        finally:
+            api.shutdown()
 
     def test_infra_delete_retains_undeletable_lambda(self):
         env = dict(self.env, PMVA_STUB_UNDELETABLE="KeepalivePermission,KeepaliveFunction")

@@ -148,9 +148,12 @@ class KeepaliveTest(unittest.TestCase):
             "p2": {"items": [{"microvmId": "m-susp", "state": "SUSPENDED"}, {"microvmId": "m-bad", "state": "RUNNING"}]},
         }
 
+        bodies = {}
+
         def urlopen(req, timeout=None):
             url, method = req.full_url, req.get_method()
             calls.append((method, url))
+            bodies[url] = req.data
             parsed = urllib.parse.urlparse(url)
             if parsed.path == "/2025-09-09/microvms" and method == "GET":
                 q = urllib.parse.parse_qs(parsed.query)
@@ -172,12 +175,40 @@ class KeepaliveTest(unittest.TestCase):
         mod = self.load({}, {}, name="nightly-stop", urlopen=urlopen)
         result = mod.handler({}, None)
         self.assertEqual(result, {"stopped": ["m-run", "m-susp", "m-bad"]})
-        # 保存してから終了する。保存に失敗しても終了はする。終了済みの VM には触らない
+        # 保存してから終了する。保存できたら terminate フックでの保存を止める (2 回保存しない)。
+        # 保存に失敗しても終了はするが、terminate フックの保存は残す。終了済みの VM には触らない
         run = [c for c in calls if "m-run" in c[1]]
-        self.assertEqual(run[-2], ("POST", "https://m-run.lambda-microvm.example.on.aws/snapshot"))
+        self.assertEqual(run[-3], ("POST", "https://m-run.lambda-microvm.example.on.aws/snapshot"))
+        self.assertEqual(run[-2], ("POST", "https://m-run.lambda-microvm.example.on.aws/terminate-save"))
+        self.assertEqual(json.loads(bodies["https://m-run.lambda-microvm.example.on.aws/terminate-save"]),
+                         {"save": False})
         self.assertEqual(run[-1], ("DELETE", "https://lambda.ap-northeast-1.amazonaws.com/2025-09-09/microvms/m-run"))
         self.assertIn(("DELETE", "https://lambda.ap-northeast-1.amazonaws.com/2025-09-09/microvms/m-bad"), calls)
+        self.assertNotIn(("POST", "https://m-bad.lambda-microvm.example.on.aws/terminate-save"), calls)
         self.assertFalse([c for c in calls if "m-term" in c[1]])
+
+    def test_nightly_stop_terminates_even_if_vm_rejects_terminate_save(self):
+        """イメージが古く /terminate-save が無くても終了する (2 回保存になるだけ)。"""
+        calls = []
+
+        def urlopen(req, timeout=None):
+            url, method = req.full_url, req.get_method()
+            calls.append((method, url))
+            if url.endswith("/terminate-save"):
+                raise OSError("404 not found")
+            if method == "GET" and "imageIdentifier" in url:
+                body = {"items": [{"microvmId": "m-old", "state": "RUNNING"}]}
+            elif url.endswith("/auth-token"):
+                body = {"authToken": {"X-aws-proxy-auth": "TOK"}}
+            elif method == "GET":
+                body = {"endpoint": "https://m-old.lambda-microvm.example.on.aws"}
+            else:
+                body = {"ok": True}
+            return io.BytesIO(json.dumps(body).encode())
+
+        mod = self.load({}, {}, name="nightly-stop", urlopen=urlopen)
+        self.assertEqual(mod.handler({}, None), {"stopped": ["m-old"]})
+        self.assertEqual(calls[-1], ("DELETE", "https://lambda.ap-northeast-1.amazonaws.com/2025-09-09/microvms/m-old"))
 
 
 if __name__ == "__main__":

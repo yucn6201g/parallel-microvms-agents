@@ -32,6 +32,7 @@
 
 ### 修正
 
+- `mvm stop` / `stop-all` / `renew` と毎晩の自動停止で、終了のたびにワークスペースを 2 回保存していた (保存の数秒後に、VM の終了時のフックがもう一度保存していた)。保存の履歴と終了にかかる時間が倍になっていた。保存できたら終了時のフックでは保存しない。保存に失敗したときは、これまでどおり終了時のフックでもう一度試みる。古いイメージの VM では 2 回保存のまま (`mvm image build` で作り直すと直る。毎晩の自動停止は `mvm infra deploy` も必要)
 - `mvm stop --no-save` / `stop-all --no-save` でも、VM の終了時のフックがワークスペースを保存し、`workspaces/<名前>/latest.tar.gz` を上書きしていた (`--restore latest` で前の保存に戻れなかった)。終了の前に VM に伝え、終了時のフックでも保存しない。古いイメージの VM では伝えられないので、注意を表示する (`mvm image build` で作り直すと直る)
 - Claude Code が認証の失敗や利用上限などの API のエラーで止まっても、`mvm wait` が `waiting`、`mvm result` が「Claude is waiting for your input」と報告し、司令塔が失敗に気づけなかった。Claude Code の `StopFailure` フックで新しい状態 `error` を記録し、`mvm wait` / `mvm result` がエラーの種類と文章、次にやることを表示する (`mvm result` は終了コード 1)。通知 (`--notify`) も送る
 - `mvm secret set`: 端末の折り返しごとコピーしたトークンを登録すると、途中に空白や改行が入って認証が 401 で失敗していた。トークンの種類 (JSON・URL 以外) は途中の空白や改行を取り除いて登録し、VM の起動時にも取り除く (登録済みの値も、イメージを作り直せば使える)。`claude-oauth-token` が `sk-ant-oat01-` で始まらないときは注意を表示する

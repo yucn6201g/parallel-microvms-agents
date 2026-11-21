@@ -301,7 +301,7 @@ MicroVM は、エンドポイントへの受信通信が `IDLE_MAX_SECONDS` (既
 `config.env` の `NIGHTLY_STOP_TIME=23:00` (`NIGHTLY_STOP_TIMEZONE=Asia/Tokyo`) を設定して `mvm infra deploy` すると、毎日その時刻にすべての MicroVM のワークスペースを S3 に保存してから終了します。翌日は `mvm up <name> --restore latest ...` で続きから始められます。
 
 - EventBridge Scheduler が Lambda 関数 `pmva-nightly-stop` を呼び、このスタックのイメージから起動した VM (RUNNING / SUSPENDED) をすべて保存してから終了する (サスペンド中の VM は保存の通信で自動的にレジュームされる)
-- 保存に失敗した VM も終了する (terminate フックがもう一度保存を試みる)
+- 保存に失敗した VM も終了する (terminate フックがもう一度保存を試みる)。保存できた VM は terminate フックでは保存しない
 - 空にすると無効になる。費用はほぼ無料枠内
 - 自動テストのみで、AWS 上での動作は未確認 ([poc-checklist.md](poc-checklist.md) の G)
 
