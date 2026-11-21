@@ -162,7 +162,7 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 
   VM の中から実際に読む確認は未実施
 - [x] 毎晩の自動停止 (2026-11-20、`cron(0 23 * * ? *)`、Asia/Tokyo): 23:00:06 に Lambda `pmva-nightly-stop` が起動し、動いていた 2 台 (test-01、test-02) を保存してから終了した (`{"stopped": [...]}`、`save failed` は出ていない)。S3 の `workspaces/<名前>/latest.tar.gz` と `workspace-history/` に 23:00 の保存物があり、`mvm ls --all` で 2 台とも `TERMINATED`
-  - 修正 27: 終了のたびに 2 回保存している。Lambda (または `mvm stop`) が保存した約 3 秒後に、VM の terminate フックがもう一度保存する (test-02 は 14:00:07Z と 14:00:10Z)。保存の履歴と終了にかかる時間が倍になる → 保存に成功したら `POST /terminate-save {"save": false}` で terminate フックの保存を止めてから終了する。保存に失敗したときは止めない。`mvm stop` は実機で確認した (E の terminate フックの項)。毎晩の自動停止は、`mvm infra deploy` で Lambda のコードに入ったことまで確認し、実際の 23:00 の動作は未確認
+  - 修正 27: 終了のたびに 2 回保存している。Lambda (または `mvm stop`) が保存した約 3 秒後に、VM の terminate フックがもう一度保存する (test-02 は 14:00:07Z と 14:00:10Z)。保存の履歴と終了にかかる時間が倍になる → 保存に成功したら `POST /terminate-save {"save": false}` で terminate フックの保存を止めてから終了する。保存に失敗したときは止めない。`mvm stop` は実機で確認した (E の terminate フックの項)。毎晩の自動停止も 2026-11-21 23:00 に実機で確認した (test-pvm、イメージ 3.0): Lambda は 3.2 秒で `{"stopped": [...]}`、`workspace-history/` は 14:00:07Z の 1 件だけ、VM のログは `snapshot (manual) rc=0` → `terminate snapshot: off` → `snapshot (terminate) skipped`
   - 修正 26: `mvm stop --no-save` でも、VM の terminate フックが保存し、`workspaces/<名前>/latest.tar.gz` を上書きしていた (test-err、test-ws で確認)。docs/commands.md の「保存せずに終了します」と食い違い、`--no-save` の後に `--restore latest` で「最後に保存できた時点に戻る」という mvm の案内も成り立たなかった → 終了の前に `POST /terminate-save {"save": false}` で VM に伝え、terminate フックでも保存しない。イメージ 3.0 で実機で確認した (E の terminate フックの項)
 - [x] Claude Code / Codex の版の固定: `image/Dockerfile` で 2.1.312 / 0.165.0 に固定し、`mvm image versions` で npm レジストリの最新版と比べられることを確認。固定した版でのイメージのビルドも 2026-11-20 に実施 (VM の中で Claude Code v2.1.312 を確認)
 - [x] `mvm cost --actual`: 実際の Cost Explorer から取得できた (2026-10-27〜28 のアカウント全体で $0.01)
@@ -191,9 +191,9 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 - [x] Codex の `workspace-write` サンドボックスで `mvm` が動く設定 (`network_access`、`writable_roots`): Codex 0.165.0 で、`mvm orchestrator install codex` が表示する設定を足すと中から `mvm peek` が動き、`writable_roots` が無いと状態の保存先に書けず、`network_access` が無いと接続できないことを確認 (`tests/test_agents_e2e.py`。以前は `/tmp` に書けることをサンドボックスが効かないと見誤っていた)
 - [x] イメージ (`image/Dockerfile`): 公開されているベースイメージで、Docker でビルドして動かした (amd64 は開発環境、ARM64 は CI の `image` ワークフロー)。headless の Chromium (Playwright 1.64.1) が日本語フォントで表示できること、uv で Python 3.12、`pmva-node` で Node.js 20、run フックから `.pmva/setup.sh` → エージェントの起動まで通ることを確認
   - Chromium のライブラリは GTK なしで足りる (headless の Chromium は GTK を使わない)。外すとイメージが約 290MB 小さくなった
-- [ ] Lambda MicroVMs の上でのイメージのビルド (`mvm image build`) と、ブラウザ・`setup.sh` の動作: ビルドは 2026-11-20 に成功 (B を参照)。ブラウザと `setup.sh` の動作は未確認
+- [x] Lambda MicroVMs の上でのイメージのビルド (`mvm image build`) と、ブラウザ・`setup.sh` の動作: ビルドは 2026-11-20 に成功 (B を参照)。2026-11-21 (イメージ 3.0、test-pvm): `--restore latest` で戻したワークスペースの `.pmva/setup.sh` (Playwright 1.64.1 と Chromium の導入) が起動時に動き、26 秒で終わってからエージェントが起動した (`bootstrap: ready`)。headless の Chromium 156 で日本語フォント (`document.fonts.check('32px "Noto Sans CJK JP"')` が true) を使ってスクリーンショットを撮れた
 - [x] 手元の設定 (`mvm profile push`): 送るものの選び方と除外、VM での置き方 (自動テスト)。固定した版の Claude Code / Codex が `~/.claude/CLAUDE.md` / `~/.codex/AGENTS.md` を読むことを確認 (`tests/test_agents_e2e.py`)
-- [ ] S3 経由での `mvm profile push` → VM での取得: 未確認 (実行ロールの `profiles/*` の読み取りを含む)
+- [x] S3 経由での `mvm profile push` → VM での取得: 2026-11-21、手元の 247 ファイルを送り、`mvm up --profile default` で起動した VM の `~/.claude/CLAUDE.md` が手元と SHA-256 で一致し、skill 15 個もそろった (実行ロールで `profiles/*` を読めた。bootstrap.log は `profile applied`)
 - [x] 本物のイメージの中での通しの動作 (2026-11-18、Docker。`tests/test_image.py`、CI の `image` ワークフロー): MicroVM と同じ run フックから、シークレットの取得 (`aws` の代わり)、設定のまとまりの取り込み、`--claude-auth custom` / `--codex-auth custom` で LLM API の代わりにつないだ本物の Claude Code / Codex を tmux の中で起動し、両方が完了するまで
   - 状態 (完了と最後の応答)、`/result`、`/events` (mvm follow)、メモリと多く使っているプロセス (mvm top) が答えること
   - Codex の対話モード (tmux の中) での `notify` で完了になること
@@ -202,7 +202,8 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 - [x] `mvm` のコマンドを、本物のイメージを動かす手元の Docker に対して通しで動かした (2026-11-18。`tests/test_local_vm.py`、CI の `image` ワークフロー)。受け口の代わり (トークンとポートを確かめてコンテナにつなぐ) を通して、`up` / `wait` / `result` / `follow` / `peek` / `top` / `send` / `ssh` (SSH over WebSocket) / `forward` / `login` (手元の 1455 番から VM の `codex login` に届く) / `save` / `suspend` / `resume` / `stop`、`--restore latest` での復元
   - 途中で見つけた不具合: `mvm ssh <name> --no-reconnect` (ドキュメントの書き方) で、オプションが ssh にコマンドとして渡っていた。直した
 - [ ] Lambda MicroVMs の上での上記: 未確認 (本物の受け口とプロキシ、サスペンドしたときの自動レジューム、トークンの期限が残る)
-- [ ] メモリ不足による強制終了の検出 (`/proc/vmstat` の `oom_kill`): 自動テストでファイルを差し替えて確認したのみ。MicroVM のカーネルでこの値が使えるかは未確認
+- [x] メモリ不足による強制終了の検出 (`/proc/vmstat` の `oom_kill`): 2026-11-21、MicroVM のカーネルでも値が使えた。VM の中でメモリを使い切るプロセスを動かすと、そのプロセスが強制終了され (終了コード 137)、`oom_kill` が 0 → 1 になり、`mvm top` / `mvm peek` に「メモリ不足でプロセスが 1 回強制終了されました」と出た
+  - 気づいたこと: `MEMORY_MIB=4096` で起動した VM でも、VM の中からはメモリが約 15.7 GiB (`MemTotal` 16,437,604 kB)、CPU が 8 個に見えた。料金と上限が設定のどちらに従うのかは未確認 ([cost.md](cost.md) の試算は `MEMORY_MIB` に基づく)
 
 ## I. AWS の認証方式の追加 (2026-11-16)
 
