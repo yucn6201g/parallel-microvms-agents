@@ -86,11 +86,13 @@ mvm image build                 # イメージをビルドする (初回 10〜20
 mvm image status                # イメージとバージョンの状態を表示する
 mvm image base                  # 使えるベースイメージの一覧
 mvm image delete [--yes]        # イメージを全バージョンごと削除する (確認あり)
+mvm image prune [--keep N] [--yes]   # 古いバージョンだけを削除する (既定は 2 版残す。確認あり)
 mvm image versions              # 固定している Claude Code / Codex の版と npm の最新版を比べる
 mvm image update-versions [--claude <版>] [--codex <版>]   # image/Dockerfile の版を書き換える
 ```
 
 - `build`: `image/` を zip にして S3 に置き、イメージ (2 回目からは新しいバージョン) を作ります。完了まで待ち、失敗したら原因を表示します
+- `prune`: `build` のたびに増えるバージョンは自動では消えず、1 版ごとに保存料金がかかります ([cost.md](cost.md#イメージ保存))。最新の ACTIVE 版を含め、新しい順にビルドに成功した `--keep` 版 (既定 2) を残し、それより古い版とビルドに失敗した版を削除します。ビルド中・削除中の版と、起動中 (終了済み以外) の VM が使っている版は消しません (使っている VM は `mvm renew` で新しい版に移すか `mvm stop` で止めてから、もう一度実行します)。削除は非同期で進むので、状態は `status` で確かめます
 - `update-versions`: 版を省略すると npm の最新版にします。書き換えた後は `build` し、動作を確認してから Dockerfile の変更を commit してください
 
 ### profile

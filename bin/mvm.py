@@ -1419,9 +1419,102 @@ def cmd_image_versions(args):
     return 0
 
 
+IMAGE_VERSION_GB = 2.3            # イメージ 1 版のスナップショットの大きさ (2026-11-22 に実費から確認)
+SNAPSHOT_STORAGE_GB_MONTH = 0.0973  # スナップショット保存の単価 (USD/GB 月、東京)
+
+
+def image_version_key(v):
+    """版の新しさで並べるためのキー。"10.0" が "9.0" より新しくなるよう数字として比べる。"""
+    ver = v.get("imageVersion") or ""
+    try:
+        return (1, tuple(int(x) for x in ver.split(".")), "")
+    except ValueError:
+        return (0, (), str(v.get("createdAt") or ver))
+
+
+def cmd_image_prune(args):
+    """古いイメージの版を消す。最新の ACTIVE 版を含めて新しい順に --keep 版を残し、起動中の VM が使う版は消さない。"""
+    if args.keep < 1:
+        die("--keep は 1 以上で指定してください (イメージごと消すときは mvm image delete)")
+    arn = find_image_arn() or die(f"イメージ {C['IMAGE_NAME']} はありません")
+    latest = lmv("get-microvm-image", "--image-identifier", arn).get("latestActiveImageVersion")
+    versions = sorted(lmv("list-microvm-image-versions", "--image-identifier", arn).get("items", []),
+                      key=image_version_key, reverse=True)
+    # 残す版: 最新の ACTIVE 版と、新しい順に使える (ビルド成功・ACTIVE) 版を合わせて --keep 版
+    usable = [v["imageVersion"] for v in versions if v.get("state") == "SUCCESSFUL" and v.get("status") == "ACTIVE"]
+    keep = [latest] if latest in usable else []
+    keep += [ver for ver in usable if ver not in keep][:max(args.keep - len(keep), 0)]
+    # 消す候補: 残す版以外の、ビルドが終わった版 (失敗した版、前に削除に失敗した版も含む)。
+    # ビルド中・削除中・削除済みの版と、知らない状態の版には触らない
+    done_states = ("SUCCESSFUL", "FAILED", "DELETE_FAILED")
+    targets = [v for v in versions if v["imageVersion"] not in keep and v.get("state") in done_states]
+    log(f"残す版: {', '.join(keep) or 'なし'}")
+    if not targets:
+        log("削除する古いバージョンはありません")
+        return 0
+
+    vms = lmv("list-microvms", "--image-identifier", arn, check=False)
+    if vms is None:
+        die(f"起動中の VM の一覧を取得できませんでした: {_last_aws_error[0].strip()}\n"
+            "  消してよいバージョンか確かめられないので中止しました。AWS の認証 (mvm doctor) を確かめてから、"
+            "もう一度実行してください")
+    names = {}
+    for name in session_names():
+        try:
+            s = json.loads(session_path(name).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        names[s.get("microvmId")] = name
+    in_use = {}
+    for vm in vms.get("items", []):
+        if vm.get("state") == "TERMINATED":   # 終了処理中や知らない状態は、使っているものとして扱う
+            continue
+        if not vm.get("imageVersion"):
+            die(f"VM {vm.get('microvmId')} が使っているイメージのバージョンが分かりません。"
+                "消してよいバージョンか確かめられないので中止しました。mvm ls で VM を確かめ、止めてから、もう一度実行してください")
+        in_use.setdefault(vm["imageVersion"], []).append(vm.get("microvmId"))
+    for v in [v for v in targets if v["imageVersion"] in in_use]:
+        ids = in_use[v["imageVersion"]]
+        local = [names[i] for i in ids if i in names]
+        others = [i for i in ids if i not in names]
+        who = ", ".join(local + [f"{i} (この PC のセッションにない VM)" for i in others])
+        hint = (f"mvm renew {local[0]} で新しい版に移すか、mvm stop {local[0]} で止めてから"
+                if local else "その VM を起動した PC で mvm renew か mvm stop をしてから")
+        log(f"{v['imageVersion']} は起動中の VM ({who}) が使っているので残しました。{hint}、もう一度 mvm image prune を実行してください")
+    targets = [v for v in targets if v["imageVersion"] not in in_use]
+    if not targets:
+        return 0
+
+    log("削除するバージョン:")
+    for v in targets:
+        print(f"  {v['imageVersion']}\t{v.get('state')}\t{v.get('status')}\t{v.get('createdAt')}", flush=True)
+    saving = sum(1 for v in targets if v.get("state") == "SUCCESSFUL") * IMAGE_VERSION_GB * SNAPSHOT_STORAGE_GB_MONTH
+    if not args.yes:
+        ans = input(f"イメージ {arn} の上の {len(targets)} バージョンを削除します "
+                    f"(保存料金が月に約 ${saving:.2f} 減ります)。よろしいですか? [y/N] ")
+        if ans.strip().lower() != "y":
+            die("中止しました")
+    failed = []
+    for v in targets:
+        ver = v["imageVersion"]
+        if lmv("delete-microvm-image-version", "--image-identifier", arn, "--image-version", ver, check=False) is None:
+            failed.append(ver)
+            log(f"バージョン {ver} を削除できませんでした: {_last_aws_error[0].strip()}")
+        else:
+            log(f"バージョン {ver} の削除を開始しました")
+    if failed:
+        die(f"{len(failed)} バージョンを削除できませんでした。起動中の VM が使っていることがあります。"
+            "mvm ls で確かめて mvm renew <名前> で新しい版に移すか mvm stop <名前> で止め、"
+            "もう一度 mvm image prune を実行してください (状態は mvm image status で確認できます)")
+    log(f"{len(targets)} バージョンの削除を開始しました (状態は mvm image status で確認できます)")
+    return 0
+
+
 def cmd_image(args):
     if args.action in ("versions", "update-versions"):
         return cmd_image_versions(args)
+    if args.action == "prune":
+        return cmd_image_prune(args)
     if args.action == "base":
         for item in lmv("list-managed-microvm-images").get("items", []):
             print(item["imageArn"])
@@ -2813,9 +2906,12 @@ def build_parser():
     x.add_argument("--file", help="値をファイルから読む (省略時は入力 / 標準入力)")
     x.set_defaults(func=cmd_secret)
     x = sub.add_parser("image", help="エージェント実行イメージをビルド / 状態確認 / ベースイメージ一覧 / 削除 / "
+                                     "古い版の削除 (prune) / "
                                      "Claude Code・Codex の版の確認 (versions) と更新 (update-versions)")
-    x.add_argument("action", choices=("build", "status", "base", "delete", "versions", "update-versions"))
-    x.add_argument("--yes", action="store_true", help="delete の確認を省略する")
+    x.add_argument("action", choices=("build", "status", "base", "delete", "prune", "versions", "update-versions"))
+    x.add_argument("--yes", action="store_true", help="delete / prune の確認を省略する")
+    x.add_argument("--keep", type=int, default=2,
+                   help="prune で残す版の数 (最新の ACTIVE 版を含む、既定 2)")
     x.add_argument("--claude", help="update-versions で使う Claude Code の版 (省略時は npm の最新)")
     x.add_argument("--codex", help="update-versions で使う Codex の版 (省略時は npm の最新)")
     x.set_defaults(func=cmd_image)

@@ -207,7 +207,7 @@ mvm renew <name>               # 起動中の VM は renew で新しいイメー
 ```
 
 GitHub で管理している場合は、`.github/workflows/agent-versions.yml` が毎週 (月曜 9:17) 新しい版を確認し、出ていれば Issue「Claude Code / Codex の新しい版があります」を立てます (Actions タブの「Agent versions」から手動でも実行できます)。
-古いバージョンも保存料金がかかるので、不要になったら削除します (`aws lambda-microvms delete-microvm-image-version`)。
+古いバージョンも 1 版ごとに保存料金がかかるので、新しい版の動作を確かめたら `mvm image prune` で削除します (既定で最新の 2 版を残す。[cost.md](cost.md#イメージ保存))。
 
 ## 6. 1 台で動作確認
 
@@ -338,7 +338,7 @@ MicroVM は、エンドポイントへの受信通信が `IDLE_MAX_SECONDS` (既
 | 使わなくなったら片付ける | `mvm stop-all` → `mvm infra delete` → `mvm image delete` (イメージは置いておくと保存料金がかかる) |
 | ログを見る | `mvm logs --follow` |
 | 費用の確認 | `mvm cost` (試算)、`mvm cost --actual --days 7 --daily` (Cost Explorer の実績。アカウント全体) |
-| Claude Code / Codex の更新 | `mvm image versions` → `mvm image update-versions` → `mvm image build` |
+| Claude Code / Codex の更新 | `mvm image versions` → `mvm image update-versions` → `mvm image build` → 動作を確かめたら `mvm image prune` (古い版を削除) |
 
 VM の中で使えるコマンド:
 

@@ -6,6 +6,7 @@
 
 ### 追加
 
+- `mvm image prune [--keep N] [--yes]`: イメージの古いバージョンだけを削除する。`build` のたびに増える版は自動では消えず、1 版 (約 2.3GB) ごとに約 $0.22/月の保存料金がかかっていた。既定では最新の ACTIVE 版を含めて 2 版を残し、ビルド中の版と起動中の VM が使っている版は消さない
 - 最小構成の CloudFormation テンプレート `infra/cloudformation-minimal.yaml`。`config.env` の `INFRA_TEMPLATE=minimal` で、キープアライブ・毎晩の自動停止・予算アラートを作らずに使える
 - `mvm wait`: エージェントの応答が終わるか、許可・入力待ちになるまで待つ (`--timeout`、`--any`、`--json`)。エージェントの状態 (作業中・完了・入力待ち・終了など) は、VM の中でエージェントのフックが記録する
 - `mvm result`: エージェントの最後の応答の文章を表示する

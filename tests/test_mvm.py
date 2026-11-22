@@ -1498,6 +1498,106 @@ class CliTest(unittest.TestCase):
         self.assertIn("!!   イメージの元 (image/ と IMAGE_* などの設定) が、最後にビルドしたときから変わっています", out)
         self.assertIn("mvm image build", out)
 
+    def deleted_image_versions(self):
+        calls = [json.loads(l) for l in (self.stub_dir / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
+        return [c[c.index("--image-version") + 1] for c in calls if c[:2] == ["lambda-microvms", "delete-microvm-image-version"]]
+
+    def image_versions_env(self, latest="4.0", extra=()):
+        versions = [{"imageVersion": v, "state": "SUCCESSFUL", "status": "ACTIVE"} for v in ("1.0", "2.0", "3.0", "4.0")]
+        return dict(self.env, PMVA_STUB_IMAGE_VERSIONS=json.dumps(versions + list(extra)), PMVA_STUB_LATEST_ACTIVE=latest)
+
+    def test_image_prune_keeps_latest_two_versions(self):
+        env = self.image_versions_env(extra=[{"imageVersion": "5.0", "state": "FAILED", "status": "INACTIVE"}])
+        _, out, err = self.mvm("image", "prune", "--yes", env=env)
+        self.assertEqual(sorted(self.deleted_image_versions()), ["1.0", "2.0", "5.0"])
+        self.assertIn("残す版: 4.0, 3.0", err)
+        self.assertIn("1.0", out)
+        # 削除中の版は、もう一度実行しても消しに行かない
+        self.mvm("image", "prune", "--yes", env=env)
+        self.assertEqual(len(self.deleted_image_versions()), 3)
+
+    def test_image_prune_keep_option(self):
+        self.mvm("image", "prune", "--keep", "1", "--yes", env=self.image_versions_env())
+        self.assertEqual(sorted(self.deleted_image_versions()), ["1.0", "2.0", "3.0"])
+
+    def test_image_prune_always_keeps_latest_active(self):
+        # 最新の ACTIVE 版が一番新しい版でなくても残す (ビルドに成功した 4.0 より前の 2.0 を使っている)
+        self.mvm("image", "prune", "--keep", "1", "--yes", env=self.image_versions_env(latest="2.0"))
+        self.assertEqual(sorted(self.deleted_image_versions()), ["1.0", "3.0", "4.0"])
+
+    def test_image_prune_does_not_delete_versions_being_built(self):
+        env = self.image_versions_env(extra=[{"imageVersion": "5.0", "state": "IN_PROGRESS", "status": "INACTIVE"}])
+        self.mvm("image", "prune", "--yes", env=env)
+        self.assertEqual(sorted(self.deleted_image_versions()), ["1.0", "2.0"])
+
+    def test_image_prune_skips_versions_used_by_running_vms(self):
+        self.mvm("up", "a1")   # スタブの VM はバージョン 1.0 で起動する
+        env = self.image_versions_env()
+        rc, _, err = self.mvm("image", "prune", "--yes", env=env)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.deleted_image_versions(), ["2.0"])
+        self.assertIn("1.0 は起動中の VM (a1) が使っているので残しました", err)
+        self.assertIn("mvm renew a1", err)
+        self.mvm("stop", "a1", "--no-save")
+        self.mvm("image", "prune", "--yes", env=env)
+        self.assertEqual(sorted(self.deleted_image_versions()), ["1.0", "2.0"])
+
+    def test_image_prune_skips_versions_used_by_vms_from_other_pcs(self):
+        other = [{"microvmId": "microvm-other", "imageVersion": "2.0", "state": "SUSPENDED"}]
+        _, _, err = self.mvm("image", "prune", "--yes", env=dict(self.image_versions_env(), PMVA_STUB_MICROVMS=json.dumps(other)))
+        self.assertEqual(self.deleted_image_versions(), ["1.0"])
+        self.assertIn("2.0 は起動中の VM (microvm-other (この PC のセッションにない VM)) が使っているので残しました", err)
+        self.assertIn("その VM を起動した PC で mvm renew か mvm stop", err)
+
+    def test_image_prune_aborts_when_vm_image_version_is_unknown(self):
+        other = [{"microvmId": "microvm-other", "state": "RUNNING"}]
+        rc, _, err = self.mvm("image", "prune", "--yes", env=dict(self.image_versions_env(), PMVA_STUB_MICROVMS=json.dumps(other)),
+                              check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(self.deleted_image_versions(), [])
+        self.assertIn("イメージのバージョンが分かりません", err)
+
+    def test_image_prune_does_not_touch_versions_in_unknown_state(self):
+        env = self.image_versions_env(extra=[{"imageVersion": "0.5", "state": "SOMETHING_NEW", "status": "INACTIVE"},
+                                             {"imageVersion": "0.6", "state": "DELETE_FAILED", "status": "INACTIVE"}])
+        self.mvm("image", "prune", "--yes", env=env)
+        self.assertEqual(sorted(self.deleted_image_versions()), ["0.6", "1.0", "2.0"])
+
+    def test_image_prune_aborts_when_vm_list_is_unavailable(self):
+        env = dict(self.image_versions_env(), PMVA_STUB_LIST_MICROVMS_DENIED="1")
+        rc, _, err = self.mvm("image", "prune", "--yes", env=env, check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(self.deleted_image_versions(), [])
+        self.assertIn("起動中の VM の一覧を取得できませんでした", err)
+
+    def test_image_prune_reports_delete_failure(self):
+        env = dict(self.image_versions_env(), PMVA_STUB_DELETE_FAIL="1.0")
+        rc, _, err = self.mvm("image", "prune", "--yes", env=env, check=False)
+        self.assertNotEqual(rc, 0)
+        # 1 つ失敗しても残りは消しに行く
+        self.assertEqual(sorted(self.deleted_image_versions()), ["1.0", "2.0"])
+        self.assertEqual(json.loads((self.stub_dir / "deleted-versions.json").read_text(encoding="utf-8")), ["2.0"])
+        self.assertIn("バージョン 1.0 を削除できませんでした", err)
+        self.assertIn("mvm ls", err)
+
+    def test_image_prune_asks_before_deleting(self):
+        rc, _, err = self.mvm("image", "prune", input=b"n\n", env=self.image_versions_env(), check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("中止しました", err)
+        self.assertEqual(self.deleted_image_versions(), [])
+        self.mvm("image", "prune", input=b"y\n", env=self.image_versions_env())
+        self.assertEqual(sorted(self.deleted_image_versions()), ["1.0", "2.0"])
+
+    def test_image_prune_with_nothing_to_delete(self):
+        _, _, err = self.mvm("image", "prune")   # スタブの既定はバージョン 1.0 だけ
+        self.assertIn("削除する古いバージョンはありません", err)
+        self.assertEqual(self.deleted_image_versions(), [])
+
+    def test_image_prune_rejects_keep_below_one(self):
+        rc, _, err = self.mvm("image", "prune", "--keep", "0", "--yes", check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("--keep は 1 以上", err)
+
     def test_doctor_checks_default_auth(self):
         _, out, _ = self.mvm("doctor", check=False)
         self.assertIn("!!   既定の認証方式 (DEFAULT_CLAUDE_AUTH=oauth-token) のシークレット pmva/claude-oauth-token がありません。"
