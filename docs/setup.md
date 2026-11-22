@@ -110,6 +110,8 @@ mvm infra deploy
 
 普段の操作 (起動・接続・停止・イメージのビルド) は、**`pmva-operator` ポリシーだけを付けた専用の IAM ユーザー**で行います。作り方は [quickstart.md の手順 5](quickstart.md#5-普段使う-iam-ユーザーに切り替える) にあります。
 
+IAM Identity Center (SSO) を使っている場合は、アクセスキーを作らずに済む権限セットがおすすめです。権限セットを作るときにカスタマーマネージドポリシーとして `pmva-operator` (パスは `/`) だけを付け、自分のユーザーにこのアカウントで割り当てます。続けて `aws configure sso` (既存の SSO セッションがあれば `~/.aws/config` に `sso_role_name = <権限セットの名前>` のプロファイルを足すだけ) でプロファイルを作り、`config.env` の `AWS_PROFILE` に設定します。`mvm doctor` で「権限の確認は省略しました」(`pmva-operator` だけでは IAM の情報を読めないため) と出て、ほかの項目が OK なら準備完了です。
+
 守ること:
 
 - ルートユーザーには MFA を設定し、普段は使わない。ルートと管理者のアクセスキーは作らない
@@ -118,7 +120,7 @@ mvm infra deploy
 - キーをチャットやリポジトリに貼らない (`config.env` と `.state/` は `.gitignore` 済み)
 - CloudTrail の証跡を有効にし、予算アラートを設定して、身に覚えのない操作や費用に早く気付けるようにする
 
-**このポリシーで足りるかの確認**: `pmva-operator` だけを付けたユーザーでの動作は、まだ実機で確認できていません。最初に次の順で確かめてください。
+**このポリシーで足りるかの確認**: `pmva-operator` だけで、起動・接続・指示・保存・サスペンド・停止・費用の確認・ログの表示が通ることを 2026-11-22 に確かめています ([poc-checklist.md](poc-checklist.md))。テンプレートを変えたときや、権限に心当たりのないエラーが出たときは、次の順で確かめてください。
 
 1. `config.env` の `AWS_PROFILE` を操作用のプロファイルにする
 2. `mvm doctor` → `mvm image status` → `mvm up op-test --agent none` → `mvm peek op-test` → `mvm ssh op-test -- id` → `mvm stop op-test` を順に実行する

@@ -64,7 +64,8 @@ AWS の認証情報がない状態で、確認できる範囲を先に検証し�
   - 修正 5: SSH 経由では tmux が日本語を `_` に置き換えた (ロケールが引き継がれない) → `tmux -u` と `LANG=C.UTF-8` で修正し、v5 で日本語の表示を確認
   - 5MB の転送でハッシュが一致 (約 3.8 秒)
   - VM 内から見えるリソースは 8 vCPU / 16GB / ディスク 16GB (4GB ベースラインの 4 倍までバースト)
-- [ ] トークンの有効期限 (60 分) を過ぎても確立済みの SSH 接続が維持されるか: 確かめられなかった。65 分の接続を試したところ、35 分 48 秒で切れた。切れた時刻は、このクラウドセッションの送信用中継が再起動した時刻 (WebSocket の close コード 1012 `server_draining`) と一致しており、AWS 側の切断ではなかった (G を参照)。`mvm ssh` は切れると再接続し、そのたびに新しいトークンを使うので、実運用では期限は問題にならない
+- [x] トークンの有効期限 (60 分) を過ぎても確立済みの SSH 接続が維持される (2026-11-22、Windows 11 の手元 PC から、イメージ 5.0): `mvm ssh rt-test --no-reconnect` で 68 分つなぎ続け、毎分 1 行ずつ出力させた。SSH 用のトークンの期限 (13:28:28 UTC) を 12 分過ぎても切れず、68 分で終了コード 0 で正常に終わった。期限が切れた後の `mvm peek` と新しい `mvm ssh -- <コマンド>` も通り、そのときトークンを取り直した (期限が 1 時間後に更新された)。期限は接続を始めるときにだけ確かめられ、確立済みの接続は切られない
+  - 以前の試み: クラウドセッションから 65 分の接続を試したところ、35 分 48 秒で切れた。切れた時刻は、そのクラウドセッションの送信用中継が再起動した時刻 (WebSocket の close コード 1012 `server_draining`) と一致しており、AWS 側の切断ではなかった (G を参照)
 - [x] VS Code Remote-SSH (2026-11-22 に Windows の VS Code の画面から接続。C2 を参照)
 
 ### C の再確認 (2026-11-20、Windows 11 の手元 PC から。イメージ 1.0)
@@ -110,6 +111,7 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 - [x] `mvm ssh c29` で Ctrl-b → d: `[detached (from session main)]` と出て `mvm ssh` が終了コード 0 で終わり、VM 側の tmux にクライアントが残らなかった
 - [x] VS Code の画面からの Remote-SSH 接続: Remote-SSH 拡張 (0.128) を入れ、`code --remote ssh-remote+pmva-c29 /home/agent/work` で開いた。初回は接続先の OS を聞かれるので Linux を選ぶ。ステータスバーに `SSH: pmva-c29` と出て、VM 上に置いたファイルがエクスプローラーに表示され、開くと日本語の中身も正しかった
   - 1 回目は `Connecting with SSH timed out` (接続の待ち時間 17 秒) で失敗し、開き直すと接続できた。原因は特定できていない。同じ形 (`type <台本> | ssh -T -D <ポート> pmva-c29 sh`) を手元で実行すると 1 秒かからずに通った
+  - 切り分け (2026-11-22、イメージ 5.0): 接続の前のトークン取得 (`create-microvm-auth-token`) は 0.8 秒で、キャッシュが無いときの `ssh -- true` も 1.6〜1.9 秒 (キャッシュありは 0.9〜1.0 秒)。サスペンドからの自動レジュームも、15 分サスペンドした後で 1.67 秒 (続けての接続は 0.87 秒)、短いサスペンドの後で約 4 秒だった。どれも 17 秒には遠く、タイムアウトの原因はトークンの取得でも VM の再開でもない。VS Code 側の初回だけの処理 (接続先の OS の確認、VS Code サーバーの取得と起動) の可能性が残るが、再現していない。`remote.SSH.connectTimeout` を延ばす案内は、再現するまで入れない
   - VS Code は、PATH で先に見つかった ssh を使う。今回は Git for Windows の `ssh.exe` (OpenSSH 10.3) が使われたが問題なく接続できた。Windows 標準の OpenSSH を使わせたいときは `remote.SSH.path` を設定する
 
 ## D. エージェントと認証
@@ -132,14 +134,17 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 - [x] `mvm up ... --prompt "..."` の初期指示が入力・実行される
 - [x] `mvm send` で送った指示 (日本語を含む) がエージェントに届き、Enter で送信される
 - [x] `sudo` は**使えない**: コンテナに no_new_privs が付いている (`sudo: The "no new privileges" flag is set`)。イメージから sudo を外し、root が必要な作業は `mvm shell` (root) で行う方針にした
-- [ ] GitHub への clone / push、`gh pr create` (未確認: GitHub トークンを登録していない)
+- [x] GitHub への clone / push、`gh pr create` (2026-11-22、テスト用の private リポジトリ、fine-grained personal access token (対象リポジトリだけ、Contents / Pull requests: Read and write))
+  - `mvm up gh-poc --repo <URL> --branch pmva-poc/clone-push --prompt "..."` で起動すると、clone と作業ブランチの作成まで済んだ状態でエージェントが始まり、起動時の指示だけでコミット → push → `gh pr create --draft` を終えた (起動から PR の URL が返るまで約 20 秒)。`main` には何も push されず、トークンは `~/.git-credentials` (`credential.helper store`) と `GH_TOKEN` で渡っていた
+  - 修正 30: `GIT_USER_NAME` / `GIT_USER_EMAIL` が空 (既定) のままだと、VM の git が作成者を推測できず、エージェントがコミットの手前で止まった (イメージ 5.0) → 空のときは、bootstrap が `gh api user` でトークンの持ち主を読み、ログイン名と `<id>+<login>@users.noreply.github.com` を設定する。読めないときは `bootstrap` の状態に設定を促す警告を出す (PR #53)。イメージ 6.0 で、`GIT_USER_*` を空にしたまま git の設定に触れずにコミット → push → draft PR まで通り、GitHub 上のコミットがトークンの持ち主のアカウントに紐づくことを確認した。fine-grained token でも `GET /user` は読める
 
 ## E. ライフサイクル
 
 - [x] 何も接続しない状態で `IDLE_MAX_SECONDS` 後にサスペンドされる (120 秒の設定で、最後の通信から約 132 秒で SUSPENDED)
 - [x] `mvm ssh` で接続中はサスペンドされない (120 秒の設定で 3.5 分間接続し続け、ずっと RUNNING)
 - [x] サスペンド → 自動レジュームで、tmux・バックグラウンドのプロセス・`/tmp` のファイルが残っていた。`peek` 1 回でレジュームし、応答まで 1.4 秒
-  - エージェントが API を呼んでいる最中のサスペンドからの再接続は未確認 (Bedrock が使えなかったため)
+  - 長いサスペンド (2026-11-22、イメージ 5.0、手元 PC から): 15 分 `SUSPENDED` のままにした後、`mvm ssh rt-test -- true` が自動レジュームを含めて 1.67 秒で終わった (終了コード 0。続けての接続は 0.87 秒)。サスペンドの長さで再開が遅くなる様子は無かった
+  - エージェントが API を呼んでいる最中のサスペンド (2026-11-22、イメージ 5.0、Claude Code 2.1.330、oauth-token): 200 行の応答を書かせ、`claude=working` の 13 秒後に `mvm suspend` で止めた。約 50 秒サスペンドしてから `mvm result` で再開すると、エージェントはそのまま作業を続け、2 秒後に 200 行すべてを書き終えた。会話の記録に API のエラーや再試行は無く、1 回の応答の所要時間 (`turn_duration`) はサスペンド中を含めて 71 秒
 - [x] `mvm save` で S3 に保存 (12.8 秒) され、`mvm renew` で別の VM に復元された (保存 → 終了 → 起動 → 復元まで 19 秒。git の履歴も復元)
 - [x] terminate フックで保存される (`--no-save` で止めた VM の保存ファイルが `workspace-history/` に残っていた。`--no-save` でも保存していたのは不具合で、修正 26 で直した)
   - 修正 26・27 の後 (2026-11-21、イメージ 3.0): `mvm stop --no-save` では terminate フックが保存せず、`workspaces/<名前>/latest.tar.gz` は直前の `mvm save` のまま (ETag も同じ) で、`workspace-history/` も増えなかった (test-ns)。ふだんの `mvm stop` では保存が 1 回だけになった (test-once。`workspace-history/` は 1 件、VM のログは `terminate snapshot: off` → `snapshot (terminate) skipped`)
@@ -171,7 +176,10 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
   - 修正 13: WebSocket の読み書きを 1 つのロックで排他 (SSL ソケットはスレッド間で同時に読み書きすると安全でないため。予防)
   - 修正 14: `mvm ssh <name>` (tmux へのアタッチ) は、接続が切れたら自動で再接続する (中継プロセスを強制終了して確認)
   - `PMVA_DEBUG=<ファイル>` で切断理由 (close フレーム、例外) を記録できるようにした
-- [ ] 操作用ポリシー (`pmva-operator`) だけでの動作: 未確認。このクラウドセッションでは AWS へのリクエストが管理者の認証情報で署名し直されるため、権限を絞った確認ができなかった。IAM のポリシーシミュレーターも `lambda:PassNetworkConnector` を評価できない (リソースを `*` にしても拒否と出る)。手順は setup.md の「操作用ポリシーの確認」
+- [x] 操作用ポリシー (`pmva-operator`) だけでの動作 (2026-11-22、Windows 11 の手元 PC、イメージ 6.0): IAM Identity Center に `pmva-operator` だけを付けた権限セットを作って割り当て、そのプロファイルで実行した (`sts get-caller-identity` が `AWSReservedSSO_pmva-operator_...`、ロールに付いたポリシーは `pmva-operator` だけ)。記録の置き場所 (`PMVA_STATE_DIR`) は空のものにし、スタックの出力やイメージの情報もキャッシュを使わずに AWS へ問い合わせさせた
+  - 権限不足 (`AccessDenied`) が出ずに通った: `doctor` (「権限の確認は省略しました (iam:List* の権限なし)」と出て、ほかは OK)、`ls`、`image status`、`secret ls`、`infra outputs`、`up --agent none --no-github`、`wait`、`peek`、`ssh -- id`、`send`、`top`、`save`、`suspend`、`stop --no-save`、`cost --actual`、`logs`
+  - 試していない操作 (`image build` / `prune`、`secret set` / `rm`) も、ポリシーに要る権限 (S3 への書き込み、`lambda:*Microvm*`、ビルド用ロールの `iam:PassRole`、`secretsmanager:CreateSecret` / `PutSecretValue` / `DeleteSecret`) が入っていることを確かめた
+  - 以前は、クラウドセッションでは AWS へのリクエストが管理者の認証情報で署名し直されるため確認できず、IAM のポリシーシミュレーターも `lambda:PassNetworkConnector` を評価できなかった (リソースを `*` にしても拒否と出る)
 - [ ] メモリのクォータ引き上げ: Service Quotas の API で申請すると「既定値 (2048) より大きい値を指定してください」と拒否された (現在値 8GB が既定値より低く抑えられているため)。AWS サポートのケースで申請する必要がある (setup.md に手順)
 - [x] 実行ロールの分割 (エージェントごとに読めるシークレットを限定): 2026-10-29 にデプロイ (`UPDATE_COMPLETE`) し、IAM のポリシーシミュレーターで 4 つのロールに `secretsmanager:GetSecretValue` を試した。結果は設計どおり
 
@@ -184,6 +192,7 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 
   VM の中から実際に読む確認は未実施
 - [x] 毎晩の自動停止 (2026-11-20、`cron(0 23 * * ? *)`、Asia/Tokyo): 23:00:06 に Lambda `pmva-nightly-stop` が起動し、動いていた 2 台 (test-01、test-02) を保存してから終了した (`{"stopped": [...]}`、`save failed` は出ていない)。S3 の `workspaces/<名前>/latest.tar.gz` と `workspace-history/` に 23:00 の保存物があり、`mvm ls --all` で 2 台とも `TERMINATED`
+  - サスペンド中の VM (2026-11-22、rt-test、イメージ 5.0): 23:00 に `SUSPENDED` だった VM も、23:00:08 に保存されてから終了した (`{"stopped": ["microvm-..."]}`、`workspaces/rt-test/latest.tar.gz` が 23:00:11)。夜の測定がこれで途中で止まったので、23 時をまたぐ確認をするときは `NIGHTLY_STOP_TIME` に気をつける
   - 修正 27: 終了のたびに 2 回保存している。Lambda (または `mvm stop`) が保存した約 3 秒後に、VM の terminate フックがもう一度保存する (test-02 は 14:00:07Z と 14:00:10Z)。保存の履歴と終了にかかる時間が倍になる → 保存に成功したら `POST /terminate-save {"save": false}` で terminate フックの保存を止めてから終了する。保存に失敗したときは止めない。`mvm stop` は実機で確認した (E の terminate フックの項)。毎晩の自動停止も 2026-11-21 23:00 に実機で確認した (test-pvm、イメージ 3.0): Lambda は 3.2 秒で `{"stopped": [...]}`、`workspace-history/` は 14:00:07Z の 1 件だけ、VM のログは `snapshot (manual) rc=0` → `terminate snapshot: off` → `snapshot (terminate) skipped`
   - 修正 26: `mvm stop --no-save` でも、VM の terminate フックが保存し、`workspaces/<名前>/latest.tar.gz` を上書きしていた (test-err、test-ws で確認)。docs/commands.md の「保存せずに終了します」と食い違い、`--no-save` の後に `--restore latest` で「最後に保存できた時点に戻る」という mvm の案内も成り立たなかった → 終了の前に `POST /terminate-save {"save": false}` で VM に伝え、terminate フックでも保存しない。イメージ 3.0 で実機で確認した (E の terminate フックの項)
 - [x] Claude Code / Codex の版の固定: `image/Dockerfile` で 2.1.312 / 0.165.0 に固定し、`mvm image versions` で npm レジストリの最新版と比べられることを確認。固定した版でのイメージのビルドも 2026-11-20 に実施 (VM の中で Claude Code v2.1.312 を確認)
@@ -227,7 +236,9 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
   - 作業内容の保存に作業と設定が入り、認証情報と `~/.pmva` が入らないこと。別の VM で復元すると作業が戻り、Codex の接続先の設定と pmva のフックが重ならないこと
 - [x] `mvm` のコマンドを、本物のイメージを動かす手元の Docker に対して通しで動かした (2026-11-18。`tests/test_local_vm.py`、CI の `image` ワークフロー)。受け口の代わり (トークンとポートを確かめてコンテナにつなぐ) を通して、`up` / `wait` / `result` / `follow` / `peek` / `top` / `send` / `ssh` (SSH over WebSocket) / `forward` / `login` (手元の 1455 番から VM の `codex login` に届く) / `save` / `suspend` / `resume` / `stop`、`--restore latest` での復元
   - 途中で見つけた不具合: `mvm ssh <name> --no-reconnect` (ドキュメントの書き方) で、オプションが ssh にコマンドとして渡っていた。直した
-- [ ] Lambda MicroVMs の上での上記: 一部確認。2026-11-22、本物の受け口を通して `fleet` / `wait` / `result` / `stop --no-save` が動いた (上の司令塔の確認)。サスペンドしたときの自動レジュームとトークンの期限は未確認
+- [ ] Lambda MicroVMs の上での上記: 一部確認。2026-11-22、本物の受け口を通して `fleet` / `wait` / `result` / `stop --no-save` が動いた (上の司令塔の確認)。同じ日に、トークンの期限を過ぎても確立済みの SSH 接続が切れないこと (C)、`pmva-operator` だけでの `up` / `peek` / `ssh` / `send` / `top` / `save` / `suspend` / `stop` (G) も確認
+  - サスペンド中の VM へのコマンド (2026-11-22、イメージ 5.0、`--idle 120`): `mvm suspend` の後に打つと、`result` / `follow --once` / `peek` / `send` は約 1 秒、`ssh -- <コマンド>` は約 4 秒で VM が自動で再開し、結果が返った (その後の状態は RUNNING)。`top` と `wait` は VM を起こさずに `SUSPENDED` / `suspended` を返す (作業していない VM を起こさないための仕様)。`send` → `wait` で応答が返り、その後 120 秒のアイドルで再び SUSPENDED になった
+  - 修正 29: `mvm wait` は、サスペンド中の VM を「作業していない」とみなして `suspended` ですぐ返す。作業中に `mvm suspend` した上の確認では、作業の途中なのに `suspended` が返り、続けて打った `result` は「まだ応答がありません」だった。手動の `suspend` やキープアライブの無い最小構成では作業中でもサスペンドするのに、docs/commands.md は「作業中の VM はサスペンドしない」としていた → VM は起こさないまま (起こすとアイドルで止まるまで課金される)、`mvm peek` で再開して確かめる手順を表示し、`--json` の `hint` に入れる。司令塔の skill も `suspended` なら `peek` で確かめて待ち直す
 - [x] メモリ不足による強制終了の検出 (`/proc/vmstat` の `oom_kill`): 2026-11-21、MicroVM のカーネルでも値が使えた。VM の中でメモリを使い切るプロセスを動かすと、そのプロセスが強制終了され (終了コード 137)、`oom_kill` が 0 → 1 になり、`mvm top` / `mvm peek` に「メモリ不足でプロセスが 1 回強制終了されました」と出た
   - 気づいたこと: `MEMORY_MIB=4096` で起動した VM でも、VM の中からはメモリが約 15.7 GiB (`MemTotal` 16,437,604 kB)、CPU が 8 個に見えた。料金と上限が設定のどちらに従うのかは未確認 ([cost.md](cost.md) の試算は `MEMORY_MIB` に基づく)
 
@@ -260,6 +271,6 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 | SSH 接続 | OK (tmux アタッチ / デタッチ、日本語表示、5MB 転送) |
 | 1 日あたりの実費 | `mvm cost --actual` で 2026-10-27〜28 のアカウント全体が $0.01 (PoC の VM は短時間のみ。Lambda MicroVMs の行はまだ出ていない)。2 台 × 8 時間の実費は未計測。2026-10-24〜11-21 の実費 (Lambda $2.84、4GB の VM 換算で約 7.1 時間) と試算の比較は [cost.md](cost.md) の「実費との比較」 に記入 (2026-11-22) |
 | PoC 中に直した不具合 | 10 件: gh のインストール、validate フック、/run の本文形式、mvm ssh の引数、tmux の日本語、mvm shell の制御メッセージと端末復元、mvm logs (AWS CLI v1 対応)、mvm send のオプション、`-` で始まる指示、infra delete の削除順。ほかに `mvm ls` の時刻表示 |
-| 本番前に必要な対応 | `pmva-operator` だけを付けた IAM ユーザーの用意、Bedrock を使うならモデル利用申請 (同時に動かす台数を増やしたい場合だけ、クォータの引き上げ) |
+| 本番前に必要な対応 | `pmva-operator` だけを付けた IAM ユーザーか Identity Center の権限セットの用意 (このポリシーだけで日常の操作が通ることは 2026-11-22 に確認済み)、Bedrock を使うならモデル利用申請 (同時に動かす台数を増やしたい場合だけ、クォータの引き上げ) |
 | 片付け | 2026-10-28・29 とも `mvm stop-all`、`mvm infra delete`、`mvm image delete` を実施 |
 | 自動テスト (CI) | GitHub Actions で Windows / macOS (Python 3.9・3.13)、Linux (3.13) のテストと lint が成功。端末の表示や VS Code など目で見る項目は C2 に残る |
