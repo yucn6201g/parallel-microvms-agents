@@ -146,7 +146,7 @@ MicroVM を 1 台起動し、エージェントを tmux の中で開始します
 | `--idle <秒>\|off` | `IDLE_MAX_SECONDS` | 受信通信がこの秒数無いとサスペンド |
 | `--max-duration <秒>` | `MAX_DURATION_SECONDS` | 寿命 (上限 28800 = 8 時間) |
 | `--notify` / `--no-notify` | `NOTIFY_WEBHOOK` | 完了・入力待ちを Webhook に通知する |
-| `--no-setup` | | リポジトリの `.pmva/setup.sh` を実行しない ([setup.md](setup.md#リポジトリごとの準備-pmvasetupsh)) |
+| `--no-setup` | | リポジトリの `.pmva/setup.sh` を実行しない ([usage.md](usage.md#リポジトリごとの準備-pmvasetupsh)) |
 | `--profile <名前>` / `--no-profile` | `PROFILE` | 手元から送った設定のまとまり ([profile](#profile)) を使う / 使わない |
 
 注意:

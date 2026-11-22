@@ -77,5 +77,5 @@ Write-Output ''
 if ($script:Missing -gt 0) {
     Write-Output "足りないツールが $($script:Missing) 個あります。入れてから mvm doctor で確認してください"
 } else {
-    Write-Output '次は: mvm doctor → mvm infra deploy (docs\setup.md)'
+    Write-Output '次は: mvm doctor → mvm infra deploy (docs\quickstart.md の手順 4)'
 }

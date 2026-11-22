@@ -43,7 +43,7 @@ jobs:
             cat versions.txt
             echo '```'
             echo
-            echo "更新手順 (docs/setup.md「5. イメージのビルド」):"
+            echo "更新手順 (docs/setup.md「Claude Code / Codex の版を上げる」):"
             echo
             echo '```bash'
             echo 'mvm image update-versions   # Dockerfile を書き換える'

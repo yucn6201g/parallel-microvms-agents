@@ -2,7 +2,7 @@
 
 エージェントの認証情報は **AWS Secrets Manager** (`${PMVA_PREFIX}/...`) に置きます。MicroVM の起動時に `bootstrap.sh` が実行ロールの権限で取得するので、イメージやローカルの設定ファイルには残りません。
 方式は `config.env` の既定値か、`mvm up` のオプションでセッションごとに選べます。
-`mvm` の呼び出し方 (Windows は `.\bin\mvm.cmd`、macOS は `bin/mvm`) は [setup.md](setup.md#mvm-の呼び出し方) を参照してください。以下のコマンドは両 OS 共通です。
+以下のコマンドは Windows / macOS で共通です。
 
 `mvm secret set` は値を入力すると画面に表示せずに登録します。値はコマンドライン引数に載せないので、シェルの履歴にも残りません。
 
@@ -62,7 +62,7 @@ mvm secret set anthropic-api-key     # Claude Console で発行したキー
 
 ### Amazon Bedrock
 
-1. Bedrock コンソールで Anthropic のモデルへのアクセスを有効にする (初回は利用申請が必要。有効になっていないと `Access to Anthropic models is not allowed for this account.` と返る。PoC で確認)
+1. Bedrock コンソールで Anthropic のモデルへのアクセスを有効にする (初回は利用申請が必要。有効になっていないと `Access to Anthropic models is not allowed for this account.` と返る)
 2. `config.env` の `ENABLE_BEDROCK=true` (既定) のまま `mvm infra deploy` を実行する。実行ロールに `bedrock:InvokeModel*` が付く
 3. 必要なら `config.env` の `BEDROCK_REGION` と `CLAUDE_MODEL` (Bedrock コンソールで確認した推論プロファイル ID) を設定する
 
@@ -203,7 +203,30 @@ mvm up c1 --agent codex --codex-auth gateway --codex-args "--model <接続先の
 ```
 
 - VM の中では、`~/.codex/config.toml` の先頭の `# pmva:provider begin` 〜 `end` に接続先 (`pmva-gateway`) を書きます。キーは `config.toml` に書かず、`Authorization: Bearer` なら `~/.pmva/secrets/` のファイルから、`apiKeyHeader` なら環境変数 `PMVA_CODEX_GATEWAY_KEY` から渡します
-- 接続先が Responses API に対応している必要があります (Codex 0.165.0 は Chat Completions API には対応していません)
+- 接続先が Responses API に対応している必要があります (Codex は Chat Completions API には対応していません)
+
+### Amazon Bedrock (bedrock)
+
+Codex に組み込みの `amazon-bedrock` (Bedrock の Mantle) で、OpenAI のモデルを AWS の請求で使います。実行ロールで呼ぶので、キーの登録は要りません (`mvm infra deploy` で `bedrock-mantle:*` の権限が付きます)。
+
+```bash
+mvm up c1 --agent codex --codex-auth bedrock
+mvm up c2 --agent codex --codex-auth bedrock --codex-args "--model openai.gpt-5.5"   # モデルを選ぶ
+```
+
+- リージョンは `--bedrock-region` / `BEDROCK_REGION` (既定は `AWS_REGION`)。Codex 0.165.0 が対応しているのは us-east-1、us-east-2、us-west-2、ap-northeast-1、ap-south-1、ap-southeast-3、eu-central-1、eu-west-1、eu-west-2、eu-south-1、eu-north-1、sa-east-1 です (版によって変わります)
+- モデルを指定しなければ、Codex が決めた既定 (版によって変わる) を使います。アカウントで使えるモデルは Bedrock コンソールで確認してください
+- VM の中では `~/.codex/config.toml` の先頭に、`# pmva:provider begin` と `# pmva:provider end` で囲んだ設定を書きます。起動のたびに書き直すので、この部分は手で編集しないでください。`model_provider` を自分で書いている場合は、そちらを優先して警告を出します
+
+別の AWS アカウントの Bedrock を使うときは、API キーを登録します。
+
+```bash
+mvm secret set codex-bedrock-api-key
+mvm up c1 --agent codex --codex-auth bedrock-api-key
+```
+
+キーは環境変数に出さず、`~/.pmva/secrets/` のファイルから読ませます。そのため、`--agent both` で Claude Code と Codex に別々の Bedrock の API キーを使えます。
+ただし、Claude Code を `bedrock-api-key`、Codex を `bedrock` (実行ロール) にすると、Codex も Claude Code 用のキー (環境変数 `AWS_BEARER_TOKEN_BEDROCK`) で呼びます (起動時に警告が出ます)。
 
 ## どの方式にも当てはまらないとき (custom)
 
@@ -300,29 +323,6 @@ mvm login a1 claude --console   # Claude Code: Anthropic Console (API の従量�
 - ログインしたときに、エージェントがすでにログイン画面で待っている場合は、そのウィンドウでエージェントを終了して起動し直してください (`mvm ssh` で接続)
 - ログイン情報 (`~/.claude/.credentials.json`、`~/.codex/auth.json`) はスナップショットに含めないので、`mvm renew` や `--restore` で VM を作り直したら、もう一度ログインします
 
-### Amazon Bedrock (bedrock)
-
-Codex に組み込みの `amazon-bedrock` (Bedrock の Mantle) で、OpenAI のモデルを AWS の請求で使います。実行ロールで呼ぶので、キーの登録は要りません (`mvm infra deploy` で `bedrock-mantle:*` の権限が付きます)。
-
-```bash
-mvm up c1 --agent codex --codex-auth bedrock
-mvm up c2 --agent codex --codex-auth bedrock --codex-args "--model openai.gpt-5.5"   # モデルを選ぶ
-```
-
-- リージョンは `--bedrock-region` / `BEDROCK_REGION` (既定は `AWS_REGION`)。Codex 0.165.0 が対応しているのは us-east-1、us-east-2、us-west-2、ap-northeast-1、ap-south-1、ap-southeast-3、eu-central-1、eu-west-1、eu-west-2、eu-south-1、eu-north-1、sa-east-1 です
-- モデルを指定しなければ、Codex が決めた既定 (版によって変わる) を使います。アカウントで使えるモデルは Bedrock コンソールで確認してください
-- VM の中では `~/.codex/config.toml` の先頭に、`# pmva:provider begin` と `# pmva:provider end` で囲んだ設定を書きます。起動のたびに書き直すので、この部分は手で編集しないでください。`model_provider` を自分で書いている場合は、そちらを優先して警告を出します
-
-別の AWS アカウントの Bedrock を使うときは、API キーを登録します。
-
-```bash
-mvm secret set codex-bedrock-api-key
-mvm up c1 --agent codex --codex-auth bedrock-api-key
-```
-
-キーは環境変数に出さず、`~/.pmva/secrets/` のファイルから読ませます。そのため、`--agent both` で Claude Code と Codex に別々の Bedrock の API キーを使えます。
-ただし、Claude Code を `bedrock-api-key`、Codex を `bedrock` (実行ロール) にすると、Codex も Claude Code 用のキー (環境変数 `AWS_BEARER_TOKEN_BEDROCK`) で呼びます (起動時に警告が出ます)。
-
 ## GitHub
 
 clone / push 用のトークンです。対象リポジトリに絞った Fine-grained personal access token (Contents: Read and write、Pull requests: Read and write) を推奨します。
@@ -345,7 +345,7 @@ mvm fleet 3 --prefix team --claude-secret pmva/claude-oauth-token-team
 
 ## 認証情報の扱い
 
-- `runHookPayload` にはシークレットの名前だけを入れる (値は入れない)
-- VM 内では `~/.pmva/env.sh`、`~/.pmva/secrets/`、`~/.codex/auth.json` に権限 600 で置く。`~/.codex/config.toml` にはキーのファイルの場所だけを書き、キーそのものは書かない
-- ワークスペーススナップショットからは `~/.claude/.credentials.json` と `~/.codex/auth.json` を除外する
-- ローカルでは `mvm secret set` の値をコマンドライン引数に載せない (一時ファイル経由で渡す)。MicroVM のアクセストークンはキャッシュとして `.state/tokens/` (権限 600、最大 60 分有効) に保存される
+- 認証情報は Secrets Manager にだけ置き、MicroVM の起動時に取り出す。イメージ、起動時の設定、ワークスペースの保存には含めない (VM の中でログインした情報も保存しない)
+- VM の中では `~/.pmva/env.sh`、`~/.pmva/secrets/` などに権限 600 で置く
+- 各 VM が読めるのは、そのセッションで使うエージェントの認証情報だけ ([architecture.md](architecture.md#セキュリティ))
+- 手元では、MicroVM に接続するための短命のトークン (最大 60 分) を `.state/tokens/` にキャッシュする

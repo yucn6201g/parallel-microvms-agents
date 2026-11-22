@@ -15,7 +15,7 @@
 | [8](#8-1-台目を動かす) | 1 台目を動かす | 5 分 |
 | [9](#9-使い終わったら止める) | 使い終わったら止める | 1 分 |
 
-**費用の目安**: 4GB の MicroVM 1 台で 1 時間あたり約 $0.25〜0.29 (約 40 円)。止めれば計算料金はかかりません。ほかに保存などの固定費が月 $9 前後です ([cost.md](cost.md))。
+**費用の目安**: 4GB の MicroVM 1 台で 1 時間あたり約 $0.29 (税抜)。止めれば計算料金はかかりません。ほかに保存などの固定費が月 $4 前後です ([cost.md](cost.md))。
 
 以下、コマンドは Windows (PowerShell) と macOS (ターミナル) で書き方が違うところだけ分けて書きます。分けていないものは両方で同じです。
 
@@ -99,9 +99,9 @@ mvm doctor           # 「ok AWS 認証」と「Lambda MicroVMs が利用可能�
 mvm infra deploy     # S3・IAM ロール・ログなどを作る (数分)
 ```
 
-`mvm doctor` の「同時に何台まで」の行も見ておきます。この台数まで並列に動かせます ([setup.md](setup.md#クォータの確認))。
+`mvm doctor` の「同時に何台まで」の行も見ておきます。この台数まで並列に動かせます ([setup.md](setup.md#前提の確認とクォータ))。
 
-キープアライブ・毎晩の自動停止・予算アラートが要らなければ、`mvm infra deploy` の前に `config.env` に `INFRA_TEMPLATE=minimal` を書き足すと、動かすのに必要なリソースだけを作ります ([setup.md](setup.md#3-aws-リソースの作成))。
+キープアライブ・毎晩の自動停止・予算アラートが要らなければ、`mvm infra deploy` の前に `config.env` に `INFRA_TEMPLATE=minimal` を書き足すと、動かすのに必要なリソースだけを作ります ([setup.md](setup.md#aws-の構成を作る))。
 
 ## 5. 普段使う IAM ユーザーに切り替える
 
@@ -189,10 +189,10 @@ mvm cost --actual --days 7
 
 - 場面別の使い方 (並列実行、PC を閉じて任せる、8 時間を超える、費用を抑える): [usage.md](usage.md)
 - 全コマンドと設定項目: [commands.md](commands.md)、[config.md](config.md)
-- 何本も並べて動かす: `mvm fleet 2 --repo ...` ([setup.md の 7](setup.md#7-並列実行))。同時に動かせる台数は `mvm doctor` で確認
-- VS Code から MicroVM の中のファイルを開く: `mvm ssh-config --install` してから Remote-SSH で `pmva-test-01` に接続
-- 応答が終わったら Slack などに通知する: [setup.md の通知](setup.md#完了入力待ちの通知)
-- 毎日の操作のまとめ: [setup.md の 8](setup.md#8-日々の運用)
+- 何台も並べて動かす: [usage.md](usage.md#別々のタスクを並列に進める)。同時に動かせる台数は `mvm doctor` で確認
+- VS Code から MicroVM の中のファイルを開く: [usage.md](usage.md#vs-code-で開くファイルを手元に持ってくる)
+- 応答が終わったら Slack などに通知する: [usage.md](usage.md#完了入力待ちを通知する)
+- よく使うコマンドのまとめ: [usage.md](usage.md#よく使うコマンド)
 
 ## うまくいかないとき
 
@@ -202,9 +202,9 @@ mvm cost --actual --days 7
 | `mvm doctor` で「AWS 認証情報がありません」 | `config.env` の `AWS_PROFILE` と、`aws configure` で付けたプロファイル名が同じか。SSO なら `aws sso login --profile admin` |
 | `mvm doctor` で「lambda-microvms に未対応」 | AWS CLI が古い。最新版に入れ直す |
 | `mvm infra deploy` で AccessDenied | 管理者のプロファイル (`AWS_PROFILE=admin`) で実行しているか |
-| `mvm up` で「メモリ上限を超えます」 | クォータで決まる台数まで起動している。`mvm ls` で確認して、使っていないものを止める ([setup.md](setup.md#クォータの確認)) |
+| `mvm up` で「メモリ上限を超えます」 | クォータで決まる台数まで起動している。`mvm ls` で確認して、使っていないものを止める ([setup.md](setup.md#前提の確認とクォータ)) |
 | `mvm peek` で bootstrap が `failed` | 手順 6 のシークレットを登録したか (`mvm secret ls`)。`mvm shell test-01` で入って `cat ~agent/.pmva/bootstrap.log` |
 | `mvm ssh` で「SSH 公開鍵なしで起動されています」 | 手順 2 の `ssh-keygen` をしたか。作った後に `mvm renew test-01` で起動し直す (それまでは `mvm shell test-01` で入れる) |
-| 手順 5 の後に `mvm image build` や `mvm up` で AccessDenied | `pmva-operator` ポリシーに足りない権限がある (このポリシーだけでの動作はまだ実機で確認できていない)。エラーに出た操作を [setup.md](setup.md#操作用の-iam-ユーザー) の手順で追加する |
+| 手順 5 の後に `mvm image build` や `mvm up` で AccessDenied | `pmva-operator` ポリシーに足りない権限がある (このポリシーだけでの動作はまだ確認できていない)。エラーに出た操作を [setup.md](setup.md#操作用の-iam-ユーザー) の手順で追加する |
 
-ほかの症状は [setup.md のトラブルシューティング](setup.md#トラブルシューティング) を参照してください。
+ほかの症状は [troubleshooting.md](troubleshooting.md) を参照してください。

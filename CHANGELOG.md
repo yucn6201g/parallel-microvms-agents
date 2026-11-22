@@ -50,6 +50,7 @@
 
 ### 変更
 
+- ドキュメントを利用者向けに整理した。README を短くし、`docs/setup.md` は構築と管理 (AWS の構成、操作用の IAM ユーザー、イメージの更新、片付け) に絞った。場面別の使い方 (`.pmva/setup.sh`、通知、VS Code、よく使うコマンド) は `docs/usage.md` に、症状ごとの確認方法は新しい `docs/troubleshooting.md` にまとめた。インストールスクリプトの最後の案内は `docs/quickstart.md` を指す
 - AWS から VM の状態を取れなかったとき (`UNKNOWN`)、`mvm ls` / `watch` / `wait` / `top` / `stop` / `renew` / `infra delete` に、理由 (認証切れ、認証情報が無い、権限が無い、接続できない など) とやるべきこと (`aws sso login`、`AWS_PROFILE` の確認、`mvm doctor`) を表示する。`ls --json` は `stateError`、`wait --json` は `error` に入れる。`infra delete` は、状態を取れないセッションを「起動中」と言わずに理由を出して止める
 - Claude Code の hooks と Codex の `notify` を、通知 (`--notify`) を使わないときも常に設定するようにした (状態の記録のため)。`~/.claude/settings.json` に利用者が書いたフックは残す。新しいイメージ (`mvm image build`) が必要
 - 同時に動かす台数の目標を 10 台から「AWS アカウントのクォータの範囲内」に変更。`MAX_AGENTS` の既定を `0` (クォータで決まる台数まで) にし、`mvm doctor` はクォータに対して何台動かせるかを表示する。コストの試算 (`mvm cost`) の既定も 2 台にした
