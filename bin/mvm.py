@@ -2446,8 +2446,11 @@ def wait_check(name, idle_limit):
     if vm in ("TERMINATED", "TERMINATING", "GONE"):
         return dict(r, state="terminated", finished=True)
     if vm == "SUSPENDED":
-        # 作業中の VM はキープアライブとアイドル判定で起きているので、サスペンドしているなら作業はしていない
-        return dict(r, state="suspended", finished=True)
+        # 作業中の VM はふつうキープアライブで起きているので、起こさずに返す (起こすとアイドルで止まるまで課金される)。
+        # ただし手動の mvm suspend や、キープアライブの無い最小構成では作業の途中でもサスペンドするので、確かめ方を伝える
+        return dict(r, state="suspended", finished=True,
+                    hint=f"作業の途中で一時停止した可能性があります (手動の mvm suspend や、キープアライブの無い最小構成のとき)。"
+                         f"mvm peek {name} で再開して状態を確かめ、作業中なら mvm wait {name} で待ち直してください")
     if vm == "UNKNOWN":
         # AWS から状態を取れなかった。次の確認でもう一度試す
         return dict(r, state="unreachable", error=state_error(name))
@@ -2489,6 +2492,8 @@ def format_wait(r):
                                   for a, v in agents.items()) + ")"
     if r["state"] == "stalled":
         line += f"  (画面と CPU が {r.get('idleSeconds')} 秒動いていません)"
+    if r.get("hint"):
+        line += f"\n    → {r['hint']}"
     for a, v in agents.items():
         if v.get("state") == "waiting" and v.get("message"):
             line += f"\n    {a}: {v['message']}"

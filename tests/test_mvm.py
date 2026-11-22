@@ -879,7 +879,7 @@ class CliTest(unittest.TestCase):
             api.statuses = [self.status(claude="error", codex="exited")]
             rc, out, _ = self.mvm("wait", "a1", "--interval", "0.05", "--json", env=env)
             self.assertEqual(json.loads(out)["sessions"][0]["state"], "error", "エラーは終了より優先して知らせる")
-            # 名前を省略すると動いている全セッション。サスペンド中の VM は作業していないので API を呼ばずに終わり扱い
+            # 名前を省略すると動いている全セッション。サスペンド中の VM は起こさずに (API を呼ばずに) 終わり扱い
             (self.stub_dir / "microvm-0000.suspended").touch()
             api.statuses = [self.status(claude="working")]
             rc, out, _ = self.mvm("wait", "--any", "--interval", "0.05", "--json", env=env)
@@ -893,6 +893,25 @@ class CliTest(unittest.TestCase):
             (self.stub_dir / "microvm-0001.term").touch()
             rc, out, _ = self.mvm("wait", "a2", "--interval", "0.05", "--json", env=env)
             self.assertEqual(json.loads(out)["sessions"][0]["state"], "terminated")
+        finally:
+            api.shutdown()
+
+    def test_wait_suspended_tells_how_to_check(self):
+        """サスペンド中の VM は起こさずに返すが、作業の途中で止まった可能性と、確かめ方を伝える。
+        手動の mvm suspend や、キープアライブの無い最小構成では、作業中でもサスペンドするため。"""
+        api = StatusApi()
+        try:
+            env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}")
+            self.mvm("up", "a1", env=env)
+            (self.stub_dir / "microvm-0000.suspended").touch()
+            rc, out, _ = self.mvm("wait", "a1", "--interval", "0.05", "--json", env=env)
+            r = json.loads(out)["sessions"][0]
+            self.assertEqual((rc, r["state"], r["finished"]), (0, "suspended", True))
+            self.assertIn("mvm peek a1", r.get("hint", ""))
+            self.assertEqual(api.status_calls, 0, "サスペンド中の VM は起こさない")
+            rc, out, _ = self.mvm("wait", "a1", "--interval", "0.05", env=env)
+            self.assertIn("作業の途中", out)
+            self.assertIn("mvm peek a1", out)
         finally:
             api.shutdown()
 
