@@ -11,8 +11,8 @@ ARG WEBSOCAT_VERSION=1.13.0
 ARG UV_VERSION=0.13.6
 # エージェントの版は固定する (全 VM で同じ版を使い、更新はビルドし直したときだけ)。
 # 最新版の確認と書き換えは mvm image versions / mvm image update-versions で行う
-ARG CLAUDE_CODE_VERSION=2.1.312
-ARG CODEX_VERSION=0.165.0
+ARG CLAUDE_CODE_VERSION=2.1.330
+ARG CODEX_VERSION=0.171.0
 ARG INSTALL_GH=true
 ARG GH_VERSION=2.103.3
 # ブラウザ (Playwright / Puppeteer の Chromium) を動かすためのライブラリと日本語フォント。
