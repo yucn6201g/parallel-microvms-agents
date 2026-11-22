@@ -1713,6 +1713,30 @@ class CliTest(unittest.TestCase):
         _, out, _ = self.mvm("cost", "--agents", "2")
         self.assertIn("2 台", out)
 
+    def cost_row(self, *args):
+        _, out, _ = self.mvm("cost", *args)
+        row = next(x for x in out.splitlines() if x.startswith(("tokyo", "custom")))
+        return out, row.split()
+
+    def test_cost_uses_tokyo_billed_rates_and_tax(self):
+        # 2026-11 の東京の実請求: vCPU 秒 0.0000322421、GB 秒 0.0000042688 → 4GB (2 vCPU) で 1 台 1 時間 0.2936
+        out, row = self.cost_row()
+        self.assertEqual((row[0], row[1]), ("tokyo", "0.2936"))
+        before_tax, with_tax = float(row[6]), float(row[7])
+        self.assertAlmostEqual(with_tax, before_tax * 1.10, delta=0.01)  # 日本の消費税 10% を既定で含める
+        self.assertIn("消費税", out)
+        _, row = self.cost_row("--tax-rate", "0")
+        self.assertEqual(row[6], row[7])
+
+    def test_cost_snapshot_read_and_write_rates_differ(self):
+        # 1 回のサスペンドで 6GB (4GB + ディスク 2GB) を書いて読む: 2 台 x (0.00466 + 0.00186) x 6 = 0.0782
+        _, row = self.cost_row("--suspend-cycles-per-day", "1")
+        self.assertEqual(row[3], "0.08")
+        _, row = self.cost_row("--suspend-cycles-per-day", "1", "--snapshot-read-gb", "0.01", "--snapshot-write-gb", "0.03")
+        self.assertEqual((row[0], row[3]), ("custom", "0.48"))
+        _, row = self.cost_row("--suspend-cycles-per-day", "1", "--snapshot-rw-gb", "0.02")  # 互換: 読み書きとも
+        self.assertEqual((row[0], row[3]), ("custom", "0.48"))
+
     def test_cost_actual(self):
         _, out, _ = self.mvm("cost", "--actual", "--days", "3", "--daily")
         lines = out.splitlines()

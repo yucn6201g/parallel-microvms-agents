@@ -468,7 +468,7 @@ mvm cost [試算のオプション]                 # 試算 (scripts/estimate_c
 mvm cost --actual [--days N] [--daily]      # Cost Explorer の実績
 ```
 
-試算の主なオプション: `--agents` (台数、既定 2)、`--memory-gb` (既定 4)、`--hours-per-day` (既定 8)、`--days-per-month` (既定 22)、`--suspended-ratio` (サスペンドしている割合)、`--usd-jpy` (既定 150)。全オプションは `mvm cost --help`、結果の読み方は [cost.md](cost.md)。
+試算の主なオプション: `--agents` (台数、既定 2)、`--memory-gb` (既定 4)、`--hours-per-day` (既定 8)、`--days-per-month` (既定 22)、`--suspended-ratio` (サスペンドしている割合)、`--usd-jpy` (既定 150)、`--tax-rate` (消費税率、既定 0.10)。単価は東京の実請求の値で、`--vcpu-second` / `--gb-second` / `--snapshot-read-gb` / `--snapshot-write-gb` で上書きできる。全オプションは `mvm cost --help`、結果の読み方は [cost.md](cost.md)。
 `--actual` は直近 N 日 (既定 7、今日を含む) の実績をサービス別に表示します。アカウント全体の金額で、反映は最大 24 時間ほど遅れます。
 
 ---
