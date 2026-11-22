@@ -97,7 +97,35 @@ if cmd in ("lambda-microvms create-microvm-image", "lambda-microvms update-micro
 if cmd == "lambda-microvms get-microvm-image-version":
     out({"state": "SUCCESSFUL"})
 if cmd == "lambda-microvms get-microvm-image":
-    out({"latestActiveImageVersion": "1.0"})
+    out({"latestActiveImageVersion": os.environ.get("PMVA_STUB_LATEST_ACTIVE", "1.0")})
+# PMVA_STUB_IMAGE_VERSIONS: list-microvm-image-versions が返す版 (JSON の配列)。
+# delete-microvm-image-version で消した版は、本物と同じく DELETING になる
+deleted_versions_file = D / "deleted-versions.json"
+deleted_versions = json.loads(deleted_versions_file.read_text(encoding="utf-8")) if deleted_versions_file.exists() else []
+if cmd == "lambda-microvms list-microvm-image-versions":
+    versions = json.loads(os.environ.get("PMVA_STUB_IMAGE_VERSIONS") or json.dumps(
+        [{"imageVersion": "1.0", "state": "SUCCESSFUL", "status": "ACTIVE"}]))
+    for v in versions:
+        v.setdefault("createdAt", "2026-11-0%sT00:00:00+00:00" % v["imageVersion"][0])
+        if v["imageVersion"] in deleted_versions:
+            v["state"] = "DELETING"
+    out({"items": versions})
+if cmd == "lambda-microvms delete-microvm-image-version":  # PMVA_STUB_DELETE_FAIL=2.0,3.0 でその版の削除が失敗する
+    ver = opt("--image-version")
+    if ver in os.environ.get("PMVA_STUB_DELETE_FAIL", "").split(","):
+        fail("An error occurred (ConflictException) when calling the DeleteMicrovmImageVersion operation: "
+             "The image version is in use by one or more MicroVMs")
+    deleted_versions_file.write_text(json.dumps(deleted_versions + [ver]), encoding="utf-8")
+    out({"imageIdentifier": opt("--image-identifier"), "imageVersion": ver, "state": "DELETING"})
+if cmd == "lambda-microvms list-microvms":  # run-microvm で起動した VM (版は 1.0)。terminate した VM も TERMINATED で返す
+    if os.environ.get("PMVA_STUB_LIST_MICROVMS_DENIED"):
+        fail("An error occurred (AccessDeniedException) when calling the ListMicrovms operation")
+    vms = [{"microvmId": p.stem, "imageArn": "arn:img", "imageVersion": "1.0", "startedAt": 1793201909.5,
+            "state": "TERMINATED" if (D / f"{p.stem}.term").exists()
+            else "SUSPENDED" if (D / f"{p.stem}.suspended").exists() else "RUNNING"}
+           for p in sorted(D.glob("microvm-*.payload"))]
+    # PMVA_STUB_MICROVMS: この PC のセッションにない VM を足す (JSON の配列)
+    out({"items": vms + json.loads(os.environ.get("PMVA_STUB_MICROVMS") or "[]")})
 if cmd == "lambda-microvms run-microvm":
     vid = "microvm-%04d" % len(list(D.glob("microvm-*.payload")))
     payload = opt("--run-hook-payload")
