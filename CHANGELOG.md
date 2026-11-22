@@ -33,6 +33,7 @@
 
 ### 修正
 
+- `GIT_USER_NAME` / `GIT_USER_EMAIL` が空 (既定) のまま `--repo` で起動すると、VM の中でコミットが「Please tell me who you are」で失敗していた (VM では git が作成者を推測できない)。空のときは、GitHub トークンの持ち主のログイン名と noreply のアドレス (`<id>+<login>@users.noreply.github.com`) を使う。トークンから読めないときは `mvm peek` の `bootstrap` に設定を促す警告を出す。イメージの作り直し (`mvm image build`) が必要
 - `mvm wait` が `suspended` で返ったとき、作業が終わったのか途中で止まったのかが分からなかった (ドキュメントは「作業中の VM はサスペンドしない」としていたが、手動の `mvm suspend` やキープアライブの無い最小構成では作業の途中でもサスペンドする)。VM は起こさないまま、`mvm peek <name>` で再開して確かめる手順を表示し、`--json` の `hint` にも入れる。司令塔の skill も、`suspended` なら `peek` で確かめて待ち直すようにした (`mvm orchestrator install` で入れ直すと反映)
 - Windows Terminal や Claude のデスクトップアプリの端末から `mvm ssh` / `mvm view` でアタッチすると、シェルのプロンプトに `61;4;6;7;...c0;10;1c` のような文字列が入ることがあった (Enter を押すとコマンドとして実行される)。これらの端末 (ConPTY) は、代替画面に切り替えた直後の問い合わせに応答を 2 回返すことがあり、tmux が 2 回目をキー入力として扱っていた。tmux が手元の端末で代替画面を使わないようにした。そのため、Ctrl-b → d で抜けた後は、元の画面に戻らず tmux の最後の画面が残る (`mvm image build` で作り直すと直る)
 - `mvm stop` / `stop-all` / `renew` と毎晩の自動停止で、終了のたびにワークスペースを 2 回保存していた (保存の数秒後に、VM の終了時のフックがもう一度保存していた)。保存の履歴と終了にかかる時間が倍になっていた。保存できたら終了時のフックでは保存しない。保存に失敗したときは、これまでどおり終了時のフックでもう一度試みる。古いイメージの VM では 2 回保存のまま (`mvm image build` で作り直すと直る。毎晩の自動停止は `mvm infra deploy` も必要)

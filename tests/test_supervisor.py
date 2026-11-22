@@ -338,6 +338,15 @@ class SupervisorTest(unittest.TestCase):
                        '    cat "$f" ;;\n'
                        'esac\n')
         aws.chmod(0o755)
+        # gh のスタブ: `gh api user` は STUB_GH_USER のファイルの中身 (GitHub の /user の応答) を返す。
+        # ファイルが無ければ、トークンが使えないときと同じく失敗する。本物の GitHub にはつながない
+        self.gh_user = t / "gh-user.json"
+        self.gh_user.write_text('{"login": "octo-cat", "id": 12345, "name": null}', encoding="utf-8")
+        gh = bindir / "gh"
+        gh.write_text('#!/bin/sh\n'
+                      '[ "$1 $2" = "api user" ] && [ -f "$STUB_GH_USER" ] && exec cat "$STUB_GH_USER"\n'
+                      'echo "HTTP 401: Bad credentials" >&2\nexit 1\n')
+        gh.chmod(0o755)
         self.webhook = WebhookServer()
         self.add_secret("pmva/notify-webhook", self.webhook.url)
         # tmux 内のシェルが環境の設定で PATH を上書きしても、スタブが先に見つかるようにする
@@ -347,7 +356,7 @@ class SupervisorTest(unittest.TestCase):
         self.home = home
         self.env = dict(os.environ, HOME=str(home), PATH=f"{bindir}:{os.environ['PATH']}", TMUX_TMPDIR=str(t),
                         STUB_S3_OUT=str(self.s3_out), STUB_S3_IN=str(self.s3_in), STUB_SECRETS=str(self.secrets),
-                        HISTFILE="")
+                        STUB_GH_USER=str(self.gh_user), HISTFILE="")
         self.opt = opt
         self.env.pop("TMUX", None)
         # supervisor の標準エラーは、起動に失敗したときの手がかりとしてファイルに残す
@@ -909,6 +918,36 @@ class SupervisorTest(unittest.TestCase):
         self.assertIn("credential.helper=store", git)
         self.assertIn("user.name=山田 太郎", git)
         self.assertIn("push.autosetupremote=true", git)
+
+    def git_global(self, key):
+        r = subprocess.run(["git", "config", "--global", key], env=self.env, capture_output=True, text=True)
+        return r.stdout.strip()
+
+    def test_git_user_defaults_to_github_token_owner(self):
+        # GIT_USER_NAME / GIT_USER_EMAIL が空でも、VM でコミットできるようにする (VM では git が名前を推測できず、
+        # コミットが「Please tell me who you are」で失敗していた)。トークンの持ち主のログイン名と noreply のアドレスを使う
+        self.add_secret("pmva/github-token", "ghp_test")
+        st = self.run_session(githubSecret="pmva/github-token")
+        self.assertEqual(st["bootstrap"], "ready")
+        self.assertEqual(self.git_global("user.name"), "octo-cat")
+        self.assertEqual(self.git_global("user.email"), "12345+octo-cat@users.noreply.github.com")
+
+    def test_git_user_setting_wins_over_github_token_owner(self):
+        # 設定した方はそのまま使い、欠けている方だけをトークンの持ち主から補う
+        self.add_secret("pmva/github-token", "ghp_test")
+        st = self.run_session(githubSecret="pmva/github-token", gitUserName="山田 太郎")
+        self.assertEqual(st["bootstrap"], "ready")
+        self.assertEqual(self.git_global("user.name"), "山田 太郎")
+        self.assertEqual(self.git_global("user.email"), "12345+octo-cat@users.noreply.github.com")
+
+    def test_git_user_unknown_warns_and_keeps_going(self):
+        # トークンで持ち主を読めない (GitHub App のトークンなど) ときは、設定の仕方を警告に出して起動は続ける
+        self.gh_user.unlink()
+        self.add_secret("pmva/github-token", "ghs_test")
+        st = self.run_session(githubSecret="pmva/github-token")
+        self.assertTrue(st["bootstrap"].startswith("ready (warnings: "), st["bootstrap"])
+        self.assertIn("GIT_USER_NAME", st["bootstrap"])
+        self.assertEqual(self.git_global("user.name"), "")
 
     def test_token_secrets_drop_whitespace_from_wrapped_paste(self):
         # 端末の折り返しごとコピーして登録したトークン (途中に空白や改行) でも、正しい値として使う
