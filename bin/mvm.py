@@ -1029,9 +1029,8 @@ def cmd_infra(args):
             print(f"{o['OutputKey']}\t{o['OutputValue']}")
     elif args.action == "delete":
         bucket = stack_output("ArtifactBucketName")
-        ans = input(f"スタック {C['STACK_NAME']} と S3 バケット {bucket} の中身を削除します。よろしいですか? [y/N] ")
-        if ans.strip().lower() != "y":
-            die("中止しました")
+        confirm(f"スタック {C['STACK_NAME']} と S3 バケット {bucket} の中身を削除します。よろしいですか? [y/N] ",
+                "元に戻せない操作なので、端末から実行して確認に答えてください")
         active = active_names()
         unknown = [n for n in active if state_error(n)]
         if unknown:
@@ -1389,6 +1388,21 @@ def set_dockerfile_versions(path, versions):
     path.write_bytes(text.encode("utf-8"))
 
 
+def confirm(prompt, no_answer_hint):
+    """[y/N] で確かめ、y でなければ中止する。
+
+    端末の無いところ (司令塔のエージェント、CI、パイプ) から打って答えを読めないときは、
+    EOFError で落ちずに、次にやることを示して中止する。パイプで y を渡したときはそのまま進む。
+    """
+    try:
+        ans = input(prompt)
+    except EOFError:
+        print(file=sys.stderr)
+        die(f"確認の答えを読めなかったので中止しました (標準入力が端末ではありません)。{no_answer_hint}")
+    if ans.strip().lower() != "y":
+        die("中止しました")
+
+
 def npm_latest(package):
     base = os.environ.get("PMVA_NPM_REGISTRY", "https://registry.npmjs.org").rstrip("/")
     url = f"{base}/{urllib.parse.quote(package, safe='@')}/latest"
@@ -1490,10 +1504,9 @@ def cmd_image_prune(args):
         print(f"  {v['imageVersion']}\t{v.get('state')}\t{v.get('status')}\t{v.get('createdAt')}", flush=True)
     saving = sum(1 for v in targets if v.get("state") == "SUCCESSFUL") * IMAGE_VERSION_GB * SNAPSHOT_STORAGE_GB_MONTH
     if not args.yes:
-        ans = input(f"イメージ {arn} の上の {len(targets)} バージョンを削除します "
-                    f"(保存料金が月に約 ${saving:.2f} 減ります)。よろしいですか? [y/N] ")
-        if ans.strip().lower() != "y":
-            die("中止しました")
+        confirm(f"イメージ {arn} の上の {len(targets)} バージョンを削除します "
+                f"(保存料金が月に約 ${saving:.2f} 減ります)。よろしいですか? [y/N] ",
+                "上の版を削除してよければ、--yes を付けて実行してください")
     failed = []
     for v in targets:
         ver = v["imageVersion"]
@@ -1522,9 +1535,8 @@ def cmd_image(args):
     if args.action == "delete":
         arn = find_image_arn() or die(f"イメージ {C['IMAGE_NAME']} はありません")
         if not args.yes:
-            ans = input(f"イメージ {arn} を全バージョンごと削除します。よろしいですか? [y/N] ")
-            if ans.strip().lower() != "y":
-                die("中止しました")
+            confirm(f"イメージ {arn} を全バージョンごと削除します。よろしいですか? [y/N] ",
+                    "全バージョンを削除してよければ、--yes を付けて実行してください")
         lmv("delete-microvm-image", "--image-identifier", arn)
         log(f"削除を開始しました: {arn} (使うときは mvm image build で作り直せます)")
         return 0
