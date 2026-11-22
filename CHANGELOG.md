@@ -49,6 +49,7 @@
 - AWS から VM の状態を取れなかったとき (`UNKNOWN`)、`mvm ls` / `watch` / `wait` / `top` / `stop` / `renew` / `infra delete` に、理由 (認証切れ、認証情報が無い、権限が無い、接続できない など) とやるべきこと (`aws sso login`、`AWS_PROFILE` の確認、`mvm doctor`) を表示する。`ls --json` は `stateError`、`wait --json` は `error` に入れる。`infra delete` は、状態を取れないセッションを「起動中」と言わずに理由を出して止める
 - Claude Code の hooks と Codex の `notify` を、通知 (`--notify`) を使わないときも常に設定するようにした (状態の記録のため)。`~/.claude/settings.json` に利用者が書いたフックは残す。新しいイメージ (`mvm image build`) が必要
 - 同時に動かす台数の目標を 10 台から「AWS アカウントのクォータの範囲内」に変更。`MAX_AGENTS` の既定を `0` (クォータで決まる台数まで) にし、`mvm doctor` はクォータに対して何台動かせるかを表示する。コストの試算 (`mvm cost`) の既定も 2 台にした
+- `mvm cost` (試算) の単価を、東京リージョンの 2026 年 11 月の実際の請求に合わせた。low / high の 2 行をやめて 1 行 (`tokyo`) にし、スナップショットの読み込みと書き込みを別の単価 (`--snapshot-read-gb` / `--snapshot-write-gb`) で計算する。日本の消費税 10% を含めた税込の額も表示する (`--tax-rate 0` で除外)。`docs/cost.md` に実費との比較を追加
 
 ## [0.1.0] - 2026-10-29
 

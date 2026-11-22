@@ -254,7 +254,7 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 | 起動時間 (run → ready) | run-microvm 約 4 秒、bootstrap ready まで 9〜10 秒。サスペンドからの自動レジュームは 1.4 秒 |
 | シェル接続時のユーザー | root (SSH は agent) |
 | SSH 接続 | OK (tmux アタッチ / デタッチ、日本語表示、5MB 転送) |
-| 1 日あたりの実費 | `mvm cost --actual` で 2026-10-27〜28 のアカウント全体が $0.01 (PoC の VM は短時間のみ。Lambda MicroVMs の行はまだ出ていない)。2 台 × 8 時間の実費は未計測 |
+| 1 日あたりの実費 | `mvm cost --actual` で 2026-10-27〜28 のアカウント全体が $0.01 (PoC の VM は短時間のみ。Lambda MicroVMs の行はまだ出ていない)。2 台 × 8 時間の実費は未計測。2026-10-24〜11-21 の実費 (Lambda $2.84、4GB の VM 換算で約 7.1 時間) と試算の比較は [cost.md](cost.md) の「実費との比較」 に記入 (2026-11-22) |
 | PoC 中に直した不具合 | 10 件: gh のインストール、validate フック、/run の本文形式、mvm ssh の引数、tmux の日本語、mvm shell の制御メッセージと端末復元、mvm logs (AWS CLI v1 対応)、mvm send のオプション、`-` で始まる指示、infra delete の削除順。ほかに `mvm ls` の時刻表示 |
 | 本番前に必要な対応 | `pmva-operator` だけを付けた IAM ユーザーの用意、Bedrock を使うならモデル利用申請 (同時に動かす台数を増やしたい場合だけ、クォータの引き上げ) |
 | 片付け | 2026-10-28・29 とも `mvm stop-all`、`mvm infra delete`、`mvm image delete` を実施 |
