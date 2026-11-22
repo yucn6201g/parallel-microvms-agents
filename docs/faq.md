@@ -12,7 +12,7 @@ Python 3.9 以上、AWS CLI v2、OpenSSH クライアント、Git の 4 つで�
 4GB (2 vCPU) の MicroVM 1 台で 1 時間あたり約 $0.29 です (東京、税抜)。2 台を 1 日 8 時間、月 22 日動かすと月 $108 (消費税込みで約 1.8 万円) ほどです。止めている間は計算料金がかかりません。LLM の利用料 (サブスクリプションや API) は別です ([cost.md](cost.md))。
 
 **Q. 何台まで同時に動かせますか?**
-AWS アカウントの MicroVM メモリのクォータ (`L-CD1C0CC4`) で決まります。PoC のアカウントでは 8GB で、4GB の VM が 2 台 (2GB の VM なら 4 台) でした。`mvm doctor` で何台まで起動できるかを確認できます。超える起動は、1 台も起動する前に止まります。もっと増やしたいときは引き上げを申請します ([setup.md](setup.md#クォータの確認))。
+AWS アカウントの MicroVM メモリのクォータ (`L-CD1C0CC4`) で決まります。8GB なら 4GB の VM が 2 台 (2GB の VM なら 4 台) です。`mvm doctor` で何台まで起動できるかを確認できます。超える起動は、1 台も起動する前に止まります。もっと増やしたいときは引き上げを申請します ([setup.md](setup.md#前提の確認とクォータ))。
 
 **Q. どのリージョンで使えますか?**
 既定は東京 (`ap-northeast-1`) です。ほかのリージョンは、`config.env` の `AWS_REGION` を変えて `mvm doctor` を実行すると、Lambda MicroVMs が使えるかを確かめられます。
@@ -37,19 +37,19 @@ AWS Secrets Manager に保存し、MicroVM の起動時にだけ取り出しま�
 ## 動作
 
 **Q. PC を閉じたり、ネットワークが切れたりしたらエージェントは止まりますか?**
-止まりません。エージェントは MicroVM の中の tmux で動いています。作業中の VM は AWS 側のキープアライブが起こし続け、作業が終わるとしばらくして一時停止します ([usage.md](usage.md#手元の-pc-を閉じてエージェントに任せる))。
+止まりません。エージェントは MicroVM の中の tmux で動いています。作業中の VM は AWS 側のキープアライブが起こし続け、作業が終わるとしばらくして一時停止します ([usage.md](usage.md#手元の-pc-を閉じて任せる))。
 
 **Q. 8 時間を超えるとどうなりますか?**
 MicroVM は最大 8 時間で終了します。その前に `mvm renew <name>` で、保存 → 新しい VM で復元をしてください。ブランチと会話の履歴も引き継ぎます ([usage.md](usage.md#8-時間を超えて続ける))。
 
 **Q. VM のエージェントは、手元の Claude Code / Codex と同じ設定 (ルール、skill) で動きますか?**
-リポジトリに入っている設定 (`CLAUDE.md`、`AGENTS.md`、`.claude/skills/` など) は、clone すればそのまま使われます。手元の自分用の設定 (`~/.claude/CLAUDE.md`、`~/.claude/skills/`、`~/.codex/AGENTS.md` など) は、`mvm profile push` で送り、`config.env` に `PROFILE=default` を書くと VM にも置かれます ([commands.md](commands.md#profile))。MCP の設定や手元のアプリにつなぐものは送りません。手元でしかできない作業は、手元のエージェントを司令塔にして分担します ([orchestrator.md](orchestrator.md))。
+リポジトリに入っている設定 (`CLAUDE.md`、`AGENTS.md`、`.claude/skills/` など) は、clone すればそのまま使われます。手元の自分用の設定 (`~/.claude/CLAUDE.md`、`~/.claude/skills/`、`~/.codex/AGENTS.md` など) は、`mvm profile push` で送り、`config.env` に `PROFILE=default` を書くと VM にも置かれます ([usage.md](usage.md#手元の設定を-vm-でも使う))。MCP の設定や手元のアプリにつなぐものは送りません。手元でしかできない作業は、手元のエージェントを司令塔にして分担します ([orchestrator.md](orchestrator.md))。
 
 **Q. VM の中のファイルは、終了したら消えますか?**
 VM のディスクは一時的なもので、終了すると消えます。`~/work` (リポジトリ) と `~/.claude`、`~/.codex` (会話の履歴) は、30 分ごとと `mvm stop` のときに S3 に保存され、`--restore latest` で戻せます。確実に残したい成果物は git に push してください。
 
 **Q. VM の中で sudo は使えますか? パッケージを追加したいです。**
-`agent` ユーザーは sudo を使えません (コンテナの制限)。root が必要な作業は `mvm shell <name>` (root で入る) で行います。毎回使うパッケージは `config.env` の `IMAGE_EXTRA_PACKAGES` に書いて `mvm image build` します。Python と Node.js の版は root なしで変えられます (`uv python install`、`pmva-node install`。[setup.md](setup.md#リポジトリごとの準備-pmvasetupsh))。
+`agent` ユーザーは sudo を使えません (コンテナの制限)。root が必要な作業は `mvm shell <name>` (root で入る) で行います。毎回使うパッケージは `config.env` の `IMAGE_EXTRA_PACKAGES` に書いて `mvm image build` します。Python と Node.js の版は root なしで変えられます (`uv python install`、`pmva-node install`。[usage.md](usage.md#リポジトリごとの準備-pmvasetupsh))。
 
 **Q. Docker や GPU は使えますか?**
 イメージに Docker は入っていません。GPU もありません。CPU (ARM64) で完結するビルドとテストが前提です。
@@ -60,17 +60,11 @@ MicroVM は ARM64 (Graviton) だけです。x86 用のバイナリしかない�
 ## 接続
 
 **Q. VS Code から使えますか?**
-使えます。`mvm ssh-config --install` で `~/.ssh/config` に設定を書き、Remote-SSH で `pmva-<name>` に接続します ([usage.md](usage.md#vs-code-で-microvm-の中を開く))。
-
-**Q. SSH が途中で切れます。**
-途中の通信経路 (社内プロキシなど) が長い接続を切ることがあります。`mvm ssh <name>` (コマンドなし) は自動で再接続し、作業は tmux の中で続いています。原因を調べるときは `PMVA_DEBUG=<ファイル>` を設定すると、切断の理由を記録します。
+使えます。`mvm ssh-config --install` で `~/.ssh/config` に設定を書き、Remote-SSH で `pmva-<name>` に接続します ([usage.md](usage.md#vs-code-で開くファイルを手元に持ってくる))。
 
 **Q. 社内プロキシの内側から使えますか?**
 環境変数 `HTTPS_PROXY` が設定されていれば、`mvm` は CONNECT で MicroVM に接続します。AWS CLI もプロキシの設定に従います。
 
-## トラブル
+## うまくいかないとき
 
-**Q. 片付けたのにリソースが残っています。**
-`mvm infra delete` は、消せなかったリソースがあると、それだけを残して残りを削除し、削除コマンドを表示します。表示されたコマンドを実行してください。イメージは `mvm image delete`、シークレットは Secrets Manager で個別に削除します ([setup.md](setup.md#8-日々の運用))。
-
-ほかの症状は [setup.md のトラブルシューティング](setup.md#トラブルシューティング) と [quickstart.md](quickstart.md#うまくいかないとき) を参照してください。
+症状ごとの確認方法は [troubleshooting.md](troubleshooting.md) にあります。使わなくなったときの片付け方は [setup.md](setup.md#片付け) にあります。

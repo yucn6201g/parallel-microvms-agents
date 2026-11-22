@@ -33,6 +33,7 @@
 
 ### 修正
 
+- `mvm image prune` / `mvm image delete` (`--yes` なし) と `mvm infra delete` を、端末の無いところ (司令塔のエージェント、CI、パイプ) から実行すると、確認の答えを読めずに `EOFError` のトレースバックで落ちていた。何も削除せずに、`--yes` を付ける (`infra delete` は端末から実行する) よう案内して中止する。パイプで `y` を渡したときは従来どおり進む
 - 版の確認のワークフロー (`agent-versions.yml`) が、固定した版を最新に上げた後も Issue「Claude Code / Codex の新しい版があります」を古い内容のまま開いておいた。最新に追いついていれば、その Issue を閉じる
 - `GIT_USER_NAME` / `GIT_USER_EMAIL` が空 (既定) のまま `--repo` で起動すると、VM の中でコミットが「Please tell me who you are」で失敗していた (VM では git が作成者を推測できない)。空のときは、GitHub トークンの持ち主のログイン名と noreply のアドレス (`<id>+<login>@users.noreply.github.com`) を使う。トークンから読めないときは `mvm peek` の `bootstrap` に設定を促す警告を出す。イメージの作り直し (`mvm image build`) が必要
 - `mvm wait` が `suspended` で返ったとき、作業が終わったのか途中で止まったのかが分からなかった (ドキュメントは「作業中の VM はサスペンドしない」としていたが、手動の `mvm suspend` やキープアライブの無い最小構成では作業の途中でもサスペンドする)。VM は起こさないまま、`mvm peek <name>` で再開して確かめる手順を表示し、`--json` の `hint` にも入れる。司令塔の skill も、`suspended` なら `peek` で確かめて待ち直すようにした (`mvm orchestrator install` で入れ直すと反映)
@@ -50,6 +51,7 @@
 
 ### 変更
 
+- ドキュメントを利用者向けに整理した。README を短くし、`docs/setup.md` は構築と管理 (AWS の構成、操作用の IAM ユーザー、イメージの更新、片付け) に絞った。場面別の使い方 (`.pmva/setup.sh`、通知、VS Code、よく使うコマンド) は `docs/usage.md` に、症状ごとの確認方法は新しい `docs/troubleshooting.md` にまとめた。インストールスクリプトの最後の案内は `docs/quickstart.md` を指す
 - AWS から VM の状態を取れなかったとき (`UNKNOWN`)、`mvm ls` / `watch` / `wait` / `top` / `stop` / `renew` / `infra delete` に、理由 (認証切れ、認証情報が無い、権限が無い、接続できない など) とやるべきこと (`aws sso login`、`AWS_PROFILE` の確認、`mvm doctor`) を表示する。`ls --json` は `stateError`、`wait --json` は `error` に入れる。`infra delete` は、状態を取れないセッションを「起動中」と言わずに理由を出して止める
 - Claude Code の hooks と Codex の `notify` を、通知 (`--notify`) を使わないときも常に設定するようにした (状態の記録のため)。`~/.claude/settings.json` に利用者が書いたフックは残す。新しいイメージ (`mvm image build`) が必要
 - 同時に動かす台数の目標を 10 台から「AWS アカウントのクォータの範囲内」に変更。`MAX_AGENTS` の既定を `0` (クォータで決まる台数まで) にし、`mvm doctor` はクォータに対して何台動かせるかを表示する。コストの試算 (`mvm cost`) の既定も 2 台にした

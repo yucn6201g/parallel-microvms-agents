@@ -1535,6 +1535,28 @@ class CliTest(unittest.TestCase):
         self.mvm("image", "prune", "--yes", env=env)
         self.assertEqual(len(self.deleted_image_versions()), 3)
 
+    def assert_refused_without_answer(self, rc, err, hint):
+        self.assertNotEqual(rc, 0)
+        self.assertNotIn("Traceback", err)
+        self.assertNotIn("EOFError", err)
+        self.assertIn("中止しました", err)
+        self.assertIn(hint, err)
+
+    def test_confirmations_stop_cleanly_without_an_answer(self):
+        # 端末の無いところ (司令塔のエージェント、CI、パイプ) から打って確認の答えを読めないとき、
+        # EOFError のトレースバックで落ちていた。何も消さずに、次にやることを示して止まる
+        env = self.image_versions_env()
+        rc, _, err = self.mvm("image", "prune", input=b"", env=env, check=False)
+        self.assert_refused_without_answer(rc, err, "--yes")
+        self.assertEqual(self.deleted_image_versions(), [])
+        rc, _, err = self.mvm("image", "delete", input=b"", env=env, check=False)
+        self.assert_refused_without_answer(rc, err, "--yes")
+        rc, _, err = self.mvm("infra", "delete", input=b"", check=False)
+        self.assert_refused_without_answer(rc, err, "端末")
+        calls = (self.stub_dir / "calls.jsonl").read_text(encoding="utf-8")
+        self.assertNotIn("delete-microvm-image", calls)
+        self.assertNotIn("delete-stack", calls)
+
     def test_image_prune_keep_option(self):
         self.mvm("image", "prune", "--keep", "1", "--yes", env=self.image_versions_env())
         self.assertEqual(sorted(self.deleted_image_versions()), ["1.0", "2.0", "3.0"])
