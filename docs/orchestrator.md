@@ -101,4 +101,4 @@ mvm view fix-login    # 1 台の画面を読み取り専用で表示
   - Claude Code / Codex が `mvm-orchestrator` の skill を読み込む
   - Claude Code の `--dir` のフックが `npm test` を止め、その理由をエージェントに返す
   - 確認用の `mvm` コマンドが、許可を求めずに実行される (入れる前は「This command requires approval」で止まる)
-- 実際の LLM が skill に従ってタスクを分け、待ち、結果を確かめるところは、MicroVM で動かせるようになってから確かめます ([poc-checklist.md](poc-checklist.md) の H)
+- 実際の LLM (手元の Claude Code) が skill に従って、タスクを分け、起動の了承を求め、2 台の MicroVM を起動し、`wait` / `result` で結果をまとめ、終了の前に判断を求めることを、2026-11-22 に Lambda MicroVMs の上で確かめました ([poc-checklist.md](poc-checklist.md) の H)
