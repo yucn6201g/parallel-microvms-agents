@@ -158,7 +158,9 @@ aws iam create-access-key --user-name pmva-operator # 出力されたキーを�
 aws configure --profile pmva                        # キーは手元の ~/.aws/credentials にだけ保存する
 ```
 
-`config.env` に `AWS_PROFILE=pmva` を書き、`mvm doctor` で「管理者権限ではありません」と出ることを確認します。
+`config.env` に `AWS_PROFILE=pmva` を書き、`mvm doctor` を実行します。「権限の確認は省略しました」(`pmva-operator` だけでは IAM の情報を読めないため) か「管理者権限ではありません」と出て、ほかの項目が OK なら準備完了です。
+
+IAM Identity Center (SSO) を使っている場合は、アクセスキーを作らずに済む権限セットがおすすめです。権限セットを作るときにカスタマーマネージドポリシーとして `pmva-operator` (パスは `/`) だけを付け、自分のユーザーにこのアカウントで割り当てます。続けて `aws configure sso` (既存の SSO セッションがあれば `~/.aws/config` に `sso_role_name = <権限セットの名前>` のプロファイルを足すだけ) でプロファイルを作り、`config.env` の `AWS_PROFILE` に設定します。
 
 守ること:
 
@@ -168,11 +170,11 @@ aws configure --profile pmva                        # キーは手元の ~/.aws/
 - キーをチャットやリポジトリに貼らない (`config.env` と `.state/` は `.gitignore` 済み)
 - 予算アラート ([下記](#予算アラート)) を設定し、身に覚えのない費用に早く気付けるようにする
 
-**このポリシーで足りるかの確認**: PoC は管理者ユーザーで行ったため、`pmva-operator` だけで足りるかはまだ実機で確認できていません (確認しようとした環境では、AWS へのリクエストが管理者の認証情報で署名し直されるため)。最初に次の手順で確認してください。
+**このポリシーで足りるかの確認**: `pmva-operator` だけで、起動・接続・指示・保存・サスペンド・停止・費用の確認・ログの表示が通ることを 2026-11-22 に確かめています ([poc-checklist.md](poc-checklist.md))。テンプレートを変えたときや、権限に心当たりのないエラーが出たときは、次の手順で確かめてください。
 
 1. 上の手順で作ったプロファイルを `config.env` の `AWS_PROFILE` に設定する
 2. `mvm doctor` → `mvm image status` → `mvm up op-test --agent none` → `mvm peek op-test` → `mvm ssh op-test -- id` → `mvm stop op-test` を順に実行する
-3. `AccessDenied` が出たら、エラーに出た操作 (例: `lambda:PassNetworkConnector`) を `infra/cloudformation.yaml` の `OperatorPolicy` に追加して `mvm infra deploy` する
+3. `AccessDenied` が出たら、エラーに出た操作 (例: `lambda:PassNetworkConnector`) を `infra/cloudformation.yaml` の `OperatorPolicy` に追加して、管理者の権限で `mvm infra deploy` する
 
 `mvm infra deploy` / `mvm infra delete` は IAM ロールやスタックを作成・削除するので、管理者の権限で実行します。
 
