@@ -58,3 +58,25 @@ jobs:
           else
             gh issue create --title "$title" --body-file body.md
           fi
+      # 固定した版が最新に追いついたら、知らせる Issue を閉じる (閉じないと、更新した後も古い通知が残る)。
+      # npm から版を取れなかったときは前のステップが失敗するので、ここまで来ない
+      - name: Close the issue when up to date
+        if: steps.versions.outputs.outdated != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="Claude Code / Codex の新しい版があります"
+          number="$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number // empty')"
+          if [ -z "$number" ]; then
+            echo "開いている Issue はありません"
+            exit 0
+          fi
+          {
+            echo "image/Dockerfile で固定している版が npm の最新版に追いついたので閉じます ($(date -u +%Y-%m-%d) 時点)。"
+            echo
+            echo '```'
+            cat versions.txt
+            echo '```'
+          } > comment.md
+          gh issue close "$number" --comment "$(cat comment.md)"
+          echo "Issue #$number を閉じました"
