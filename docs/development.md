@@ -100,7 +100,7 @@ PMVA_TEST_IMAGE=pmva-agent:test python -m unittest tests.test_image -v
 
 **`image/` のファイルを足したとき**: 実行権限が必要なファイルは、`bin/mvm.py` の `build_artifact_zip` の `executables` と `image/Dockerfile` の `chmod` の両方に名前を足します (zip にするときに権限を付けるため)。
 
-**MicroVM 内の動きを変えたとき**: 自動テストでは AWS の実際の動作 (フックの呼ばれ方、サスペンド、プロキシ) までは確かめられません。`mvm image build` で新しいイメージを作り、`mvm up <name> --agent none` などで実際に起動して確認してから main に入れます。確認した項目は [poc-checklist.md](poc-checklist.md) に記録します。
+**MicroVM 内の動きを変えたとき**: 自動テストでは AWS の実際の動作 (フックの呼ばれ方、サスペンド、プロキシ) までは確かめられません。`mvm image build` で新しいイメージを作り、`mvm up <name> --agent none` などで実際に起動して確認してから main に入れます。確認した項目は [poc-checklist.md](poc-checklist.md) に記録します (実機での検証の記録で、利用者向けの手順ではありません)。
 
 **テンプレートの共通部分を変えたとき**: S3、IAM ロール、操作用ポリシーなどは 2 つのテンプレートに同じ内容で書いています。両方を同じように直してください (`tests/test_templates.py` が、ずれていないかを確かめます)。
 
@@ -109,6 +109,20 @@ PMVA_TEST_IMAGE=pmva-agent:test python -m unittest tests.test_image -v
 **IAM の権限を変えたとき**: 実行ロールはエージェントの組み合わせごとに 4 つあり、読めるシークレットを名前の接頭辞で分けています。`mvm` 側の `SECRET_NAME_PREFIXES` と、テンプレートの各ロールの `Resource` をそろえてください。操作用ポリシー (`OperatorPolicy`) に足すときは、`mvm` のどのコマンドで使うかをコメントに書きます。
 
 **設定項目を足したとき**: `bin/mvm.py` の `DEFAULTS`、`config.example.env`、[config.md](config.md) の 3 か所に書きます。
+
+## GitHub リポジトリの設定
+
+このリポジトリを自分の GitHub で管理する場合は、次の設定をおすすめします。
+
+1. **既定ブランチを `main` にする**: Settings → General → Default branch
+2. **`main` を保護する**: Settings → Branches → Add branch ruleset で `main` を対象にし、「Require status checks to pass」に次の CI ジョブを足す
+   - `lint`
+   - `test (ubuntu-latest, Python 3.13)`
+   - `test (windows-latest, Python 3.9)`、`test (windows-latest, Python 3.13)`
+   - `test (macos-latest, Python 3.9)`、`test (macos-latest, Python 3.13)`
+3. ひとりで使う場合は、「Require a pull request before merging」のレビュー必須は付けない (自分のプルリクエストをマージできなくなる)
+
+非公開リポジトリのブランチ保護は、GitHub の有料プランが必要な場合があります。
 
 ## 変更の流れ
 

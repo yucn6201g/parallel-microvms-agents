@@ -1,170 +1,93 @@
 # parallel-microvms-agents
 
-Claude Code / Codex を **AWS Lambda MicroVMs** 上で並列に動かし (台数は AWS アカウントのクォータの範囲内)、手元の PC は「画面を見る・指示を出す」だけにするための資材一式です。
-ビルド・テスト・エージェント本体はすべてクラウド側の MicroVM で実行されるので、手元 PC の CPU 使用率と発熱を抑えられます。
+Claude Code / Codex を **AWS Lambda MicroVMs** の上で何台も並べて動かし、手元の PC (Windows / macOS) では画面の確認と指示だけを行うためのツール一式です。
+エージェント本体と、エージェントが走らせるビルド・テスト・ブラウザはすべて MicroVM の中で動くので、手元の CPU とメモリをほとんど使いません。
 
 ```mermaid
 flowchart LR
   subgraph PC["手元 PC (Windows / macOS)"]
     term["ターミナル / VS Code"]
-    mvm["mvm (Python)<br/>peek / send / watch<br/>ssh / shell"]
+    mvm["mvm (Python)"]
   end
-  subgraph AWS["AWS 東京リージョン"]
-    subgraph VM1["Lambda MicroVM agent-01"]
-      sup["supervisor.py<br/>:8080 状態・操作 API<br/>:9000 ライフサイクルフック"]
-      bridge["websocat :7681 → sshd<br/>SSH over WebSocket"]
-      tmux["tmux セッション main<br/>claude / codex"]
-      boot["bootstrap.sh / snapshot.sh"]
+  subgraph AWS["AWS (東京リージョン)"]
+    subgraph VM1["MicroVM agent-01"]
+      tmux["tmux の中で<br/>claude / codex"]
     end
+    more["agent-02 〜"]
     sm[("Secrets Manager<br/>認証情報")]
     s3[("S3<br/>ワークスペース")]
-    more["agent-02 〜<br/>同じ構成 (クォータの範囲で)"]
   end
   term --- mvm
-  mvm -- "HTTPS / WSS<br/>短命トークン" --> sup
-  mvm -- "SSH over WSS" --> bridge
-  sup --> tmux
-  bridge --> tmux
-  boot -. "起動時に取得" .-> sm
-  boot -. "保存・復元" .-> s3
+  mvm -- "HTTPS / SSH over WebSocket" --> tmux
+  VM1 -. "起動時に取得" .-> sm
+  VM1 -. "保存・復元" .-> s3
   tmux ~~~ more
 ```
 
 ## できること
 
-| 要件 | 実現方法 |
-|---|---|
-| 複数エージェントの並列実行 | `mvm fleet <台数>` / `mvm up <name>`。同時に動かせる台数は MicroVM メモリのクォータで決まり、超える前に止める (`mvm doctor` で確認) |
-| 手元 PC から画面確認 | `mvm peek`（画面末尾を取得）、`mvm follow`（推論の過程を流れるように表示）、`mvm view`（画面を読み取り専用で表示）、`mvm watch`（全台を一覧表示）、`mvm wait`（応答が終わるまで待つ）、`mvm result`（最後の応答を読む）、`mvm top`（VM のメモリ）、`mvm ssh`（tmux にアタッチ） |
-| 手元 PC から指示 | `mvm send <name> "指示"`（接続せずに入力）、または `mvm ssh` で直接操作 |
-| 手元の設定を VM でも使う | `mvm profile push` で、手元の Claude Code / Codex のルール・skill・サブエージェント・コマンドを VM のエージェントにも置く（認証情報らしいものは送らない） |
-| 手元のエージェントを司令塔にする | `mvm orchestrator install claude\|codex` で、手元の Claude Code / Codex に MicroVM へ作業を任せる skill を入れる。重い処理は MicroVM で動き、手元の RAM を使わない（[docs/orchestrator.md](docs/orchestrator.md)） |
-| 多様な認証方式 | Claude Code: サブスクリプション (OAuth トークン) / API キー / Amazon Bedrock (実行ロール・API キー・Mantle) / Claude Platform on AWS / LLM ゲートウェイ / 対話ログイン<br>Codex: API キー / ChatGPT ログイン (auth.json、アクセストークン) / Amazon Bedrock (実行ロール・API キー) / ゲートウェイ (LiteLLM、Azure OpenAI など)<br>VM の中のエージェントに、手元のブラウザでログイン (`mvm login`)<br>一覧にない方式は、環境変数・ファイル・設定を自分で書いて使える (`custom`) (auth.json) / 対話ログイン |
-| 8 時間制限への対応 | ワークスペースを S3 に定期保存し、`mvm renew` で新しい MicroVM に復元 |
-| PC を閉じても作業を続ける | AWS 側のキープアライブが、作業中の VM だけを一時停止させない（作業が終われば止まる） |
-| 止め忘れ防止 | 毎晩決まった時刻に全台を保存してから終了（`NIGHTLY_STOP_TIME=23:00`） |
-| 完了・入力待ちの通知 | Claude Code の hooks / Codex の notify から Slack などの Webhook に通知（`mvm up --notify`） |
-| コスト試算と予算アラート | `mvm cost`（[docs/cost.md](docs/cost.md)）、`mvm cost --actual`（Cost Explorer の実績）、AWS Budgets のメール通知（任意） |
-| エージェントの版管理 | Claude Code / Codex の版をイメージで固定し、`mvm image update-versions` で更新 |
-| 認証情報の分離 | 起動するエージェントの認証情報だけを読める実行ロールを自動で選ぶ |
-| 手元 PC は Windows / macOS 両対応 | 手元 CLI は Python 標準ライブラリのみで実装。必要なのは Python 3.9 以上、AWS CLI v2、OpenSSH クライアント (両 OS に標準搭載) だけ |
+- **並列に動かす**: `mvm fleet 3 --prompts-file tasks.txt` で、1 台に 1 つずつタスクを渡して起動する。台ごとに作業ブランチ (`pmva/<名前>`) が分かれる
+- **手元から様子を見る・指示する**: `mvm peek` (画面の末尾)、`mvm wait` (応答が終わるまで待つ)、`mvm result` (最後の応答)、`mvm follow` (推論の過程)、`mvm send` (指示を送る)、`mvm ssh` (画面に入って操作する)、VS Code の Remote-SSH
+- **PC を閉じても続ける**: 作業中の VM は AWS 側のキープアライブが起こし続け、作業が終わればしばらくして一時停止する
+- **8 時間の寿命を越える**: ワークスペースを S3 に保存し、`mvm renew` で新しい VM に移る
+- **手元のエージェントを司令塔にする**: 手元の Claude Code / Codex に skill を入れ、タスクの分割・起動・結果の確認を任せる ([docs/orchestrator.md](docs/orchestrator.md))
+- **認証方式を選べる**: Claude のサブスクリプション、API キー、Amazon Bedrock、Claude Platform on AWS、ChatGPT アカウント、社内の LLM ゲートウェイなど ([docs/auth.md](docs/auth.md))
+- **費用を抑える**: 毎晩の自動停止、予算アラート、`mvm cost` での試算と実績の確認 ([docs/cost.md](docs/cost.md))
 
-## クイックスタート
+手元に要るのは Python 3.9 以上、AWS CLI v2、OpenSSH クライアント、Git だけです (WSL は不要)。
 
-**初めての人は [docs/quickstart.md](docs/quickstart.md) を上から順に進めてください。** AWS アカウントの守り方から 1 台目のエージェントを動かして止めるまでを、Windows / macOS の両方について 9 つの手順にまとめています。
-以下は流れの要約です。
+## はじめかた
 
-手元 PC に Python 3.9 以上と AWS CLI v2 を入れてから始めます ([docs/setup.md](docs/setup.md#0-手元-pc-の準備-windows--macos))。
-
-インストールスクリプトが前提ツールの確認、`config.env` の作成、`mvm` エイリアスの登録を行います (新しいターミナルを開くと `mvm` で呼べます)。
-
-```powershell
-# Windows (PowerShell)
-powershell -ExecutionPolicy Bypass -File scripts\install.ps1
-```
+**[docs/quickstart.md](docs/quickstart.md) を上から順に進めてください。** AWS アカウントの守り方から、1 台目のエージェントを動かして止めるまでを 9 つの手順にまとめています。流れは次のとおりです。
 
 ```bash
-# macOS
-scripts/install.sh
-```
-
-ここから先は両 OS 共通です。`infra deploy` だけを管理者で行い、その後は `pmva-operator` ポリシーだけを付けた IAM ユーザーに切り替えます ([手順](docs/quickstart.md#5-普段使う-iam-ユーザーに切り替える))。
-
-```bash
-mvm doctor                        # 前提ツール・AWS 認証・リージョン対応を確認
-mvm infra deploy                  # (管理者で) S3 / IAM ロール / ログを作成
-claude setup-token                # (サブスクリプションの場合) 長期トークンを発行
-mvm secret set claude-oauth-token # 発行したトークンを Secrets Manager に登録
-mvm secret set github-token       # clone / push 用の GitHub トークン
-mvm image build                   # Claude Code / Codex 入りのイメージをビルド
+mvm doctor                        # 前提ツールと AWS の認証を確認
+mvm infra deploy                  # (管理者で 1 回だけ) S3・IAM ロールなどを作る
+mvm secret set claude-oauth-token # エージェントの認証情報を登録
+mvm image build                   # Claude Code / Codex 入りのイメージを作る
 mvm up test-01 --repo https://github.com/<owner>/<repo>.git --prompt "README を読んで概要を説明して"
 mvm peek test-01                  # 画面を確認
-mvm ssh test-01                   # tmux にアタッチして直接操作 (Ctrl-b d で切断)
+mvm stop test-01                  # 保存してから止める
 ```
 
-詳しい手順は [docs/setup.md](docs/setup.md) を参照してください。
+`infra deploy` だけを管理者で行い、普段は権限を絞った IAM ユーザーで使います。AI エージェントに AWS を使わせるので、ルートユーザーの MFA と予算アラートを最初に設定してください (quickstart の手順 1)。
+
+費用の目安は、4GB の MicroVM 1 台で 1 時間あたり約 $0.29 (税抜) です。止めている間は計算料金がかかりません ([docs/cost.md](docs/cost.md))。
 
 ## ドキュメント
 
+**使う人向け**
+
 | 読みたいこと | ページ |
 |---|---|
-| はじめて使う (1 台目を動かすまで) | [docs/quickstart.md](docs/quickstart.md) |
-| 実際の作業での使い方 (並列実行、PC を閉じて任せる、8 時間を超える、費用を抑える) | [docs/usage.md](docs/usage.md) |
-| 手元の Claude Code / Codex を司令塔にして、MicroVM に作業を任せる | [docs/orchestrator.md](docs/orchestrator.md) |
-| コマンドとオプションの一覧 | [docs/commands.md](docs/commands.md) |
-| `config.env` の全項目と反映のタイミング | [docs/config.md](docs/config.md) |
-| 認証方式ごとの設定 (サブスクリプション、API キー、Bedrock、ChatGPT、GitHub) | [docs/auth.md](docs/auth.md) |
-| 構築手順の詳細、日々の運用、トラブルシューティング | [docs/setup.md](docs/setup.md) |
-| よくある質問 | [docs/faq.md](docs/faq.md) |
-| 費用の試算 | [docs/cost.md](docs/cost.md) |
-| 設計と判断の理由 | [docs/architecture.md](docs/architecture.md) |
-| 実機での検証結果 | [docs/poc-checklist.md](docs/poc-checklist.md) |
-| このリポジトリを変更する (テスト、CI、注意点) | [docs/development.md](docs/development.md)、エージェント向けのルールは [AGENTS.md](AGENTS.md) |
+| はじめて使う (1 台目を動かすまで) | [quickstart.md](docs/quickstart.md) |
+| 実際の作業での使い方 (並列実行、PC を閉じて任せる、8 時間を超える、通知、VS Code) | [usage.md](docs/usage.md) |
+| 手元の Claude Code / Codex を司令塔にする | [orchestrator.md](docs/orchestrator.md) |
+| 構築と管理 (AWS の構成、操作用の IAM ユーザー、イメージの更新、片付け) | [setup.md](docs/setup.md) |
+| 認証方式ごとの設定 | [auth.md](docs/auth.md) |
+| コマンドとオプション | [commands.md](docs/commands.md) |
+| `config.env` の全項目 | [config.md](docs/config.md) |
+| 費用 | [cost.md](docs/cost.md) |
+| うまくいかないとき | [troubleshooting.md](docs/troubleshooting.md) |
+| よくある質問 | [faq.md](docs/faq.md) |
 | 変更履歴 | [CHANGELOG.md](CHANGELOG.md) |
 
-## ディレクトリ構成
+**このリポジトリを変更する人向け**
 
-```
-bin/mvm.py                  ローカル操作 CLI 本体 (Python 標準ライブラリのみ。Windows / macOS / Linux 共通)
-bin/mvm                     macOS / Linux 用の起動スクリプト
-bin/mvm.cmd                 Windows 用の起動スクリプト (PowerShell / コマンドプロンプト)
-config.example.env          設定テンプレート
-infra/cloudformation.yaml   S3、ビルドロール、実行ロール、ログ、操作用 IAM ポリシー、キープアライブ、毎晩の自動停止、予算アラート
-infra/cloudformation-minimal.yaml  最小構成 (動かすのに必要なものだけ。INFRA_TEMPLATE=minimal)
-image/                      MicroVM イメージ (zip 化して CreateMicrovmImage に渡す)
-  Dockerfile                AL2023 + Node.js + Claude Code + Codex + tmux + sshd + websocat
-  supervisor.py             ライフサイクルフック (:9000) と状態/操作 API (:8080)
-  bootstrap.sh              /run 後の初期化 (認証・clone・tmux 起動)
-  snapshot.sh               ワークスペースの S3 保存
-scripts/estimate_cost.py    コスト試算
-scripts/install.sh          macOS / Linux 用のセットアップ (前提確認・config.env・エイリアス)
-scripts/install.ps1         Windows 用のセットアップ
-tests/                      自動テスト (python -m unittest discover -s tests)
-.github/workflows/ci.yml    Windows / macOS / Linux でテストと lint を実行する CI
-.github/workflows/agent-versions.yml  Claude Code / Codex の新しい版を毎週確認し、Issue で知らせる
-.github/dependabot.yml      CI で使う GitHub Actions の部品の更新をプルリクエストで知らせる
-AGENTS.md / CLAUDE.md       このリポジトリをコーディングエージェントで変更するときのルール
-CHANGELOG.md                変更履歴
-LICENSE                     ライセンス (MIT)
-skills/mvm-orchestrator/   手元のエージェントに入れる skill (mvm orchestrator install が使う)
-docs/
-  quickstart.md             はじめての人向けの最短手順
-  usage.md                  場面別の使い方
-  orchestrator.md           手元のエージェントを司令塔にする使い方
-  commands.md               コマンドリファレンス
-  config.md                 設定リファレンス (config.env)
-  auth.md                   認証方式ごとの設定方法
-  setup.md                  構築手順と日々の運用
-  faq.md                    よくある質問
-  cost.md                   コスト試算
-  architecture.md           設計と判断理由
-  poc-checklist.md          実機での検証結果と、最初に検証すべき項目
-  development.md            開発者向けガイド
-```
-
-## AWS アカウントの安全対策
-
-AI エージェントや自動化ツールに AWS を操作させるので、アカウントの守りを先に固めてください。
-
-| やること | 方法 |
+| 読みたいこと | ページ |
 |---|---|
-| ルートユーザーを守る | パスワードを他で使わないものにし、MFA を設定する。普段は使わず、アクセスキーも作らない |
-| 普段は権限を絞ったユーザーで使う | `pmva-operator` ポリシーだけを付けた IAM ユーザーで `mvm` を使う ([手順](docs/setup.md#操作用の-iam-ユーザー))。`mvm infra deploy` だけを管理者 (できれば SSO の一時的な認証情報) で、自分の PC から実行する |
-| 管理者のキーを渡さない | クラウドの開発環境・CI・他人の PC には `pmva-operator` のキーだけを渡す |
-| キーを定期的に作り直す | 90 日を目安に作り直し、古いキーを削除する。`mvm doctor` が管理者権限・ルート・古いキーを警告する |
-| 費用の異常に早く気付く | 予算アラート (`BUDGET_MONTHLY_USD` / `BUDGET_EMAIL`) を設定し、`mvm cost --actual` で実績を確認する |
-| 不審な操作を確認できるようにする | CloudTrail の証跡を有効にしておき、身に覚えのない操作がないかを確認できるようにする |
-| 認証情報を漏らさない | トークンやキーはチャットやリポジトリに貼らず、`mvm secret set` で Secrets Manager に登録する (`config.env` と `.state/` は `.gitignore` 済み) |
+| 構成、テスト、CI、リリース | [development.md](docs/development.md) (コーディングエージェント向けのルールは [AGENTS.md](AGENTS.md)) |
+| 設計と判断の理由 | [architecture.md](docs/architecture.md) |
+| 実機での検証の記録 | [poc-checklist.md](docs/poc-checklist.md) |
 
-## 現状と注意点
+## 注意点
 
-- Lambda MicroVMs は 2026 年 6 月に提供開始されたサービスです。2026-10-28 に東京リージョンの実際の AWS アカウントで、1 台での PoC (イメージのビルド、起動、peek / send、SSH / シェル接続、サスペンドと自動レジューム、保存と復元、Bedrock 認証の経路) を実施しました。結果と未確認の項目は [docs/poc-checklist.md](docs/poc-checklist.md) にまとめています。
-- 同時に動かせる台数は、AWS アカウントの MicroVM メモリのクォータ (`Max allocated ARM_64 MicroVM memory`) で決まります。PoC のアカウントでは 8GB で、4GB の VM が同時に 2 台 (2GB の VM なら 4 台) でした。`mvm doctor` で確認できます。
-- VM 内のエージェント (`agent` ユーザー) は sudo を使えません (コンテナに no_new_privs が付いているため)。root が必要な作業は `mvm shell` (root で入る) で行うか、必要なパッケージを `image/Dockerfile` に追加してください。
-- 手元 CLI は GitHub Actions で Windows / macOS / Linux それぞれについて自動テストしています (AWS CLI はスタブ、MicroVM 側はローカルのテストサーバーで代用)。端末の表示や VS Code など、目で見て確かめる項目は [docs/poc-checklist.md](docs/poc-checklist.md) の「C2」に残っています。
-- MicroVM の寿命は最大 8 時間です。成果物は git に push するか、`mvm save` / 定期スナップショットで S3 に残してください。
-- 料金単価はローンチ時に報告された値で試算しています。必ず AWS の料金ページで最新の単価を確認してください。
+- Lambda MicroVMs は 2026 年 6 月に提供が始まったサービスです。東京リージョンの実機で主な機能を確かめていますが、未確認の項目もあります ([poc-checklist.md](docs/poc-checklist.md))
+- 同時に動かせる台数は、AWS アカウントの MicroVM メモリのクォータで決まります。8GB なら 4GB の VM が 2 台です。`mvm doctor` で確認できます
+- MicroVM の寿命は最大 8 時間です。成果物は git に push するか、`mvm save` で S3 に残してください
+- VM の中のエージェントは sudo を使えません。OS のパッケージは `IMAGE_EXTRA_PACKAGES` でイメージに入れます
+- 料金は変わることがあります。AWS の料金ページで最新の単価を確認してください
 
 ## ライセンス
 
-[MIT License](LICENSE) です。
+[MIT License](LICENSE)

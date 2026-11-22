@@ -18,7 +18,7 @@
 |---|---|---|---|
 | `AWS_REGION` | `ap-northeast-1` | すぐ | 使うリージョン。Lambda MicroVMs に対応しているかは `mvm doctor` で確認 |
 | `AWS_PROFILE` | (空) | すぐ | AWS CLI のプロファイル名。普段は `pmva-operator` だけを付けたユーザーのプロファイルにする ([setup.md](setup.md#操作用の-iam-ユーザー)) |
-| `INFRA_TEMPLATE` | `full` | infra deploy | `full` (標準: キープアライブ、毎晩の自動停止、予算アラートを含む) / `minimal` (最小構成: 動かすのに必要なリソースだけ) ([setup.md](setup.md#3-aws-リソースの作成)) |
+| `INFRA_TEMPLATE` | `full` | infra deploy | `full` (標準: キープアライブ、毎晩の自動停止、予算アラートを含む) / `minimal` (最小構成: 動かすのに必要なリソースだけ) ([setup.md](setup.md#aws-の構成を作る)) |
 | `PMVA_PREFIX` | `pmva` | infra deploy | AWS のリソース名とシークレット名の接頭辞。変えると別の環境として扱われる |
 | `STACK_NAME` | `pmva` | すぐ | CloudFormation のスタック名。1 つのアカウントで複数の環境を分けるときは `PMVA_PREFIX` と一緒に変える |
 | `ENABLE_BEDROCK` | `true` | infra deploy | 実行ロールに Amazon Bedrock (Mantle を含む) を呼ぶ権限を付ける。Claude Code の `bedrock` / `mantle`、Codex の `bedrock` で使う |
@@ -48,7 +48,7 @@
 | `INGRESS_CONNECTORS` | `"HTTP_INGRESS SHELL_INGRESS"` | 起動時 | 受信の接続口。`SHELL_INGRESS` を外すと `mvm shell` とコンソールの Connect が使えなくなる |
 | `SNAPSHOT_INTERVAL_SECONDS` | `1800` | 起動時 | ワークスペースを S3 に保存する間隔。`0` で定期保存しない |
 | `PROFILE` | (空) | 起動時 | `mvm profile push` で送った手元の設定のまとまりの名前 (例: `default`)。VM の Claude Code / Codex に、手元のルール・skill・サブエージェント・コマンドを置く ([commands.md](commands.md#profile))。`mvm up --profile` / `--no-profile` で 1 回だけ変えられる |
-| `SETUP_TIMEOUT_SECONDS` | `1800` | 起動時 | リポジトリの `.pmva/setup.sh` を打ち切るまでの秒数 ([setup.md](setup.md#リポジトリごとの準備-pmvasetupsh)) |
+| `SETUP_TIMEOUT_SECONDS` | `1800` | 起動時 | リポジトリの `.pmva/setup.sh` を打ち切るまでの秒数 ([usage.md](usage.md#リポジトリごとの準備-pmvasetupsh)) |
 | `KEEPALIVE_RATE_MINUTES` | `5` | infra deploy | 作業中の VM を AWS 側から起こし続ける間隔 (分)。`0` で無効。`IDLE_MAX_SECONDS` より十分短くする |
 | `KEEPALIVE_ACTIVE_SECONDS` | `900` | infra deploy | 最後の作業 (画面の変化や CPU の使用) からこの秒数以内なら作業中とみなす |
 | `NIGHTLY_STOP_TIME` | (空) | infra deploy | 毎日この時刻 (`HH:MM`) に全台を保存してから止める。空なら止めない。テンプレートでは `23:00` |

@@ -1,6 +1,21 @@
-# 使い方ガイド (場面別)
+# 使い方
 
-1 台目を動かした後に、実際の作業でどう使うかを場面ごとにまとめたページです。初めての人は先に [quickstart.md](quickstart.md) を済ませてください。コマンドの細かい仕様は [commands.md](commands.md) にあります。
+1 台目を動かした後に、実際の作業でどう使うかを場面ごとにまとめたページです。初めての人は先に [quickstart.md](quickstart.md) を済ませてください。オプションの細かい仕様は [commands.md](commands.md) にあります。
+
+## よく使うコマンド
+
+| やりたいこと | コマンド |
+|---|---|
+| 起動する / 前回の続きから始める | `mvm up <name> --repo <URL>` / `mvm up <name> --repo <URL> --restore latest` |
+| 一覧と状態 | `mvm ls` (`--all` で終了済みも) |
+| 画面の末尾を見る | `mvm peek <name>`、全台をまとめて `mvm watch` |
+| 応答が終わるまで待つ / 最後の応答を読む | `mvm wait`、`mvm result <name>` |
+| 指示を送る | `mvm send <name> "指示"` |
+| 画面に入って操作する | `mvm ssh <name>` (抜けるのは Ctrl-b → d) |
+| 8 時間が近い | `mvm renew <name>` |
+| 一時停止 / 再開 | `mvm suspend <name>` / `mvm resume <name>` (通信が来れば自動でも再開) |
+| 保存してから止める | `mvm stop <name>`、全台なら `mvm stop-all` |
+| 費用を確かめる | `mvm cost --actual --days 7` |
 
 ## 1 日の流れ
 
@@ -17,9 +32,9 @@ mvm stop-all
 ```
 
 `--restore latest` は、そのセッション名で最後に保存したワークスペースを戻します。作業ブランチ (`pmva/<name>`) も同じものを使い続けます。
-止め忘れが心配なら、毎晩決まった時刻に全台を保存して止める設定にしておきます (`NIGHTLY_STOP_TIME`、[setup.md](setup.md#毎晩の自動停止-止め忘れ防止))。
+止め忘れが心配なら、毎晩決まった時刻に全台を保存して止める設定にしておきます ([setup.md](setup.md#毎晩の自動停止))。
 
-## 1 つのリポジトリで、別々のタスクを並列に進める
+## 別々のタスクを並列に進める
 
 タスクを 1 行に 1 つずつ書いたファイルを用意します。
 
@@ -30,98 +45,74 @@ API のレスポンスが遅いエンドポイントを調べて、原因と改�
 ```
 
 ```bash
-mvm fleet 3 --prefix task --repo https://github.com/<owner>/<repo>.git --prompts-file tasks.txt   # 台数は mvm doctor の「同時に何台まで」以内
+mvm fleet 3 --prefix task --repo https://github.com/<owner>/<repo>.git --prompts-file tasks.txt
 ```
 
-- `task-01` 〜 `task-03` が起動し (クォータに収まらなければ 1 台も起動せずに止まります)、それぞれ `pmva/task-01` 〜 `pmva/task-03` のブランチで作業します。ブランチが分かれているので、お互いの変更はぶつかりません
-- 進み具合は `mvm watch`、個別の確認は `mvm peek task-02`
-- 指示どおりに PR を作れるよう、GitHub トークンは Contents と Pull requests を Read and write にしておきます ([auth.md](auth.md#github))
+- `task-01` 〜 `task-03` が起動し、それぞれ `pmva/task-01` 〜 `pmva/task-03` のブランチで作業します。ブランチが分かれているので、お互いの変更はぶつかりません
+- 台数は `mvm doctor` の「同時に何台まで」以内にします。収まらなければ 1 台も起動せずに止まります
+- エージェントに PR を作らせるなら、GitHub トークンは Contents と Pull requests を Read and write にしておきます ([auth.md](auth.md#github))
 
 指示のコツ:
 
 - **終わりの状態を書く**: 「〜して」だけでなく「テストを通して commit し、push して PR を作って」まで書くと、放っておいても成果が GitHub に残ります
 - **1 台に 1 つのタスク**: 関係のない作業を 1 台に詰めると、ブランチと履歴が混ざります
 - **長い指示は後から送る**: 起動時の指示は 4KB までです。長い仕様は `mvm send` で送るか、リポジトリにファイルとして置いて「docs/spec.md を読んで実装して」と書きます
+- **無人で進めるなら許可の確認を省く**: VM は隔離された環境なので、`--claude-args "--dangerously-skip-permissions"` / `--codex-args "--dangerously-bypass-approvals-and-sandbox"` で起動すると、許可待ちで止まりません (`config.env` の `DEFAULT_CLAUDE_ARGS` / `DEFAULT_CODEX_ARGS`)
 
 ## 終わるまで待って、結果を読む
 
-画面を何度も見に行かなくても、終わるまで待ってから結果だけを読めます。
-
 ```bash
-mvm fleet 3 --prefix task --repo <URL> --prompts-file tasks.txt
 mvm wait                          # 全台の応答が終わるか、許可・入力待ちになるまで待つ
 mvm result task-02                # task-02 の最後の応答 (報告) を読む
 mvm send task-02 "レビューの指摘を直して"
 mvm wait task-02 --timeout 600    # 10 分で打ち切る (終了コード 2)
 ```
 
-`mvm wait` は、終わった台から 1 行ずつ表示します。`waiting` (許可・入力待ち) で返ったら、`mvm peek` で画面を見て、`mvm send` で答えるか、`mvm ssh` で入って操作します。`error` (認証の失敗や利用上限など、API のエラーで止まった) で返ったときは、表示されたエラーの文章と次にやることに従います。
+`mvm wait` は、終わった台から 1 行ずつ表示します。
+
+- `waiting` (許可・入力待ち): `mvm peek` で画面を見て、`mvm send` で答えるか、`mvm ssh` で入って操作します
+- `error` (認証の失敗や利用上限など): 表示されたエラーと次にやることに従います
+- `suspended` (一時停止中): ふつうは作業が終わった状態です。`mvm peek <name>` で再開して確かめ、作業中なら `mvm wait <name>` で待ち直します
+
 `--json` を付けると `wait` / `result` / `ls` / `peek` の結果を JSON で受け取れるので、スクリプトや手元のエージェントから扱えます。
 
 ## 手元のエージェントに任せる (司令塔)
 
-`mvm` のコマンドを自分で打つ代わりに、手元の Claude Code / Codex に「MicroVM で並列に直して」と頼むこともできます。`mvm orchestrator install claude` (または `codex`) で skill を入れると、エージェントがタスクを分けて起動し、終わるのを待ち、結果を確かめて報告します。詳しくは [orchestrator.md](orchestrator.md)。
+`mvm` のコマンドを自分で打つ代わりに、手元の Claude Code / Codex に「MicroVM で並列に直して」と頼むこともできます。`mvm orchestrator install claude` (または `codex`) で skill を入れると、エージェントがタスクを分けて起動し、終わるのを待ち、結果を確かめて報告します。詳しくは [orchestrator.md](orchestrator.md) にあります。
 
-## 推論の過程を手元で見る
-
-エージェントが何を考え、どのコマンドを実行して、どんな結果を見て判断したかを、手元で追えます。
+## 推論の過程や画面を見る
 
 ```bash
-mvm follow                     # 動いている全セッションの過程を、流れるように表示 (Ctrl-C で終了)
+mvm follow                     # 動いている全台の推論の過程を、流れるように表示 (Ctrl-C で終了)
 mvm follow task-02 --full      # 1 台だけ、省略せずに
 mvm view task-02               # エージェントの画面をそのまま見る (読み取り専用。Ctrl-b → d で抜ける)
 ```
 
-- `follow` は会話の記録を読むので、画面からはみ出した過去の分も追えます。表示は手元のターミナルだけで、手元の負荷はほとんどありません
-- `view` は画面そのものです。キーを押してもエージェントには届かないので、見ているだけのときはこちらが安全です。指示を足すなら `mvm send`、一緒に操作するなら `mvm ssh` を使います
+- `follow` は会話の記録を読むので、画面からはみ出した過去の分も追えます
+- `view` ではキーを押してもエージェントに届かないので、見ているだけのときはこちらが安全です。指示を足すなら `mvm send`、一緒に操作するなら `mvm ssh` を使います
 
-## VM のメモリが足りているか確かめる
+## 手元の PC を閉じて任せる
 
-テストやブラウザ (Playwright の Chromium など) を並列で動かすと、VM のメモリが足りなくなることがあります。
+`mvm ssh` から抜けても、PC を閉じても、エージェントは AWS 上で作業を続けます。
 
-```bash
-mvm top                        # 各 VM のメモリの使用量と、多く使っているプロセス
-```
+- 作業中の VM は、AWS 側のキープアライブが起こし続けるので一時停止しません。作業が終わると、しばらくして一時停止します ([setup.md](setup.md#キープアライブ))
+- 終わったことを知りたいときは、[Slack などへの通知](#完了入力待ちを通知する)を使います
+- 戻ってきたら `mvm ls` → `mvm result <name>` で結果を確認します
 
-メモリ不足でプロセスが強制終了されると、`mvm top` / `peek` に `!!` で表示され、通知 (`--notify`) が有効なら Webhook にも知らせます。そのときは、エージェントに「テストの並列数を減らして」と指示するか、1 台のメモリを増やします。メモリの大きさはイメージを作るときに決まるので、`config.env` の `MEMORY_MIB` を増やして `mvm image build` をやり直し、`mvm renew <name>` で新しいイメージの VM に移ります (作業は保存して引き継がれます)。大きくすると、同じクォータで同時に動かせる台数は減ります。
+## 完了・入力待ちを通知する
 
-## ブラウザを使うテストや開発サーバー
+エージェントの応答が終わったときや、許可・入力を待っているときに、Slack などの Webhook に 1 行の通知を送れます。
 
-ブラウザ (Chromium) を使う E2E テストや、開発サーバーの表示の確認も、VM の中で動かします (手元の Chrome を使わないので、手元の RAM を使いません)。
+1. Slack なら「Incoming Webhooks」で URL を発行する (Discord の Webhook、Teams のワークフローの URL でも可)
+2. `mvm secret set notify-webhook` で URL を登録する
+3. `config.env` で `NOTIFY_WEBHOOK=true` にするか、`mvm up <name> --notify` で起動する
 
-- **準備**: リポジトリの `.pmva/setup.sh` に `npx playwright install chromium` を書きます ([setup.md](setup.md#リポジトリごとの準備-pmvasetupsh))。Chromium の実行に必要なライブラリと日本語フォントはイメージに入っています。VM には画面がないので、headless で動かします (Playwright の既定)
-- **開発サーバーを手元のブラウザで見る**: `mvm forward <name> 3000` で、VM の 3000 番を手元の `http://localhost:3000/` につなぎます
-- **テストの結果を見る**: Playwright のトレースやスクリーンショットは、エージェントに commit させるか、`scp` で手元に持ってきます (`mvm ssh-config --install` の後、`scp pmva-<name>:work/<リポジトリ>/test-results/... .`)
-
-### VM のメモリの目安
-
-1 台のメモリ (`MEMORY_MIB`) の目安です。ピーク時は一時的に最大 4 倍まで使えますが、普段の作業がベースラインに収まる大きさを選びます。
-
-| 作業 | 目安 |
+| エージェント | 通知されるとき |
 |---|---|
-| コードの読み書き、軽いテスト (Python / Node.js) | 2048 |
-| 依存関係の多いビルド、テストの並列実行 | 4096 (既定) |
-| ブラウザを使う E2E テスト、開発サーバーを動かしたままのテスト | 4096〜8192 |
-| 大きなビルド (Rust、C++、JVM)、DB を一緒に動かす | 8192 |
+| Claude Code | 応答の完了、API のエラーで止まった、許可・入力待ち |
+| Codex | 応答の完了 |
 
-足りているかは `mvm top` で確かめます。メモリ不足でプロセスが強制終了されると、`mvm top` / `peek` に表示されます。
-
-## Claude Code と Codex で同じ課題を比べる
-
-```bash
-mvm up cmp-claude --agent claude --repo <URL> --prompt "<同じ指示>"
-mvm up cmp-codex  --agent codex  --repo <URL> --prompt "<同じ指示>"
-```
-
-それぞれ `pmva/cmp-claude` と `pmva/cmp-codex` のブランチに結果が残るので、GitHub 上で差分を比べられます。1 台で両方を動かすこともできます (`--agent both`。tmux のウィンドウが `claude` と `codex` に分かれます)。
-
-## 手元の PC を閉じて、エージェントに任せる
-
-`mvm ssh` から抜けても (Ctrl-b → d)、PC を閉じても、エージェントは AWS 上で作業を続けます。
-
-- 作業中の VM は、AWS 側のキープアライブが起こし続けるので一時停止しません。作業が終わると、しばらくして一時停止します ([setup.md](setup.md#pc-を閉じても作業を続ける-キープアライブ))
-- 終わったことを知りたいときは、Slack などへの通知を使います (`mvm up ... --notify`、[setup.md](setup.md#完了入力待ちの通知))
-- 戻ってきたら `mvm ls` → `mvm peek <name>` で結果を確認します
+VM のメモリ不足でプロセスが強制終了されたときも通知します。通知に失敗してもエージェントは止まりません。
 
 ## 8 時間を超えて続ける
 
@@ -131,47 +122,107 @@ MicroVM の寿命は最大 8 時間です。その前に作り直します。
 mvm renew <name>      # 保存 → 終了 → 新しい VM で復元。ブランチと設定は引き継ぐ
 ```
 
-`renew` は、保存に失敗したときは終了せずに止まるので、作業を失いません。エージェントの会話の履歴 (`~/.claude`、`~/.codex`) も復元されるので、Claude Code なら `claude --continue` で前の会話の続きから再開できます。
+保存に失敗したときは終了せずに止まるので、作業を失いません。会話の履歴 (`~/.claude`、`~/.codex`) も復元されるので、Claude Code なら `claude --continue` で前の会話の続きから再開できます。
 
-## エージェントの画面に入って一緒に作業する
+## 画面に入って一緒に作業する
 
 ```bash
-mvm ssh <name>         # tmux にアタッチ。ウィンドウの切り替えは Ctrl-b → n / p、抜けるのは Ctrl-b → d
+mvm ssh <name>         # ウィンドウの切り替えは Ctrl-b → n / p、抜けるのは Ctrl-b → d
 ```
 
-- `shell` ウィンドウは自由に使える作業用のシェルです。テストを手で走らせたり、ログを見たりできます
+- `shell` ウィンドウは自由に使える作業用のシェルです
 - エージェントを終了しても、ウィンドウはシェルとして残ります。もう一度 `claude` (または `codex`) で起動できます
-- 日本語が `_` に化けるときは、ターミナルの文字コードが UTF-8 になっているかを確認します
+- 接続が切れても自動で再接続します
 
-## VS Code で MicroVM の中を開く
+## VS Code で開く・ファイルを手元に持ってくる
 
 ```bash
 mvm ssh-config --install     # ~/.ssh/config に Host pmva-<name> を書く
 ```
 
-VS Code の Remote-SSH で `pmva-<name>` に接続し、`/home/agent/work/<リポジトリ名>` を開きます。VS Code Server は MicroVM 側で動くので、手元の負荷は小さく済みます。セッションを作り直したら `--install` をもう一度実行します。
+VS Code の Remote-SSH で `pmva-<name>` に接続し、`/home/agent/work/<リポジトリ名>` を開きます。初めて接続するときは接続先の OS を聞かれるので、Linux を選びます。VS Code Server は VM の側で動くので、手元の負荷は小さく済みます。
+セッションを増やしたり作り直したりしたら、`--install` をもう一度実行します (pmva のブロックだけが置き換わります)。初回の接続が `Connecting with SSH timed out` で失敗したら、もう一度開き直してください。Windows でも VS Code の `remote.SSH.path` は既定のままで使えます (Windows 標準の OpenSSH と Git for Windows の ssh のどちらでも接続を確かめています)。
 
-## 中のファイルを手元に持ってくる
+同じ設定で `scp` も使えます。
 
 ```bash
-mvm ssh-config --install
 scp pmva-<name>:work/<リポジトリ名>/report.md .
 ```
 
-基本は、エージェントに commit と push をさせて GitHub 経由で受け取るのが確実です。
+成果物は、エージェントに commit と push をさせて GitHub 経由で受け取るのが確実です。
 
-## 費用を抑える
+## リポジトリごとの準備 (.pmva/setup.sh)
 
-| やること | 効果 |
+リポジトリに `.pmva/setup.sh` を置くと、VM の起動時 (clone の後、エージェントを起動する前) に実行します。依存関係のインストールやブラウザの用意を書いておくと、エージェントがすぐにテストを動かせます。
+
+```bash
+# .pmva/setup.sh の例 (bash で実行。作業ディレクトリはリポジトリの直下)
+set -e
+pmva-node install                 # .node-version / .nvmrc の版の Node.js (なければイメージの Node.js 22 のまま)
+npm ci
+npx playwright install chromium   # ブラウザを使うテストがあるとき
+uv sync                           # Python: pyproject.toml の依存関係と、指定の版の Python
+```
+
+- **起動のたびに実行する**: 保存したワークスペースには `node_modules`、`.venv`、`~/.cache` を含めないので、`--restore` で戻したときも実行します。何度実行しても同じ結果になるように書きます
+- **時間の上限**: `SETUP_TIMEOUT_SECONDS` (既定 1800 秒)。準備の間、`mvm peek` には `bootstrap=setup` と出て、`mvm wait` は待ち続けます
+- **失敗しても、エージェントは起動します**: `mvm peek` に `ready (warnings: setup.sh failed ...)` と出ます。ログは VM の `~/.pmva/setup.log` です
+- **実行しないとき**: `mvm up <name> --no-setup`
+- **root にはなれません**: OS のパッケージが要るときは、`config.env` の `IMAGE_EXTRA_PACKAGES` に書いて `mvm image build` で入れます (例: `postgresql16-server valkey sqlite`)。DB はエージェントのユーザーのまま起動します (例: `valkey-server --daemonize yes`)
+- 認証情報と同じ環境で動くので、信頼できるリポジトリのスクリプトだけを実行してください
+
+イメージに入っている開発ツール:
+
+| ツール | 内容 |
 |---|---|
-| 使い終わったら `mvm stop` / `mvm stop-all` | 止めれば計算料金はかからない |
-| 毎晩の自動停止 (`NIGHTLY_STOP_TIME`) | 止め忘れを防ぐ |
-| 軽い作業は `MEMORY_MIB=2048` | 1 台あたりの単価が約半分 ([cost.md](cost.md)) |
-| `IDLE_MAX_SECONDS` を短くする | 使っていない VM が早く一時停止する |
-| 予算アラート (`BUDGET_MONTHLY_USD` / `BUDGET_EMAIL`) | 想定外の費用に早く気付く |
-| `mvm cost --actual --days 7` | 実際にかかった金額を確認する |
+| Node.js 22 | 別の版は `pmva-node install <版>` |
+| uv | Python の版とパッケージ (`uv python install 3.12`、`uv sync`、`uv run pytest`)。OS の Python は 3.9 |
+| Chromium の実行に必要なライブラリと日本語フォント | Playwright / Puppeteer を headless で動かせる。ブラウザ本体は `setup.sh` で入れる (`~/.cache` に VM ごとに 1 回)。`IMAGE_BROWSER_DEPS=false` で外すとイメージが約 450MB 小さくなる |
+| gcc / make、git、gh、jq、tmux | |
 
-LLM の利用料 (サブスクリプションや API) は別です。複数台が同じ Claude のサブスクリプションを使うと、利用上限を全台で分け合います。
+Docker は入っておらず、GPU もありません。CPU は ARM64 だけです。
+
+## ブラウザを使うテストや開発サーバー
+
+- **準備**: `.pmva/setup.sh` に `npx playwright install chromium` を書きます。VM には画面がないので headless で動かします (Playwright の既定)
+- **開発サーバーを手元のブラウザで見る**: `mvm forward <name> 3000` で、VM の 3000 番を手元の `http://localhost:3000/` につなぎます
+- **テストの結果を見る**: トレースやスクリーンショットは、エージェントに commit させるか `scp` で持ってきます
+
+## VM のメモリを確かめる
+
+```bash
+mvm top                        # 各 VM のメモリの使用量と、多く使っているプロセス
+```
+
+メモリ不足でプロセスが強制終了されると、`mvm top` / `peek` に `!!` で表示されます。エージェントに「テストの並列数を減らして」と指示するか、1 台のメモリを増やします。
+メモリはイメージを作るときに決まるので、`config.env` の `MEMORY_MIB` を変えて `mvm image build` をやり直し、`mvm renew <name>` で移ります。大きくすると、同じクォータで同時に動かせる台数は減ります。
+
+| 作業 | `MEMORY_MIB` の目安 |
+|---|---|
+| コードの読み書き、軽いテスト (Python / Node.js) | 2048 |
+| 依存関係の多いビルド、テストの並列実行 | 4096 (既定) |
+| ブラウザを使う E2E テスト、開発サーバーを動かしたままのテスト | 4096〜8192 |
+| 大きなビルド (Rust、C++、JVM)、DB を一緒に動かす | 8192 |
+
+## Claude Code と Codex で同じ課題を比べる
+
+```bash
+mvm up cmp-claude --agent claude --repo <URL> --prompt "<同じ指示>"
+mvm up cmp-codex  --agent codex  --repo <URL> --prompt "<同じ指示>"
+```
+
+`pmva/cmp-claude` と `pmva/cmp-codex` のブランチに結果が残るので、GitHub 上で差分を比べられます。1 台で両方を動かすこともできます (`--agent both`。tmux のウィンドウが `claude` と `codex` に分かれます)。
+
+## 手元の設定を VM でも使う
+
+リポジトリに入っている設定 (`CLAUDE.md`、`AGENTS.md`、`.claude/skills/` など) は、clone すればそのまま使われます。手元の自分用の設定 (`~/.claude/CLAUDE.md`、skill、サブエージェントなど) は、次のように送ります。
+
+```bash
+mvm profile show            # 送るものを確かめる
+mvm profile push            # S3 に送る
+```
+
+`config.env` に `PROFILE=default` を書くと、次の起動から VM のエージェントに置かれます。認証情報らしい文字列を含むファイルや、`settings.json` / `config.toml` は送りません ([commands.md](commands.md#profile))。
 
 ## 複数の認証情報を使い分ける
 
@@ -183,3 +234,16 @@ mvm up t1 --claude-secret pmva/claude-oauth-token-team
 ```
 
 名前は決まった接頭辞で始める必要があります ([auth.md](auth.md#複数アカウントの使い分け))。
+
+## 費用を抑える
+
+| やること | 効果 |
+|---|---|
+| 使い終わったら `mvm stop` / `mvm stop-all` | 止めれば計算料金はかからない |
+| 毎晩の自動停止 (`NIGHTLY_STOP_TIME`) | 止め忘れを防ぐ |
+| 軽い作業は `MEMORY_MIB=2048` | 1 台あたりの単価が約半分 |
+| `IDLE_MAX_SECONDS` を短くする | 使っていない VM が早く一時停止する |
+| 古いイメージを `mvm image prune` で消す | 1 版ごとの保存料金を減らす |
+| 予算アラート (`BUDGET_MONTHLY_USD` / `BUDGET_EMAIL`) | 想定外の費用に早く気付く |
+
+LLM の利用料 (サブスクリプションや API) は別です。複数台が同じ Claude のサブスクリプションを使うと、利用上限を全台で分け合います。詳しくは [cost.md](cost.md) にあります。

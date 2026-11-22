@@ -54,8 +54,6 @@ network_access = true
 writable_roots = ["<このリポジトリ>/.state", "<ホーム>/.aws"]
 ```
 
-Codex 0.165.0 で、この設定を足すとサンドボックスの中から `mvm` (状態の保存と VM への接続) が動くこと、足りないと止まることを確かめています (`tests/test_agents_e2e.py`)。
-
 - `writable_roots` が無いと、`mvm` は「状態の保存先 … に書き込めません」と案内して止まります
 - `network_access` が無いと、「接続できません」と案内して止まります
 - `workspace-write` は `/tmp` にも書けます。`mvm` の状態の保存先 (`.state`) は既定でこのリポジトリの中なので、`writable_roots` に足す必要があります
@@ -91,14 +89,7 @@ mvm view fix-login    # 1 台の画面を読み取り専用で表示
 ## うまく使うコツ
 
 - **MicroVM 側のエージェントは手元を知らない**: 手元のファイルや会話の内容は、指示に書くか、リポジトリに置いて渡す必要があります。司令塔のエージェントは skill に従ってそうしますが、「方針は docs/design.md に書いてある」のように場所を教えると確実です
-- **無人で進めるなら、作業側の許可を省く**: MicroVM は隔離された環境なので、作業側のエージェントを `--claude-args "--dangerously-skip-permissions"` / `--codex-args "--dangerously-bypass-approvals-and-sandbox"` で起動すると、許可待ちで止まりません (`config.env` の `DEFAULT_CLAUDE_ARGS` / `DEFAULT_CODEX_ARGS`)
+- **無人で進めるなら、作業側の許可を省く**: 作業側のエージェントを `--claude-args "--dangerously-skip-permissions"` などで起動すると、許可待ちで止まりません ([usage.md](usage.md#別々のタスクを並列に進める))
 - **司令塔のコンテキストを節約する**: 画面の全文や会話の記録の全文は読ませず、`mvm result` と PR の差分で判断させます (skill にもそう書いてあります)
 - **台数はクォータの範囲内**: `mvm doctor` の「同時に N 台まで」を超える起動は、1 台も起動せずに止まります
 
-## 確かめていること
-
-- `tests/test_agents_e2e.py` (CI の `agents-e2e`) で、固定した版の Claude Code / Codex を LLM API の代わりにつないで動かし、次を確かめています
-  - Claude Code / Codex が `mvm-orchestrator` の skill を読み込む
-  - Claude Code の `--dir` のフックが `npm test` を止め、その理由をエージェントに返す
-  - 確認用の `mvm` コマンドが、許可を求めずに実行される (入れる前は「This command requires approval」で止まる)
-- 実際の LLM (手元の Claude Code) が skill に従って、タスクを分け、起動の了承を求め、2 台の MicroVM を起動し、`wait` / `result` で結果をまとめ、終了の前に判断を求めることを、2026-11-22 に Lambda MicroVMs の上で確かめました ([poc-checklist.md](poc-checklist.md) の H)
