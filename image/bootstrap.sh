@@ -245,10 +245,29 @@ if [ -n "$GITHUB_SECRET" ]; then
   printf 'https://x-access-token:%s@github.com\n' "$token" > "$HOME/.git-credentials"
   git config --global credential.helper store
   addenv GH_TOKEN "$token"
-  unset token
 fi
 [ -z "$(j .gitUserName)" ] || git config --global user.name "$(j .gitUserName)"
 [ -z "$(j .gitUserEmail)" ] || git config --global user.email "$(j .gitUserEmail)"
+# コミットの作成者が設定に無ければ、GitHub トークンの持ち主 (ログイン名と noreply のアドレス) にする。
+# VM の中では git が作成者を推測できず、名前かアドレスが欠けているとコミットが失敗するため。
+# 個人のアドレスを VM に送らずに済み、GitHub の「アドレスを公開する push を拒否する」設定にも引っかからない
+github_user() {  # トークンの持ち主を "<id> <login>" で出す。読めなければ何も出さない
+  local json
+  json="$(GH_TOKEN="$1" timeout 15 gh api user 2>/dev/null)" || return 0
+  jq -r 'select((.id | type) == "number" and (.login | type) == "string") | "\(.id) \(.login)"' <<< "$json" 2>/dev/null || true
+}
+if [ -n "$GITHUB_SECRET" ] && ! { git config --global user.name && git config --global user.email; } > /dev/null; then
+  gh_user="$(github_user "$token")"
+  if [ -n "$gh_user" ]; then
+    read -r gh_id gh_login <<< "$gh_user"
+    git config --global user.name > /dev/null || git config --global user.name "$gh_login"
+    git config --global user.email > /dev/null || git config --global user.email "${gh_id}+${gh_login}@users.noreply.github.com"
+    log "git user: $(git config --global user.name) <$(git config --global user.email)>"
+  else
+    warn "git user.name / user.email are not set (could not read the GitHub token owner). Set GIT_USER_NAME and GIT_USER_EMAIL in config.env, or commits in the VM will fail"
+  fi
+fi
+unset token
 git config --global init.defaultBranch main
 git config --global push.autoSetupRemote true
 

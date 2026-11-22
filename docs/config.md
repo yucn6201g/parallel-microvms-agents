@@ -76,7 +76,7 @@
 
 | 項目 | 既定 | 反映 | 説明 |
 |---|---|---|---|
-| `GIT_USER_NAME` / `GIT_USER_EMAIL` | (空) | 起動時 | VM 内の git のコミット作成者。空なら git の既定のまま |
+| `GIT_USER_NAME` / `GIT_USER_EMAIL` | (空) | 起動時 | VM 内の git のコミット作成者。空なら GitHub トークンの持ち主のログイン名と noreply のアドレス (`<id>+<login>@users.noreply.github.com`)。トークンを使わない (`--no-github`) か、トークンから持ち主を読めない (GitHub App のトークンなど) ときは、設定しないと VM の中でコミットできない |
 | `SSH_PUBLIC_KEY_FILE` | `~/.ssh/id_ed25519.pub` | 起動時 | `mvm ssh` で使う公開鍵。`~` は macOS ではホーム、Windows では `%USERPROFILE%`。ファイルが無ければ SSH の受け口を作らない (`mvm shell` は使える)。鍵なしで起動した後に鍵を作ったら `mvm renew` で鍵付きに起動し直せる |
 
 ## 例: 用途別の設定
