@@ -206,7 +206,7 @@ mvm image build                # 新しいイメージを作る。動作を確�
 mvm renew <name>               # 起動中の VM は renew で新しいイメージに移れる
 ```
 
-GitHub で管理している場合は、`.github/workflows/agent-versions.yml` が毎週 (月曜 9:17) 新しい版を確認し、出ていれば Issue「Claude Code / Codex の新しい版があります」を立てます (Actions タブの「Agent versions」から手動でも実行できます)。
+GitHub で管理している場合は、`.github/workflows/agent-versions.yml` が毎週 (月曜 9:17) 新しい版を確認し、出ていれば Issue「Claude Code / Codex の新しい版があります」を立てます。更新して最新に追いつくと、次の確認でその Issue を閉じます (Actions タブの「Agent versions」から手動でも実行できます)。
 古いバージョンも 1 版ごとに保存料金がかかるので、新しい版の動作を確かめたら `mvm image prune` で削除します (既定で最新の 2 版を残す。[cost.md](cost.md#イメージ保存))。
 
 ## 6. 1 台で動作確認

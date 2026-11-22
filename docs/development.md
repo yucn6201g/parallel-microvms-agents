@@ -93,7 +93,7 @@ docker build -t pmva-agent:test image/
 PMVA_TEST_IMAGE=pmva-agent:test python -m unittest tests.test_image -v
 ```
 
-`.github/workflows/agent-versions.yml` は毎週月曜に Claude Code / Codex の新しい版を確認し、あれば Issue を立てます (Actions タブから手動でも実行できます)。
+`.github/workflows/agent-versions.yml` は毎週月曜に Claude Code / Codex の新しい版を確認し、あれば Issue を立てます。固定した版が最新に追いつくと、その Issue を閉じます (Actions タブから手動でも実行できます)。
 `.github/dependabot.yml` は、CI で使う GitHub Actions の部品 (`actions/checkout` など) に新しい版が出ると、更新のプルリクエストを作ります。
 
 ## 変更するときの注意
