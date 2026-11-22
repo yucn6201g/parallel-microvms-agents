@@ -51,6 +51,235 @@ def free_port():
         return s.getsockname()[1]
 
 
+class _TomlReader:
+    """Codex の config.toml を読む、TOML の一部だけの読み取り (load_toml から使う)。
+
+    tomllib は Python 3.11 以降にしかなく、MicroVM の python3 は 3.9 なので、テストが読む形だけをここで読む。
+    読めるもの: コメント、[a."b"] のテーブル、ドットつきのキー (クォートしたものを含む)、文字列 ("..." と '...')、
+    真偽値、整数、1 行の配列とインラインテーブル。
+    tomllib と同じく、同じキーを 2 回書いたものや、値やインラインテーブルを後から広げるものは ValueError にする
+    (同じキーが 2 回あると Codex が設定を読めずに起動しないので、テストではそれも確かめる)。
+    それ以外の書き方 (複数行の配列、日付など) は、黙って読み違えないように ValueError にする。
+    """
+
+    BARE = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+    ESCAPES = {"b": "\b", "t": "\t", "n": "\n", "f": "\f", "r": "\r", '"': '"', "\\": "\\"}
+
+    def __init__(self, text):
+        self.text = text
+        self.pos = 0
+        self.line = 1
+
+    def fail(self, message):
+        raise ValueError(f"config.toml の {self.line} 行目: {message}")
+
+    def peek(self):
+        return self.text[self.pos] if self.pos < len(self.text) else ""
+
+    def skip_spaces(self):
+        while self.peek() in (" ", "\t"):
+            self.pos += 1
+
+    def expect(self, char):
+        self.skip_spaces()
+        if self.peek() != char:
+            self.fail(f"{char!r} がありません")
+        self.pos += 1
+
+    def end_of_line(self):
+        """行の残り (空白とコメント) を読み飛ばし、次の行へ進む。"""
+        self.skip_spaces()
+        if self.peek() == "#":
+            while self.peek() not in ("\n", ""):
+                self.pos += 1
+        if self.peek() == "\r":
+            self.pos += 1
+        if self.peek() not in ("\n", ""):
+            self.fail("行の終わりに余分な文字があります")
+        if self.peek() == "\n":
+            self.pos += 1
+            self.line += 1
+
+    def parse(self):
+        root, kinds, table = {}, {}, ()
+        while self.pos < len(self.text):
+            self.skip_spaces()
+            char = self.peek()
+            if char in ("#", "\r", "\n"):
+                self.end_of_line()
+            elif char == "[":
+                self.pos += 1
+                if self.peek() == "[":
+                    self.fail("テーブルの配列 ([[...]]) には対応していません")
+                table = self.keys()
+                self.expect("]")
+                self.end_of_line()
+                self.define_table(root, kinds, table)
+            else:
+                keys = self.keys()
+                self.expect("=")
+                self.assign(root, kinds, table + keys, self.value(), len(table))
+                self.end_of_line()
+        return root
+
+    def keys(self):
+        """ドットでつないだキー (a."b".c) を読み、タプルで返す。"""
+        keys = []
+        while True:
+            self.skip_spaces()
+            if self.peek() == '"':
+                keys.append(self.basic_string())
+            elif self.peek() == "'":
+                keys.append(self.literal_string())
+            else:
+                start = self.pos
+                while self.peek() in self.BARE and self.peek():
+                    self.pos += 1
+                if start == self.pos:
+                    self.fail("キーがありません")
+                keys.append(self.text[start:self.pos])
+            self.skip_spaces()
+            if self.peek() != ".":
+                return tuple(keys)
+            self.pos += 1
+
+    def value(self):
+        self.skip_spaces()
+        char = self.peek()
+        if char == '"':
+            if self.text.startswith('"""', self.pos):
+                self.fail('複数行の文字列 (""") には対応していません')
+            return self.basic_string()
+        if char == "'":
+            if self.text.startswith("'''", self.pos):
+                self.fail("複数行の文字列 (''') には対応していません")
+            return self.literal_string()
+        if char == "[":
+            return self.array()
+        if char == "{":
+            return self.inline_table()
+        for word, result in (("true", True), ("false", False)):
+            if self.text.startswith(word, self.pos):
+                self.pos += len(word)
+                return result
+        start = self.pos
+        if self.peek() in ("+", "-"):
+            self.pos += 1
+        while self.peek().isdigit():
+            self.pos += 1
+        digits = self.text[start:self.pos].lstrip("+-")
+        if not digits or (len(digits) > 1 and digits.startswith("0")) or self.peek() in self.BARE | {".", ":"}:
+            self.fail("対応していない値です (読めるのは文字列、真偽値、整数、配列、インラインテーブル)")
+        return int(self.text[start:self.pos])
+
+    def basic_string(self):
+        self.pos += 1
+        out = []
+        while True:
+            char = self.peek()
+            if char in ("", "\n"):
+                self.fail("文字列が閉じていません")
+            self.pos += 1
+            if char == '"':
+                return "".join(out)
+            if char != "\\":
+                out.append(char)
+                continue
+            esc = self.peek()
+            self.pos += 1
+            if esc in self.ESCAPES:
+                out.append(self.ESCAPES[esc])
+            elif esc in ("u", "U"):
+                size = 4 if esc == "u" else 8
+                code = self.text[self.pos:self.pos + size]
+                if len(code) != size or any(c not in "0123456789abcdefABCDEF" for c in code):
+                    self.fail(f"\\{esc} の後に 16 進数が {size} 桁ありません")
+                out.append(chr(int(code, 16)))
+                self.pos += size
+            else:
+                self.fail(f"対応していないエスケープ \\{esc} です")
+
+    def literal_string(self):
+        end = self.text.find("'", self.pos + 1)
+        if end < 0 or "\n" in self.text[self.pos:end]:
+            self.fail("文字列が閉じていません")
+        value = self.text[self.pos + 1:end]
+        self.pos = end + 1
+        return value
+
+    def array(self):
+        self.pos += 1
+        items = []
+        while True:
+            self.skip_spaces()
+            if self.peek() == "]":
+                self.pos += 1
+                return items
+            if self.peek() in ("", "\r", "\n", "#"):
+                self.fail("配列は 1 行に書いたものだけ読めます")
+            items.append(self.value())
+            self.skip_spaces()
+            if self.peek() == ",":
+                self.pos += 1
+            elif self.peek() != "]":
+                self.fail("配列の要素の間に ',' がありません")
+
+    def inline_table(self):
+        self.pos += 1
+        root, kinds = {}, {}
+        self.skip_spaces()
+        if self.peek() == "}":
+            self.pos += 1
+            return root
+        while True:
+            keys = self.keys()
+            self.expect("=")
+            self.assign(root, kinds, keys, self.value(), 0)
+            self.skip_spaces()
+            if self.peek() == "}":
+                self.pos += 1
+                return root
+            self.expect(",")
+
+    def walk(self, root, kinds, path):
+        """path の手前までのテーブルをたどる (無ければ作る)。値やインラインテーブルの中には入れない。"""
+        table = root
+        for i in range(len(path) - 1):
+            prefix = path[:i + 1]
+            if kinds.get(prefix) in ("value", "inline"):
+                self.fail(f"{'.'.join(prefix)} はテーブルではないので、その下にキーを書けません")
+            if prefix not in kinds:
+                kinds[prefix] = "implicit"
+                table[path[i]] = {}
+            table = table[path[i]]
+        return table
+
+    def assign(self, root, kinds, path, value, base):
+        """path[base:] がキーの部分 (path[:base] は今のテーブル)。"""
+        table = self.walk(root, kinds, path)
+        if path in kinds:
+            self.fail(f"キー {'.'.join(path)} が 2 回書かれています")
+        # ドットつきのキーで作ったテーブルは、後から [テーブル] で開き直せない (TOML の決まり)
+        for i in range(base, len(path) - 1):
+            if kinds[path[:i + 1]] == "implicit":
+                kinds[path[:i + 1]] = "dotted"
+        kinds[path] = "inline" if isinstance(value, dict) else "value"
+        table[path[-1]] = value
+
+    def define_table(self, root, kinds, path):
+        table = self.walk(root, kinds, path)
+        kind = kinds.get(path)
+        if kind not in (None, "implicit"):
+            self.fail(f"テーブル {'.'.join(path)} はすでに定義されています")
+        kinds[path] = "header"
+        table.setdefault(path[-1], {})
+
+
+def load_toml(text):
+    """config.toml を読んで dict にする (tomllib.loads の、テストで使う範囲だけの代わり)。"""
+    return _TomlReader(text).parse()
+
+
 @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("tmux") and shutil.which("jq"),
                      "Linux と tmux / jq が必要")
 class SupervisorTest(unittest.TestCase):
@@ -718,9 +947,15 @@ class SupervisorTest(unittest.TestCase):
         self.assertEqual(self.env_value("ANTHROPIC_MODEL"), "us.anthropic.test-model")
 
     def codex_config(self):
-        import tomllib   # Python 3.11 以降 (このテストは Linux の CI で動く)
         text = (self.home / ".codex" / "config.toml").read_text(encoding="utf-8")
-        return tomllib.loads(text), text
+        cfg = load_toml(text)   # tomllib は Python 3.11 以降にしかない (MicroVM の python3 は 3.9)
+        try:
+            import tomllib
+        except ImportError:
+            return cfg, text
+        # tomllib がある Python (CI の Linux など) では、読み方が tomllib と同じことも確かめる
+        self.assertEqual(cfg, tomllib.loads(text), "load_toml の読み方が tomllib と違います")
+        return cfg, text
 
     def test_bedrock_api_keys_for_claude_and_codex(self):
         self.add_secret("pmva/claude-bedrock-api-key", "claude-bedrock-key")
@@ -945,6 +1180,136 @@ class SupervisorTest(unittest.TestCase):
         self.assertIn("/terminate-save", skipped[0])
         code, r = self.request(self.api_port, "POST", "/terminate-save", {"save": "no"})
         self.assertEqual(code, 400, "save は真偽値だけ受け付ける")
+
+
+class CodexConfigReaderTest(unittest.TestCase):
+    """SupervisorTest.codex_config (load_toml) が、tomllib の無い Python (3.10 以前) でも動くこと。
+
+    MicroVM のイメージの python3 は 3.9 なので、VM のエージェントがこのリポジトリのテストを流しても通るようにする。
+    tmux や jq は要らないので、どの OS でも動く。
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = Path(tmp.name)
+        (self.home / ".codex").mkdir()
+
+    def read(self, text, without_tomllib=False):
+        (self.home / ".codex" / "config.toml").write_bytes(text.encode("utf-8"))
+        if not without_tomllib:
+            return SupervisorTest.codex_config(self)
+        saved = sys.modules.get("tomllib")
+        sys.modules["tomllib"] = None   # import tomllib が ModuleNotFoundError になる (Python 3.10 以前と同じ)
+        try:
+            return SupervisorTest.codex_config(self)
+        finally:
+            if saved is None:
+                del sys.modules["tomllib"]
+            else:
+                sys.modules["tomllib"] = saved
+
+    def assert_rejected(self, text):
+        """load_toml が読まないこと。tomllib がある Python では、tomllib も読まないことを確かめる。"""
+        with self.assertRaises(ValueError):
+            self.read(text, without_tomllib=True)
+        try:
+            import tomllib
+        except ImportError:
+            return
+        with self.assertRaises(ValueError, msg="tomllib は読めるので、load_toml も読めるようにする"):
+            tomllib.loads(text)
+
+    def test_works_without_tomllib(self):
+        cfg, text = self.read('notify = ["/opt/pmva/notify.sh", "codex"]\n', without_tomllib=True)
+        self.assertEqual(cfg, {"notify": ["/opt/pmva/notify.sh", "codex"]})
+        self.assertEqual(text, 'notify = ["/opt/pmva/notify.sh", "codex"]\n')
+
+    # bootstrap.sh が書く形 (--codex-auth gateway と bedrock、作業フォルダの信頼) と、利用者が書きそうな形
+    CONFIG = (
+        '# pmva:provider begin (mvm up --codex-auth gateway が起動のたびに書き直す)\n'
+        'model_provider = "pmva-gateway"\n'
+        'model_providers.pmva-gateway.name = "pmva-gateway"\n'
+        'model_providers.pmva-gateway.base_url = "https://gw.example.com/v1"\n'
+        'model_providers.pmva-gateway.auth = { command = "cat", args = ["/home/agent/.pmva/secrets/k"] }\n'
+        'model_providers.pmva-gateway.http_headers = { "X-Team" = "a \\"b\\" \\u3042\\\\", "X-Empty" = "" }\n'
+        'model_providers.amazon-bedrock.aws.region = "us-east-1"\n'
+        '# pmva:provider end\n'
+        'notify = ["/opt/pmva/notify.sh", "codex"]\n'
+        "model = 'gpt-5'   # コメント\n"
+        "approval_policy = 'never'\n"
+        "\n"
+        "[sandbox_workspace_write]\n"
+        "network_access = true\n"
+        "writable_roots = [ '/tmp', \"/home/agent/.aws\", ]\n"
+        "\n"
+        "[mcp_servers.docs]\n"
+        "command = \"npx\"\n"
+        "args = []\n"
+        "startup_timeout_sec = 20\n"
+        "env = {}\n"
+        "\n"
+        "[projects.\"/home/agent/work/repo\"]\n"
+        "trust_level = \"trusted\"\n"
+    )
+    EXPECTED = {
+        "model_provider": "pmva-gateway",
+        "model_providers": {
+            "pmva-gateway": {
+                "name": "pmva-gateway", "base_url": "https://gw.example.com/v1",
+                "auth": {"command": "cat", "args": ["/home/agent/.pmva/secrets/k"]},
+                "http_headers": {"X-Team": 'a "b" \u3042\\', "X-Empty": ""}},
+            "amazon-bedrock": {"aws": {"region": "us-east-1"}}},
+        "notify": ["/opt/pmva/notify.sh", "codex"],
+        "model": "gpt-5",
+        "approval_policy": "never",
+        "sandbox_workspace_write": {"network_access": True, "writable_roots": ["/tmp", "/home/agent/.aws"]},
+        "mcp_servers": {"docs": {"command": "npx", "args": [], "startup_timeout_sec": 20, "env": {}}},
+        "projects": {"/home/agent/work/repo": {"trust_level": "trusted"}},
+    }
+
+    def test_reads_config_written_by_bootstrap(self):
+        cfg, _ = self.read(self.CONFIG, without_tomllib=True)
+        self.assertEqual(cfg, self.EXPECTED)
+        # tomllib がある Python では、codex_config が tomllib と同じ読み方かも確かめる
+        cfg, _ = self.read(self.CONFIG)
+        self.assertEqual(cfg, self.EXPECTED)
+
+    def test_reads_crlf_and_sub_tables(self):
+        text = "[a.b.c]\r\nx = 1\r\n[a.b]\r\ny = -2\r\n[a]\r\nd.e = false\r\n[a.d.f]\r\nz = 0\r\n"
+        cfg, _ = self.read(text, without_tomllib=True)
+        self.assertEqual(cfg, {"a": {"b": {"c": {"x": 1}, "y": -2}, "d": {"e": False, "f": {"z": 0}}}})
+        self.read(text)
+
+    def test_rejects_duplicate_keys(self):
+        # 同じキーが 2 回あると Codex は設定を読めずに起動しない。bootstrap.sh がそうしていないことを、テストで確かめられるように
+        for text in ('model = "a"\nmodel = "b"\n',
+                     'model_provider = "x"\n"model_provider" = "y"\n',
+                     'a.b = 1\na.b = 2\n',
+                     'a = 1\na.b = 2\n',
+                     'a.b = 1\na = 2\n',
+                     'a = { x = 1 }\na.y = 2\n',
+                     'a = { x = 1, x = 2 }\n',
+                     '[p]\nk = 1\n[p]\nj = 2\n',
+                     'a.b.c = 1\n[a.b]\n',
+                     '[t]\nk = 1\nk = 2\n',
+                     'a = 1\n[a]\n'):
+            with self.subTest(text=text):
+                self.assert_rejected(text)
+
+    def test_rejects_what_it_cannot_read(self):
+        # 読めない書き方は、黙って読み違えずに失敗する
+        for text in ('a = [\n  1,\n]\n',
+                     'a = """x"""\n',
+                     'a = 1979-05-27\n',
+                     'a = 1.5\n',
+                     'a = "x" b = 1\n',
+                     'a = "unterminated\n',
+                     '[[servers]]\nname = "x"\n',
+                     'a = "\\q"\n'):
+            with self.subTest(text=text):
+                with self.assertRaises(ValueError):
+                    self.read(text, without_tomllib=True)
 
 
 if __name__ == "__main__":
