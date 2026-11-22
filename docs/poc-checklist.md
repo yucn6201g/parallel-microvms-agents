@@ -209,7 +209,10 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 - [x] `mvm follow` の会話記録の読み取り: 上の 2 つの版 (と Claude Code 2.1.325) が実際に書いた記録で、指示・思考・ツールの実行と結果・応答を取り出せることを確認 (`tests/fixtures/`)
 - [x] `mvm view`: tmux 3.4 で、読み取り専用の接続になること、キー入力がエージェントに届かないこと、ほかの接続の表示中のウィンドウが変わらないこと、抜けるとセッションが消えることを確認
 - [x] 司令塔 (`mvm orchestrator install`): 固定した版の Claude Code / Codex が skill を読み込むこと、Claude Code の `--dir` のフックが `npm test` を止めること、確認用の `mvm` コマンドが許可を求めずに実行されること (入れる前は「This command requires approval」) を確認 (`tests/test_agents_e2e.py`)
-- [ ] 実際の LLM が skill に従って、タスクを分け、起動の了承を求め、`wait` / `result` で進めること: 未確認 (MicroVM と LLM の両方が要る)
+- [x] 実際の LLM が skill に従って、タスクを分け、起動の了承を求め、`wait` / `result` で進めること: 2026-11-22、Windows 11 の手元の Claude Code 2.1.220 (`claude -p`、`mvm orchestrator install claude --dir`) に「このリポジトリのテストを Linux の MicroVM 2 台で動かして報告して (PR は不要)」と頼んだ
+  - `doctor` / `ls` で状況を確かめ、テストファイル 10 件を奇数番目・偶数番目で 2 台に分け、終わりの状態と報告の項目まで書いた指示文を作り、起動の了承を求めて止まった。了承の後に `fleet 2 --no-github` で起動し、`wait` で 2 台の完了を待ち、`result` の報告をまとめ、`stop` は実行せずに判断を求めた
+  - 気づいたこと: 了承を求める前に一度 `fleet` を実行しようとし、許可の設定 (確認なしで実行できるのは確認用のコマンドだけ) で止められた。対話モードなら許可を求める画面が出る動きにあたる。追加の確認に `send` も使おうとしたが、同じく許可が要るので止まった
+  - VM の作業側 (Claude Code 2.1.312、既定の許可モード) は許可待ちで止まらずに、2 台とも約 1 分でテストを終えた。結果は成功 133 / 失敗 9 / スキップ 24。失敗 9 件は `tests/test_supervisor.py` の `import tomllib` (Python 3.11 以降) が VM の Python 3.9 で使えないためで、テスト側の問題
 - [x] Codex の `workspace-write` サンドボックスで `mvm` が動く設定 (`network_access`、`writable_roots`): Codex 0.165.0 で、`mvm orchestrator install codex` が表示する設定を足すと中から `mvm peek` が動き、`writable_roots` が無いと状態の保存先に書けず、`network_access` が無いと接続できないことを確認 (`tests/test_agents_e2e.py`。以前は `/tmp` に書けることをサンドボックスが効かないと見誤っていた)
 - [x] イメージ (`image/Dockerfile`): 公開されているベースイメージで、Docker でビルドして動かした (amd64 は開発環境、ARM64 は CI の `image` ワークフロー)。headless の Chromium (Playwright 1.64.1) が日本語フォントで表示できること、uv で Python 3.12、`pmva-node` で Node.js 20、run フックから `.pmva/setup.sh` → エージェントの起動まで通ることを確認
   - Chromium のライブラリは GTK なしで足りる (headless の Chromium は GTK を使わない)。外すとイメージが約 290MB 小さくなった
@@ -223,7 +226,7 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
   - 作業内容の保存に作業と設定が入り、認証情報と `~/.pmva` が入らないこと。別の VM で復元すると作業が戻り、Codex の接続先の設定と pmva のフックが重ならないこと
 - [x] `mvm` のコマンドを、本物のイメージを動かす手元の Docker に対して通しで動かした (2026-11-18。`tests/test_local_vm.py`、CI の `image` ワークフロー)。受け口の代わり (トークンとポートを確かめてコンテナにつなぐ) を通して、`up` / `wait` / `result` / `follow` / `peek` / `top` / `send` / `ssh` (SSH over WebSocket) / `forward` / `login` (手元の 1455 番から VM の `codex login` に届く) / `save` / `suspend` / `resume` / `stop`、`--restore latest` での復元
   - 途中で見つけた不具合: `mvm ssh <name> --no-reconnect` (ドキュメントの書き方) で、オプションが ssh にコマンドとして渡っていた。直した
-- [ ] Lambda MicroVMs の上での上記: 未確認 (本物の受け口とプロキシ、サスペンドしたときの自動レジューム、トークンの期限が残る)
+- [ ] Lambda MicroVMs の上での上記: 一部確認。2026-11-22、本物の受け口を通して `fleet` / `wait` / `result` / `stop --no-save` が動いた (上の司令塔の確認)。サスペンドしたときの自動レジュームとトークンの期限は未確認
 - [x] メモリ不足による強制終了の検出 (`/proc/vmstat` の `oom_kill`): 2026-11-21、MicroVM のカーネルでも値が使えた。VM の中でメモリを使い切るプロセスを動かすと、そのプロセスが強制終了され (終了コード 137)、`oom_kill` が 0 → 1 になり、`mvm top` / `mvm peek` に「メモリ不足でプロセスが 1 回強制終了されました」と出た
   - 気づいたこと: `MEMORY_MIB=4096` で起動した VM でも、VM の中からはメモリが約 15.7 GiB (`MemTotal` 16,437,604 kB)、CPU が 8 個に見えた。料金と上限が設定のどちらに従うのかは未確認 ([cost.md](cost.md) の試算は `MEMORY_MIB` に基づく)
 
