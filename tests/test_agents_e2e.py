@@ -160,6 +160,27 @@ class AgentE2ETest(unittest.TestCase):
         self.assertEqual(st["message"], "完了しました。")
         self.assertTrue((self.work / "made-by-claude.txt").exists())
 
+    @unittest.skipUnless(CLAUDE and shutil.which("tmux"), "PMVA_E2E_CLAUDE と tmux が必要")
+    def test_claude_skip_permissions_starts_without_consent_dialog(self):
+        """--dangerously-skip-permissions で対話モードを起動しても、同意の確認画面で止まらずに作業すること。
+
+        確認画面の既定は「No, exit」なので、止まったまま mvm send で Enter が入ると Claude Code が終了してしまう。
+        """
+        mock = self.claude_settings(with_notification=True)
+        sock = str(Path(self.tmp.name) / "t.sock")
+        env = self.agent_env(ANTHROPIC_BASE_URL=mock.url)
+        inner = " ".join(f"{k}={json.dumps(v)}" for k, v in env.items())
+        cmd = f"cd {json.dumps(str(self.work))} && env -i {inner} {json.dumps(CLAUDE)} --model claude-mock " \
+              f"--dangerously-skip-permissions テストして; sleep 60"
+        subprocess.run(["tmux", "-S", sock, "new-session", "-d", "-x", "160", "-y", "45", cmd], check=True)
+        self.addCleanup(subprocess.run, ["tmux", "-S", sock, "kill-server"], capture_output=True)
+        deadline = time.time() + 90
+        while time.time() < deadline and self.state("claude").get("state") != "done":
+            time.sleep(0.5)
+        screen = subprocess.run(["tmux", "-S", sock, "capture-pane", "-p"], capture_output=True, text=True).stdout
+        self.assertEqual(self.state("claude").get("state"), "done", screen)
+        self.assertTrue((self.work / "made-by-claude.txt").exists(), "許可を求めずにツールを実行した")
+
     # ---------------------------------------------------------------- AWS の認証方式 (bootstrap.sh と同じ設定)
     # 接続先だけを偽の API に差し替え、エージェントが AWS の認証 (署名 / キー / ワークスペース ID) を付けて送ることを確かめる。
     # 実行ロールの代わりに、偽のアクセスキーを環境変数で渡す (MicroVM では SDK が実行ロールの認証情報を自分で取る)
