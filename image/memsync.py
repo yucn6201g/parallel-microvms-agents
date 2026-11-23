@@ -95,9 +95,12 @@ def repo_root(directory, git=_git):
     --git-common-dir は相対パスで返ることがあるので、git を実行したフォルダを基準に絶対パスにする。
     """
     try:
-        common = Path(git(directory, "rev-parse", "--git-common-dir"))
-        if not common.is_absolute():
-            common = Path(os.path.abspath(str(Path(directory) / common)))
+        text = git(directory, "rev-parse", "--git-common-dir")
+        common = Path(text)
+        # Windows の git は C:/... で返す。どの OS で読んでも絶対パスとして扱う (サニタイズの結果は同じ)
+        if not (common.is_absolute() or re.match(r"^[A-Za-z]:[/\\]", text)):
+            # シンボリックリンクや Windows の短い名前 (RUNNER~1 など) は、git が返すパスと同じく実体の名前にする
+            common = Path(os.path.realpath(str(Path(directory) / common)))
         if common.name == ".git":
             return common.parent
     except MemsyncError:

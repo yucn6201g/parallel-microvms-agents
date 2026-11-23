@@ -7,6 +7,7 @@ mvm memory の結合テストは tests/test_mvm.py にある。
 import hashlib
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -150,13 +151,13 @@ class MemoryDirTest(unittest.TestCase):
     def test_relative_common_dir_is_resolved_against_the_folder(self):
         # git は通常のリポジトリのルートで実行すると、相対パス (.git) を返す
         found = memsync.resolve_memory_dir(self.repo, home=self.home, git=self.git(".git"))
-        self.assertEqual(found.parent.name, memsync.sanitize_path(self.repo.resolve()))
+        self.assertEqual(found.parent.name, memsync.sanitize_path(os.path.realpath(str(self.repo))))
 
     def test_relative_common_dir_from_a_subfolder(self):
         sub = self.repo / "src" / "pkg"
         sub.mkdir(parents=True)
         found = memsync.resolve_memory_dir(sub, home=self.home, git=self.git("../../.git"))
-        self.assertEqual(found.parent.name, memsync.sanitize_path(self.repo.resolve()))
+        self.assertEqual(found.parent.name, memsync.sanitize_path(os.path.realpath(str(self.repo))))
 
     def test_unknown_option_is_not_echoed_as_a_path(self):
         # 古い git は知らないオプションをそのまま出力して終了コード 0 を返す。--path-format には頼らない
@@ -165,7 +166,7 @@ class MemoryDirTest(unittest.TestCase):
                 return "--path-format=absolute\n.git"
             return self.git(".git")(directory, *args)
         found = memsync.resolve_memory_dir(self.repo, home=self.home, git=fake)
-        self.assertEqual(found.parent.name, memsync.sanitize_path(self.repo.resolve()))
+        self.assertEqual(found.parent.name, memsync.sanitize_path(os.path.realpath(str(self.repo))))
 
     def test_submodule_uses_show_toplevel(self):
         # サブモジュールや --separate-git-dir では、共通の git フォルダの親はリポジトリのルートではない

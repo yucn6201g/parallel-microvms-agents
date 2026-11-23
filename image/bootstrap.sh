@@ -365,7 +365,7 @@ if [ -n "$MEMORY" ]; then
   log "shared memory: $MEMORY"
   memory_dir="$HOME/.claude/pmva-memory"
   mkdir -p "$memory_dir"
-  jq --arg d '~/.claude/pmva-memory' '.autoMemoryDirectory = $d' "$settings" > "$settings.tmp" && mv "$settings.tmp" "$settings"
+  jq --arg d "$memory_dir" '.autoMemoryDirectory = $d' "$settings" > "$settings.tmp" && mv "$settings.tmp" "$settings"
   python3 /opt/pmva/memsync.py pull --dir "$memory_dir" --uri "$MEMORY" --state "$HOME/.claude/pmva-memory.state.json" --origin "$NAME" || warn "memory pull failed: $MEMORY"
 fi
 # Codex: notify はトップレベルのキーなので、テーブル ([projects...]) より前に置く
