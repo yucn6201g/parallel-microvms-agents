@@ -1675,6 +1675,44 @@ class CliTest(unittest.TestCase):
 
     SSO_EXPIRED = ("Error when retrieving token from sso: Token has expired and refresh failed\n")
 
+    ACCESS_DENIED = ("\nAn error occurred (AccessDeniedException) when calling the DescribeSecret operation: User: "
+                     "arn:aws:iam::123456789012:user/x is not authorized to perform: secretsmanager:DescribeSecret\n")
+
+    def test_failed_lookups_are_not_reported_as_missing(self):
+        """認証切れなどで問い合わせに失敗したとき、「無い」(作り直せ) と案内しない。
+
+        2026-11-22、SSO の期限切れのまま mvm image status を打つと「イメージはまだありません (mvm image build)」と出た。
+        スタックなら「mvm infra deploy を実行してください」と出て、要らない作り直しを招く。
+        """
+        env = dict(self.env, PMVA_STUB_ERROR=self.SSO_EXPIRED)
+        (Path(self.env["PMVA_STATE_DIR"]) / "stack-outputs.json").unlink(missing_ok=True)
+        for args in (["image", "status"], ["up", "e1"], ["infra", "outputs"]):
+            with self.subTest(args=args):
+                rc, _, err = self.mvm(*args, env=env, check=False)
+                self.assertNotEqual(rc, 0)
+                self.assertIn("aws sso login", err)
+                self.assertNotIn("まだありません", err)
+                self.assertNotIn("見つかりません", err)
+                self.assertNotIn("Traceback", err)
+        _, out, _ = self.mvm("doctor", env=env, check=False)
+        self.assertIn("aws sso login", out)
+
+    def test_failed_lookups_in_doctor_and_profile_show_the_reason(self):
+        # 権限が足りないだけのときも、シークレットや設定のまとまりが「無い」とは言わない
+        env = dict(self.env, PMVA_STUB_ERROR=self.ACCESS_DENIED, PMVA_STUB_ERROR_CMDS="secretsmanager describe-secret")
+        _, out, _ = self.mvm("doctor", env=env, check=False)
+        self.assertIn("権限", out)
+        self.assertNotIn("がありません。mvm secret set", out)
+        env = dict(self.env, PMVA_STUB_ERROR=self.SSO_EXPIRED, PMVA_STUB_ERROR_CMDS="s3api head-object")
+        rc, _, err = self.mvm("up", "p1", "--profile", "team", env=env, check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("aws sso login", err)
+        self.assertNotIn("まだありません", err)
+        # 本当に無いときは、これまでどおり作り方を案内する
+        rc, _, err = self.mvm("up", "p2", "--profile", "team", check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("mvm profile push", err)
+
     def test_unknown_state_shows_reason_and_next_step(self):
         """状態を取れなかったとき、UNKNOWN だけでなく理由とやるべきことを出す。"""
         self.mvm("up", "u1")
