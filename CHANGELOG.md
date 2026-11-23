@@ -7,6 +7,7 @@
 ### 追加
 
 - Claude Code の自動メモリ (Claude が覚えたこと) を、手元の PC と MicroVM で共有する。`mvm memory status|pull|push|sync` で手元と S3 (`memory/<repo-id>/`) を同期し、`config.env` の `MEMORY_SYNC=true` (または `mvm up --memory`) で、`--repo` 付きの VM が起動時に取得し、定期保存のときに送る。最後に同期した内容を基準に比べ、競合は `--force` で解く。`MEMORY.md` は行の和集合でマージする。frontmatter に `share: false` と書いたファイル、認証情報らしい文字列を含むファイル、1MB を超えるファイルは送らない。削除は伝えない。実行ロールに `memory/*` の読み書きを、操作用ポリシーに `memory/*` の削除 (間違ったメモリを `aws s3 rm` で消すため) を追加 (`mvm infra deploy` が必要)。VM の中の動き (取得と送信) は実機で未確認 ([docs/poc-checklist.md](docs/poc-checklist.md))
+- 自動メモリをフックで自動で同期する。`mvm memory install-hooks` (外すときは `uninstall-hooks`) で、手元の Claude Code が会話の開始時と指示のたび (60 秒に 1 回まで) に S3 から取得して、他のマシンで書かれたメモリを会話に渡し、メモリを書いたらすぐ送る。`mvm up --memory` の VM にも同じフックが入る。S3 への書き込みは条件付きにして、同時に書き込まれたときに他のマシンの内容を上書きしない (`MEMORY.md` は取り直してマージし直す)。フックの動きは実機で未確認
 - `mvm image prune [--keep N] [--yes]`: イメージの古いバージョンだけを削除する。`build` のたびに増える版は自動では消えず、1 版 (約 2.3GB) ごとに約 $0.22/月の保存料金がかかっていた。既定では最新の ACTIVE 版を含めて 2 版を残し、ビルド中の版と起動中の VM が使っている版は消さない
 - 最小構成の CloudFormation テンプレート `infra/cloudformation-minimal.yaml`。`config.env` の `INFRA_TEMPLATE=minimal` で、キープアライブ・毎晩の自動停止・予算アラートを作らずに使える
 - `mvm wait`: エージェントの応答が終わるか、許可・入力待ちになるまで待つ (`--timeout`、`--any`、`--json`)。エージェントの状態 (作業中・完了・入力待ち・終了など) は、VM の中でエージェントのフックが記録する
@@ -53,6 +54,7 @@
 
 ### 変更
 
+- `mvm memory pull|push|sync` の「config.env に MEMORY_SYNC=true を書いてください」の案内を、そのリポジトリで初めて同期したときだけ出す (毎回出ていた)。あわせて `mvm memory install-hooks` を案内する
 - ドキュメントを利用者向けに整理した。README を短くし、`docs/setup.md` は構築と管理 (AWS の構成、操作用の IAM ユーザー、イメージの更新、片付け) に絞った。場面別の使い方 (`.pmva/setup.sh`、通知、VS Code、よく使うコマンド) は `docs/usage.md` に、症状ごとの確認方法は新しい `docs/troubleshooting.md` にまとめた。インストールスクリプトの最後の案内は `docs/quickstart.md` を指す
 - AWS から VM の状態を取れなかったとき (`UNKNOWN`)、`mvm ls` / `watch` / `wait` / `top` / `stop` / `renew` / `infra delete` に、理由 (認証切れ、認証情報が無い、権限が無い、接続できない など) とやるべきこと (`aws sso login`、`AWS_PROFILE` の確認、`mvm doctor`) を表示する。`ls --json` は `stateError`、`wait --json` は `error` に入れる。`infra delete` は、状態を取れないセッションを「起動中」と言わずに理由を出して止める
 - Claude Code の hooks と Codex の `notify` を、通知 (`--notify`) を使わないときも常に設定するようにした (状態の記録のため)。`~/.claude/settings.json` に利用者が書いたフックは残す。新しいイメージ (`mvm image build`) が必要

@@ -726,7 +726,10 @@ class CliTest(unittest.TestCase):
         self.assertIn("s3://pmva-bucket/memory/github.com/owner/repo/", err)
         self.assertIn("送信 1", out)
         self.assertIn("MEMORY_SYNC=true", err, "VM にも使わせる方法を案内する")
+        self.assertIn("install-hooks", err)
         self.assertTrue((Path(self.env["PMVA_STATE_DIR"]) / "memory" / "github.com__owner__repo.json").is_file())
+        rc, out, err = self.mvm("memory", "push", "--dir", str(repo))
+        self.assertNotIn("MEMORY_SYNC=true", err, "案内は最初の 1 回だけ")
         rc, out, _ = self.mvm("memory", "status", "--dir", str(repo))
         self.assertRegex(out, r"user_role\.md +同期済み")
         self.assertRegex(out, r"private\.md +送らない")
@@ -741,6 +744,79 @@ class CliTest(unittest.TestCase):
         self.assertIn("(user_role.md)", (mem / "MEMORY.md").read_text(encoding="utf-8"))
         calls = [json.loads(l) for l in (self.stub_dir / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
         self.assertTrue(any(c[:2] == ["s3api", "list-objects-v2"] for c in calls))
+
+    def test_memory_hooks_install_and_uninstall(self):
+        repo, mem = self.memory_repo()
+        settings_path = repo / ".claude" / "settings.local.json"
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        # 「memory hook」を含む利用者自身のフックも残す
+        mine = {"hooks": [{"type": "command", "command": "echo mine; echo memory hook done"}]}
+        settings["hooks"] = {"PostToolUse": [mine]}
+        settings_path.write_text(json.dumps(settings), encoding="utf-8")
+        for _ in range(2):          # 入れ直しても重複しない
+            rc, _, err = self.mvm("memory", "install-hooks", "--dir", str(repo))
+        # Windows の CI では一時フォルダが短い名前 (RUNNER~1) になり、git の返す名前と違うので末尾で比べる
+        self.assertIn(str(Path("repo") / ".claude" / "settings.local.json"), err)
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+        self.assertEqual(data["autoMemoryDirectory"], str(mem), "ほかの設定は残す")
+        hooks = data["hooks"]
+        self.assertEqual(hooks["PostToolUse"][0], mine, "利用者のフックは残す")
+        commands = {ev: [h["command"] for e in hooks[ev] for h in e["hooks"] if "mvm.py" in h["command"]]
+                    for ev in ("SessionStart", "UserPromptSubmit", "PostToolUse")}
+        self.assertEqual({ev: len(c) for ev, c in commands.items()},
+                         {"SessionStart": 1, "UserPromptSubmit": 1, "PostToolUse": 1})
+        self.assertIn(f'"{MVM.as_posix()}" memory hook session-start', commands["SessionStart"][0])
+        self.assertIn(f'"{Path(sys.executable).as_posix()}"', commands["SessionStart"][0])
+        self.assertIn("memory hook prompt --min-interval 60", commands["UserPromptSubmit"][0])
+        (ours,) = [e for e in hooks["PostToolUse"] if e is not hooks["PostToolUse"][0]]
+        self.assertEqual(ours["matcher"], "Write|Edit")
+        self.assertTrue(ours["hooks"][0]["async"], "送信は会話を待たせない")
+        self.mvm("memory", "uninstall-hooks", "--dir", str(repo))
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+        self.assertEqual(data["hooks"], {"PostToolUse": [mine]})
+        self.assertEqual(data["autoMemoryDirectory"], str(mem))
+        settings_path.unlink()          # 設定が無いときに外しても、ファイルを作らない
+        self.mvm("memory", "uninstall-hooks", "--dir", str(repo))
+        self.assertFalse(settings_path.exists())
+        settings_path.write_text("{broken", encoding="utf-8")
+        rc, _, err = self.mvm("memory", "install-hooks", "--dir", str(repo), check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("JSON", err)
+        self.assertEqual(settings_path.read_text(encoding="utf-8"), "{broken", "壊れた設定は書き換えない")
+
+    def test_memory_hook_called_by_claude_code(self):
+        repo, mem = self.memory_repo()
+        s3 = self.stub_dir / "s3" / "pmva-bucket" / "memory" / "github.com" / "owner" / "repo"
+        (mem / "user_role.md").write_text("tester\n", encoding="utf-8")
+        event = {"hook_event_name": "PostToolUse", "cwd": str(repo), "tool_name": "Write",
+                 "tool_input": {"file_path": str(mem / "user_role.md")}}
+        rc, out, _ = self.mvm("memory", "hook", "post-tool", input=json.dumps(event).encode("utf-8"))
+        self.assertEqual((rc, out), (0, ""))
+        self.assertEqual((s3 / "user_role.md").read_bytes(), b"tester\n")
+        calls = [json.loads(l) for l in (self.stub_dir / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
+        (put,) = [c for c in calls if c[:2] == ["s3api", "put-object"]]
+        self.assertEqual(put[put.index("--if-none-match") + 1], "*")
+        # 他のマシンが書いたメモリが、会話の開始時に届く
+        (s3 / "project_vm.md").write_text("VM で見つけた手順\n", encoding="utf-8")
+        start = {"hook_event_name": "SessionStart", "cwd": str(repo), "source": "startup"}
+        rc, out, _ = self.mvm("memory", "hook", "session-start", input=json.dumps(start).encode("utf-8"))
+        self.assertEqual(rc, 0)
+        context = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("VM で見つけた手順", context)
+        self.assertEqual((mem / "project_vm.md").read_text(encoding="utf-8"), "VM で見つけた手順\n")
+        # 失敗しても 0 で終わり、標準出力 (会話に入る) には何も書かない
+        rc, out, _ = self.mvm("memory", "hook", "prompt", input=json.dumps(start).encode("utf-8"),
+                              env={**self.env, "PMVA_STUB_ERROR": "Could not connect to the endpoint URL"})
+        self.assertEqual((rc, out), (0, ""))
+        rc, out, _ = self.mvm("memory", "hook", "prompt", input=b"{}", env={**self.env, "PMVA_CONFIG": "/no/such/config.env"})
+        self.assertEqual((rc, out), (0, ""))
+        rc, out, _ = self.mvm("memory", "hook", input=b"{}")
+        self.assertEqual((rc, out), (0, ""))
+        # メモリ以外のファイルの書き込みでは AWS を呼ばない
+        before = (self.stub_dir / "calls.jsonl").read_text(encoding="utf-8")
+        other = {"cwd": str(repo), "tool_input": {"file_path": str(repo / "main.py")}}
+        self.assertEqual(self.mvm("memory", "hook", "post-tool", input=json.dumps(other).encode("utf-8"))[0], 0)
+        self.assertEqual((self.stub_dir / "calls.jsonl").read_text(encoding="utf-8"), before)
 
     def test_memory_errors_say_what_to_do(self):
         repo, _ = self.memory_repo()

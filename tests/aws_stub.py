@@ -5,7 +5,7 @@
   <microvmId>.payload  run-microvm の --run-hook-payload
   <microvmId>.term     terminate 済みの印
   secret-<name>        create-secret / put-secret-value で受け取った値
-  s3/<bucket>/<key>    s3 cp で S3 に置いたファイル
+  s3/<bucket>/<key>    s3 cp / s3api put-object で S3 に置いたファイル
   deployed.json        cloudformation deploy で受け取ったテンプレートとパラメータ (describe-stacks / get-template が返す)
 """
 
@@ -204,6 +204,26 @@ if cmd == "s3 cp" and len(paths) == 2 and paths[0].startswith("s3://"):   # S3 �
         fail("An error occurred (404) when calling the HeadObject operation: Key \"%s\" does not exist" % paths[0])
     Path(paths[1]).write_bytes(src.read_bytes())
     sys.exit(0)
+if cmd in ("s3api put-object", "s3api get-object"):
+    # put-object は s3 cp と同じ場所に置き、--if-match / --if-none-match を本物の S3 と同じく確かめる。
+    # get-object は最後の引数 (保存先) に書く。ETag は中身の MD5
+    import hashlib
+    obj = D / "s3" / opt("--bucket") / opt("--key")
+    if cmd == "s3api get-object":
+        if not obj.is_file():
+            fail("An error occurred (NoSuchKey) when calling the GetObject operation: The specified key does not exist.")
+        Path(a[-1]).write_bytes(obj.read_bytes())
+        out({"ETag": '"%s"' % hashlib.md5(obj.read_bytes()).hexdigest(), "ContentLength": obj.stat().st_size})
+    precondition = "An error occurred (PreconditionFailed) when calling the PutObject operation: At least one of the pre-conditions you specified did not hold"
+    if opt("--if-none-match") == "*" and obj.is_file():
+        fail(precondition)
+    if opt("--if-match") and (not obj.is_file() or hashlib.md5(obj.read_bytes()).hexdigest() != opt("--if-match").strip('"')):
+        fail(precondition)
+    obj.parent.mkdir(parents=True, exist_ok=True)
+    obj.write_bytes(Path(opt("--body")).read_bytes())
+    if opt("--metadata"):
+        Path(str(obj) + ".metadata").write_text(opt("--metadata"), encoding="utf-8")
+    out({"ETag": '"%s"' % hashlib.md5(obj.read_bytes()).hexdigest()})
 if cmd == "s3api list-objects-v2":   # s3/<バケット>/ の下のうち、--prefix で始まるキー。ETag は中身の MD5 (PMVA_STUB_ETAG_<名前> で上書き)
     import hashlib
     root = D / "s3" / opt("--bucket")

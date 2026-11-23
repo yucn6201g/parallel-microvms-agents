@@ -6,6 +6,7 @@
 import http.server
 import json
 import os
+import shlex
 import shutil
 import socket
 import subprocess
@@ -608,6 +609,43 @@ class SupervisorTest(unittest.TestCase):
                 break
             time.sleep(0.1)
         self.assertEqual(self.agents()["codex"], "exited")
+
+    def test_memory_hooks_follow_the_memory_option(self):
+        # mvm up --memory: 自動メモリの取得・送信のフックを入れる。起動し直しても重複せず、共有をやめたら外す
+        uri = "s3://pmva-bucket/memory/github.com/owner/repo/"
+        payload = {"name": "mem-1", "agent": "claude", "claudeAuth": "none", "prompt": "テストして", "memory": uri}
+        for _ in range(2):
+            self.hook("run", {"microvmId": "m", "runHookPayload": json.dumps(payload)})
+            self.wait_ready()
+        settings = json.loads((self.home / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        hooks = settings["hooks"]
+        self.assertEqual(settings["autoMemoryDirectory"], str(self.home / ".claude" / "pmva-memory"))
+
+        def memsync_entry(entry):
+            return any("/opt/pmva/memsync.py" in h["command"] for h in entry["hooks"])
+
+        def memsync(event):
+            return [h for entry in hooks.get(event, []) for h in entry["hooks"] if "/opt/pmva/memsync.py" in h["command"]]
+        (start,), (prompt,), (post,) = memsync("SessionStart"), memsync("UserPromptSubmit"), memsync("PostToolUse")
+        for hook, name in ((start, "session-start"), (prompt, "prompt"), (post, "post-tool")):
+            argv = shlex.split(hook["command"])
+            self.assertEqual(argv[:4], ["python3", "/opt/pmva/memsync.py", "hook", name])
+            self.assertEqual(argv[argv.index("--uri") + 1], uri)
+            self.assertEqual(argv[argv.index("--origin") + 1], "mem-1")
+            self.assertIn("--region", argv, "エージェントの環境に AWS_REGION が無くても動くように")
+            self.assertEqual(argv[argv.index("--state") + 1], str(self.home / ".claude" / "pmva-memory.state.json"))
+        self.assertIn("--min-interval", prompt["command"])
+        self.assertTrue(post["async"])
+        self.assertEqual([e.get("matcher") for e in hooks["PostToolUse"] if memsync_entry(e)], ["Write|Edit"])
+        self.assertEqual([h["hooks"][0]["command"] for h in hooks["UserPromptSubmit"] if not memsync_entry(h)],
+                         ["/opt/pmva/notify.sh claude-prompt"])
+        payload.pop("memory")
+        self.hook("run", {"microvmId": "m", "runHookPayload": json.dumps(payload)})
+        self.wait_ready()
+        hooks = json.loads((self.home / ".claude" / "settings.json").read_text(encoding="utf-8"))["hooks"]
+        self.assertNotIn("SessionStart", hooks)
+        self.assertFalse(memsync("UserPromptSubmit") + memsync("PostToolUse"))
+        self.assertEqual([h["hooks"][0]["command"] for h in hooks["PostToolUse"]], ["/opt/pmva/notify.sh claude-tool"])
 
     def test_agent_error_state_from_stop_failure(self):
         # 認証の失敗や利用上限など API のエラーで応答が終わると、Claude Code は Stop ではなく StopFailure を呼ぶ

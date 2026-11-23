@@ -2948,6 +2948,10 @@ def memory_aws_runner(args):
 
 
 def cmd_memory(args):
+    if args.action in ("install-hooks", "uninstall-hooks"):
+        return cmd_memory_hooks(args, args.action == "install-hooks")
+    if args.action == "hook":
+        return cmd_memory_hook(args)
     ms = load_memsync()
     directory = Path(args.dir) if args.dir else Path.cwd()
     try:
@@ -2955,6 +2959,7 @@ def cmd_memory(args):
         memory_dir = ms.resolve_memory_dir(directory)
         uri = f"s3://{stack_output('ArtifactBucketName')}/memory/{repo_id}/"
         state = ms.state_file_for(STATE_DIR, repo_id)
+        first_time = not state.exists()
         log(f"メモリのフォルダ: {memory_dir}")
         log(f"S3: {uri}")
 
@@ -2967,9 +2972,110 @@ def cmd_memory(args):
             rc = rc or run(action)
     except ms.MemsyncError as e:
         die(str(e))
-    if args.action != "status" and not as_bool(C["MEMORY_SYNC"]):
-        log("mvm up で VM にもメモリを使わせるには、config.env に MEMORY_SYNC=true を書いてください (--memory でも指定できます)")
+    # 案内は、このリポジトリで初めて同期したときだけ出す (毎回出るとうるさい)
+    if args.action != "status" and first_time and state.exists():
+        if not as_bool(C["MEMORY_SYNC"]):
+            log("mvm up で VM にもメモリを使わせるには、config.env に MEMORY_SYNC=true を書いてください (--memory でも指定できます)")
+        log("この PC でも、会話の開始時やメモリを書いたときに自動で同期するには mvm memory install-hooks を実行してください")
     return rc
+
+
+MEMORY_HOOK_MARK = '/mvm.py" memory hook '    # mvm memory install-hooks が入れたフックの印 (コマンドに含まれる)
+
+
+def memory_hook_entries():
+    """手元の Claude Code に入れるフック (イベント → 設定の 1 項目)。Windows でも Git Bash で動くよう / 区切りにする。"""
+    base = f'"{Path(sys.executable).as_posix()}" "{(ROOT / "bin").as_posix()}{MEMORY_HOOK_MARK}'
+    return {
+        "SessionStart": {"hooks": [{"type": "command", "command": base + "session-start", "timeout": 60}]},
+        "UserPromptSubmit": {"hooks": [{"type": "command", "command": base + "prompt --min-interval 60", "timeout": 30}]},
+        "PostToolUse": {"matcher": "Write|Edit",
+                        "hooks": [{"type": "command", "command": base + "post-tool", "async": True, "timeout": 120}]},
+    }
+
+
+def cmd_memory_hooks(args, install):
+    """リポジトリの .claude/settings.local.json に、自動メモリを同期するフックを入れる (外す)。"""
+    ms = load_memsync()
+    directory = Path(args.dir) if args.dir else Path.cwd()
+    try:
+        top = Path(ms._git(directory, "rev-parse", "--show-toplevel"))
+        if install:     # 共有できるリポジトリか (origin、メモリのフォルダ、スタック) を先に確かめる
+            ms.normalize_repo_id(ms.git_remote_url(directory))
+            ms.resolve_memory_dir(directory)
+            stack_output("ArtifactBucketName")
+    except ms.MemsyncError as e:
+        die(str(e))
+    path = top / ".claude" / "settings.local.json"
+    data = {}
+    if not install and not path.is_file():
+        log(f"{path} がないので、外すフックはありません")
+        return 0
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except ValueError as e:
+            die(f"{path} を読めません ({e})。JSON の書き方を直してから、もう一度実行してください")
+    hooks = data.get("hooks", {}) if isinstance(data, dict) else None
+    if not isinstance(hooks, dict) or not all(isinstance(v, list) for v in hooks.values()):
+        die(f"{path} の hooks の形が想定と違います。手で直してから、もう一度実行してください")
+    ours = memory_hook_entries()
+    for event in ours:
+        kept = [e for e in hooks.get(event, []) if not (isinstance(e, dict) and any(
+            isinstance(h, dict) and MEMORY_HOOK_MARK in str(h.get("command", "")) for h in e.get("hooks") or []))]
+        if install:
+            kept.append(ours[event])
+        if kept:
+            hooks[event] = kept
+        else:
+            hooks.pop(event, None)
+    if hooks:
+        data["hooks"] = hooks
+    else:
+        data.pop("hooks", None)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    if not install:
+        log(f"自動メモリのフックを外しました: {path}")
+        return 0
+    log(f"自動メモリのフックを入れました: {path}")
+    log("会話の開始時と指示のたび (60 秒に 1 回まで) に S3 から取得して会話に渡し、メモリを書いたらすぐ送ります。"
+        "動いている Claude Code には、次に起動した会話から効きます")
+    log("git worktree で作業するときは、その worktree のフォルダでも mvm memory install-hooks を実行してください。"
+        "外すには mvm memory uninstall-hooks")
+    ignored = subprocess.run(["git", "-C", str(top), "check-ignore", "-q", str(path)], capture_output=True)
+    if ignored.returncode == 1:
+        log(f"注意: {path} が git の管理から外れていません。この PC のパスが入っているので、.gitignore に足してください")
+    return 0
+
+
+def cmd_memory_hook(args):
+    """Claude Code のフックから呼ばれる (mvm memory install-hooks が入れる)。応答の JSON だけを標準出力に書く。"""
+    ms = load_memsync()
+    # Claude Code は UTF-8 で渡す (Windows の既定の文字コードで読むと化ける)
+    text = sys.stdin.buffer.read().decode("utf-8", errors="replace")
+    if not args.event:
+        die("イベント (session-start / prompt / post-tool) を指定してください")
+    try:
+        payload = json.loads(text or "{}")
+    except ValueError:
+        payload = {}
+    payload = payload if isinstance(payload, dict) else {}
+    if args.event == "post-tool":       # メモリ以外のファイルの書き込みでは、git や AWS を呼ばずに終わる
+        path = (payload.get("tool_input") or {}).get("file_path") if isinstance(payload.get("tool_input"), dict) else None
+        if not isinstance(path, str) or not path.endswith(".md"):
+            return 0
+    cwd = payload.get("cwd")
+    directory = Path(args.dir) if args.dir else Path(cwd) if isinstance(cwd, str) and cwd else Path.cwd()
+    repo_id = ms.normalize_repo_id(ms.git_remote_url(directory))
+    memory_dir = ms.resolve_memory_dir(directory)
+    uri = f"s3://{stack_output('ArtifactBucketName')}/memory/{repo_id}/"
+    sync = ms.Memsync(memory_dir, uri, ms.state_file_for(STATE_DIR, repo_id), "local", runner=memory_aws_runner,
+                      out=lambda msg: print(msg, file=sys.stderr, flush=True))
+    result = ms.run_hook(args.event, sync, text, min_interval=args.min_interval)
+    if result:
+        print(result, flush=True)
+    return 0
 
 
 # ---------------------------------------------------------------- 引数
@@ -3108,9 +3214,13 @@ def build_parser():
     x.add_argument("--agent", choices=("claude", "codex", "both"), default="both")
     x.add_argument("--dry-run", action="store_true", help="push で、送るものを表示するだけにする")
     x.set_defaults(func=cmd_profile)
-    x = sub.add_parser("memory", help="Claude Code の自動メモリを S3 経由で MicroVM と共有する (status / pull / push / sync)")
-    x.add_argument("action", choices=("status", "pull", "push", "sync"))
-    x.add_argument("--dir", help="リポジトリのフォルダ (既定は現在のフォルダ)")
+    x = sub.add_parser("memory", help="Claude Code の自動メモリを S3 経由で MicroVM と共有する "
+                                      "(status / pull / push / sync / install-hooks / uninstall-hooks)")
+    x.add_argument("action", choices=("status", "pull", "push", "sync", "install-hooks", "uninstall-hooks", "hook"))
+    x.add_argument("event", nargs="?", choices=("session-start", "prompt", "post-tool"),
+                   help="hook のときのイベント (install-hooks が入れるフックから呼ばれる)")
+    x.add_argument("--min-interval", type=float, default=0, help=argparse.SUPPRESS)
+    x.add_argument("--dir", help="リポジトリのフォルダ (既定は現在のフォルダ。hook ではフックが渡す cwd)")
     x.add_argument("--dry-run", action="store_true", help="何も書き換えず、することだけ表示する (status では無視)")
     x.add_argument("--force", action="store_true", help="競合したとき、pull は S3、push は手元の内容を採用する (status では無視)")
     x.set_defaults(func=cmd_memory)
@@ -3172,6 +3282,15 @@ def main(argv=None):
         fixed.append(f"{a}={next(it, '')}" if a in ("--claude-args", "--codex-args") else a)
     argv = fixed
     parser = build_parser()
+    if argv[:2] == ["memory", "hook"]:
+        # Claude Code のフックから呼ばれる。失敗しても 0 で終わる (2 で終わると、利用者の指示が止まってしまう)
+        try:
+            args = parser.parse_args(argv)
+            load_config()
+            return cmd_memory_hook(args)
+        except (SystemExit, Exception) as e:
+            print(f"mvm memory hook: {e}", file=sys.stderr, flush=True)
+            return 0
     if argv[:1] == ["cost"] and "--actual" in argv:
         cp = argparse.ArgumentParser(prog="mvm cost --actual", description="Cost Explorer の実績をサービス別に表示")
         cp.add_argument("--actual", action="store_true")

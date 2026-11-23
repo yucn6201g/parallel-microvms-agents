@@ -131,7 +131,9 @@ Claude Code の自動メモリ (1 件 1 ファイルの `*.md` と索引 `MEMORY
 
 - **S3 の配置**: `s3://<バケット>/memory/<repo-id>/<名前>.md`。`<repo-id>` は origin の URL を `host/owner/name` (小文字、`.git` と認証情報なし) にしたもの。同じリポジトリなら、PC も VM も同じ場所を指します
 - **手元**: `mvm memory pull|push|sync` が、Claude Code の自動メモリのフォルダと S3 を同期します。最後に同期した内容 (`.state/memory/`) を基準にした 3 者比較で、競合は `--force` で解きます。`MEMORY.md` は行の和集合でマージします。削除は伝えません
-- **VM**: `mvm up` (`MEMORY_SYNC=true` か `--memory`、`--repo` 付き) は `runHookPayload` の `memory` に S3 の場所を入れます。`bootstrap.sh` が `~/.claude/settings.json` の `autoMemoryDirectory` を `~/.claude/pmva-memory` にして、clone の後に `memsync.py pull` します。`snapshot.sh` が、ワークスペースの保存の前に `memsync.py push` します (失敗しても保存は続けます)。同期の状態ファイルは、メモリと一緒にスナップショットで戻るよう `~/.claude/pmva-memory.state.json` に置き、メモリのフォルダの中には置きません (Claude Code が読んでしまうため)
+- **VM**: `mvm up` (`MEMORY_SYNC=true` か `--memory`、`--repo` 付き) は `runHookPayload` の `memory` に S3 の場所を入れます。`bootstrap.sh` が `~/.claude/settings.json` の `autoMemoryDirectory` を `~/.claude/pmva-memory` にして、clone の後に `memsync.py pull` します。`snapshot.sh` が、ワークスペースの保存の前に `memsync.py push` します (失敗しても保存は続けます)。あわせて `bootstrap.sh` が Claude Code のフック (`memsync.py hook session-start|prompt|post-tool`) を入れ、会話の開始時と指示のたびに取得し、メモリを書いたらすぐ送ります。共有しない起動では、以前に入れたこのフックを外します。同期の状態ファイルは、メモリと一緒にスナップショットで戻るよう `~/.claude/pmva-memory.state.json` に置き、メモリのフォルダの中には置きません (Claude Code が読んでしまうため)
+- **フック**: `memsync.py hook` はイベントの JSON を標準入力で受け取り、届いたメモリを `hookSpecificOutput.additionalContext` で会話に渡します。経過は標準エラーに出し、失敗しても 0 で終わります (UserPromptSubmit が 2 で終わると、利用者の指示が止まるため)。同じマシンの複数の会話が同時に同期しないよう、状態ファイルの隣のロック (`.lock`) で 1 つにし、指示のたびの取得は `.pulled` の時刻で 60 秒に 1 回までにします。手元は `mvm memory install-hooks` が、同じ処理を呼ぶ `mvm memory hook` をフックに入れます
+- **同時の書き込み**: S3 への書き込みは `s3api put-object --if-match <一覧のときの ETag>` (新しいファイルは `--if-none-match "*"`) です。他のマシンが間に書き換えると 412 で失敗するので、ファイルは競合として飛ばし (基準は進めない)、`MEMORY.md` は取り直してマージし直します
 - **実行ロール**: `memory/*` の `s3:GetObject` / `s3:PutObject` と、`s3:ListBucket` (`memory/*`)。`s3:DeleteObject` は付けません (VM のエージェントが共有のメモリを消せないように)。消すのは手元の操作用ポリシー (`memory/*` の `s3:DeleteObject`) だけです
 - 認証情報らしい文字列を含むファイル、`share: false` のファイル、1MB を超えるファイルは送りません
 

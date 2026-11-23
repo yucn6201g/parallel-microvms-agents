@@ -120,6 +120,7 @@ mvm profile push [--name <名前>] [--agent claude|codex|both] [--dry-run]
 
 ```bash
 mvm memory status|pull|push|sync [--dir <リポジトリのフォルダ>] [--dry-run] [--force]
+mvm memory install-hooks|uninstall-hooks [--dir <リポジトリのフォルダ>]
 ```
 
 Claude Code の自動メモリ (auto memory。Claude が `~/.claude/projects/<リポジトリ>/memory/` に書く、1 件 1 ファイルの `*.md` と索引の `MEMORY.md`) を、S3 経由で手元の PC と VM で共有します。`--dir` の既定は現在のフォルダです。
@@ -130,17 +131,28 @@ Claude Code の自動メモリ (auto memory。Claude が `~/.claude/projects/<�
 | `pull` | S3 から手元に取得する |
 | `push` | 手元から S3 に送る |
 | `sync` | `pull` してから `push` する |
+| `install-hooks` | このリポジトリの Claude Code に、自動で同期するフックを入れる (下の「自動の同期」) |
+| `uninstall-hooks` | `install-hooks` で入れたフックを外す (ほかのフックや設定は残す) |
 
 - **置き場所**: `s3://<バケット>/memory/<repo-id>/`。`<repo-id>` は `git remote get-url origin` から作ります (`https://github.com/Owner/Repo.git`、`git@github.com:Owner/Repo.git`、`ssh://git@github.com/Owner/Repo` はどれも `github.com/owner/repo`。URL に入っているトークンなどは使いません)。同じリポジトリなら、別の PC や VM も同じ場所を使います
 - **手元のメモリのフォルダ**: リポジトリのルート (worktree でもメインのルート) の `.claude/settings.local.json`、次に `~/.claude/settings.json` の `autoMemoryDirectory` を探し、無ければ Claude Code の既定の `~/.claude/projects/<パスの英数字以外を - にしたもの>/memory` です。パスが長くて 200 文字を超えるときは、`.claude/settings.local.json` に `autoMemoryDirectory` を書いてください
-- **VM との共有**: `config.env` の `MEMORY_SYNC=true` (または `mvm up --memory`) で、`--repo` 付きで起動した VM が起動時に取得し、定期保存 (`snapshot.sh`) のたびに送ります ([architecture.md](architecture.md#自動メモリの共有-mvm-memory))。起動中の VM に手元の変更を渡すには、VM の中で `python3 /opt/pmva/memsync.py pull ...` を動かすか、`mvm renew` します
+- **VM との共有**: `config.env` の `MEMORY_SYNC=true` (または `mvm up --memory`) で、`--repo` 付きで起動した VM が起動時に取得し、定期保存 (`snapshot.sh`) のたびに送ります ([architecture.md](architecture.md#自動メモリの共有-mvm-memory))。VM の Claude Code には、次の「自動の同期」と同じフックが入ります
+- **自動の同期 (フック)**: `install-hooks` は、リポジトリのフォルダの `.claude/settings.local.json` に Claude Code のフックを入れます。VM では `mvm up --memory` で同じフックが入ります
+  - 会話の開始時 (SessionStart) と指示のたび (UserPromptSubmit。60 秒に 1 回まで) に `pull` し、他のマシンで書かれた・変わったメモリを本文ごと会話に渡します (合わせて約 9,500 文字まで。入りきらないファイルは名前だけ伝えます)。動いている会話にも、次の指示のときに届きます
+  - Claude がメモリのフォルダに書いたら (Write / Edit の後。PostToolUse) すぐ `push` します。会話は待たせません (`async`)
+  - 競合したファイルは自動では解かず、会話の開始時に名前を伝えます。`mvm memory status` で確かめて `--force` で解いてください
+  - フックの失敗で会話は止めません。失敗は `.state/memory/<repo-id>.json.log` (VM では `~/.claude/pmva-memory.state.json.log`) に残ります
+  - フックは入れたフォルダの Claude Code にだけ効きます。git worktree で作業するときは、その worktree のフォルダでも `install-hooks` を実行してください (メモリのフォルダは worktree でも同じです)。動いている Claude Code には、次に起動した会話から効きます
+  - `settings.local.json` にはこの PC の Python と `mvm.py` のパスが入ります。git の管理から外れていなければ、そう表示するので `.gitignore` に足してください
 - **送るもの**: フォルダ直下の `*.md` と `MEMORY.md` だけ。改行は LF にそろえます
 - **送らないもの** (理由を表示します): frontmatter に `share: false` と書いたファイル (手元専用)、API キー・トークン・秘密鍵らしい文字列を含むファイル、1MB を超えるファイル。`share: false` のファイルを指す索引の行も送りません
 - **3 者比較**: 最後に同期したときの内容 (`.state/memory/<repo-id>.json`) を基準に、手元と S3 を比べます。片方だけが変わっていれば、変わった側を相手に写します (`pull` は S3 の変更、`push` は手元の変更だけを写し、`push` は S3 のほうが新しいファイルを上書きせずに「先に pull」と表示します)
+- **同時の書き込み**: S3 には条件付きで書き込みます (`--if-match` / `--if-none-match`)。比べた後、送るまでの間に他のマシンが同じファイルを書き換えていたら、上書きせずに「競合」として飛ばします。`MEMORY.md` は取り直してマージし直します (3 回まで)。条件付き書き込みを知らない古い AWS CLI では、警告を出して条件なしで送ります
 - **競合の解き方**: 手元と S3 の両方が変わったファイルは、既定では飛ばして「競合」と表示します。どちらかを採用するときは `--force` (`pull` は S3 の内容、`push` は手元の内容で上書き) を付けます。上書きしたくない内容は、先に別の名前で退避してください
 - **削除は伝わりません**: 手元で消したファイルは S3 に残り、`pull` しても取得しません (「手元で消したファイル」と表示します)。S3 から消したいときは、`aws s3 rm s3://<バケット>/memory/<repo-id>/<名前>.md` で直接消してください (操作用ポリシーで消せます)。索引の行は `push` では消えないので、S3 の `MEMORY.md` も取ってきて行を除いてから送り直します
 - **`MEMORY.md`**: ファイルの内容ではなく、行の和集合でマージします。行はリンクの飛び先 (`](xxx.md)`) で見分けます。`pull` は S3 の索引の行のうち、手元の索引に無く、ファイルが手元にあるものを足し、`push` は手元の行のうち、S3 の索引に無く、ファイルが S3 にあるものを足します。行は消えません。200 行か 25KB を超えると警告します (Claude Code は先頭 200 行 / 25KB しか読みません)
 - `--dry-run` は何も書き換えず (状態も保存せず)、することだけを表示します。終わりに「取得 N、送信 N、競合 N、飛ばした N」を表示します
+- そのリポジトリで初めて `pull` / `push` / `sync` したときだけ、VM と共有する設定 (`MEMORY_SYNC`) とフック (`install-hooks`) を案内します
 - `mvm infra deploy` で更新した実行ロール (`memory/*` の読み書き) と操作用ポリシー (`memory/*` の削除) が要ります。`mvm memory` の同期そのものは、操作用ポリシーの既存の権限で足ります
 
 ---

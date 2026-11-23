@@ -6,9 +6,13 @@ Python 標準ライブラリと AWS CLI だけで動く (Python 3.9 以上)。
 
   memsync.py {pull|push|status} --dir <メモリのフォルダ> --uri s3://<bucket>/memory/<repo-id>/
              --state <状態ファイル> [--origin <名前>] [--dry-run] [--force]
+  memsync.py hook {session-start|prompt|post-tool} --dir ... --uri ... --state ... [--min-interval <秒>]
+             Claude Code のフックから呼ぶ。イベントの JSON を標準入力で受け取り、応答の JSON だけを標準出力に書く
 
 メモリは 1 件 1 ファイルの *.md と、索引の MEMORY.md。*.md は「最後に同期したときの内容」を基準にした 3 者比較
 (手元 / S3 / 基準) で、MEMORY.md は行の和集合でマージする。削除は相手に伝えない。
+S3 への書き込みは条件付き (--if-match / --if-none-match) にして、一覧を取ってから送るまでの間に他のマシンが
+書き換えたものを黙って上書きしない (ファイルは競合として飛ばし、MEMORY.md は取り直してマージし直す)。
 """
 
 import argparse
@@ -19,6 +23,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 INDEX_NAME = "MEMORY.md"
@@ -26,6 +31,11 @@ MAX_FILE_BYTES = 1024 * 1024      # これを超えるファイルは送らな�
 INDEX_MAX_LINES = 200             # Claude Code が読む索引の上限 (先頭 200 行 / 25KB)
 INDEX_MAX_BYTES = 25 * 1024
 SANITIZED_MAX = 200               # これを超えると Claude Code はフォルダ名を切り詰めてハッシュを付ける (規則が不明)
+INDEX_PUT_ATTEMPTS = 3            # MEMORY.md を送るときに、他のマシンと書き込みがぶつかったら取り直す回数
+HOOK_CONTEXT_MAX = 9500           # フックで会話に渡す文字数 (Claude Code は 1 万文字を超えるとファイルに逃がす)
+HOOK_LOG_MAX = 256 * 1024
+# フックの名前 (memsync.py hook <名前>) → Claude Code のイベント名
+HOOK_EVENTS = {"session-start": "SessionStart", "prompt": "UserPromptSubmit", "post-tool": "PostToolUse"}
 
 # bin/mvm.py の SECRET_PATTERN と同じ正規表現 (認証情報らしい文字列)
 SECRET_PATTERN = re.compile(
@@ -245,7 +255,11 @@ class Memsync:
         self.runner = runner or run_aws
         self.out = out or (lambda msg: print(msg, flush=True))
         self.counts = {"get": 0, "put": 0, "conflict": 0, "skipped": 0}
+        self.fetched = []           # pull で取得したファイル名 (フックで会話に渡す)
+        self.conflicts = []         # 競合して飛ばしたファイル名
         self._remote_index = None
+        self._remote_etags = {}     # 名前 → S3 の ETag (一覧を取ったときの値。条件付き書き込みに使う)
+        self._conditional = True    # AWS CLI が --if-match / --if-none-match を知らなければ False
 
     # ---- 入出力
     def say(self, msg):
@@ -257,12 +271,15 @@ class Memsync:
     def aws(self, *args):
         rc, out, err = self.runner(list(args))
         if rc != 0:
-            if "AccessDenied" in err or "Access Denied" in err:
-                raise MemsyncError("MicroVM の実行ロール (手元なら操作用のポリシー) に memory/ の権限がありません。"
-                                   "mvm infra deploy でスタックを更新してください (%s)" % err.strip())
-            raise MemsyncError("aws %s に失敗しました: %s。ネットワークと AWS の認証を確かめて、もう一度実行してください"
-                               % (" ".join(args[:2]), err.strip()))
+            self.aws_failed(args, err)
         return out
+
+    def aws_failed(self, args, err):
+        if "AccessDenied" in err or "Access Denied" in err:
+            raise MemsyncError("MicroVM の実行ロール (手元なら操作用のポリシー) に memory/ の権限がありません。"
+                               "mvm infra deploy でスタックを更新してください (%s)" % err.strip())
+        raise MemsyncError("aws %s に失敗しました: %s。ネットワークと AWS の認証を確かめて、もう一度実行してください"
+                           % (" ".join(args[:2]), err.strip()))
 
     def key_uri(self, name):
         return "s3://%s/%s%s" % (self.bucket, self.prefix, name)
@@ -297,6 +314,7 @@ class Memsync:
         """名前 → md5 (ETag)。ETag が MD5 でないもの (マルチパートなど) は一致しない値にする。MEMORY.md は含めない。"""
         result, token = {}, None
         self._remote_index = False
+        self._remote_etags = {}
         while True:
             args = ["s3api", "list-objects-v2", "--bucket", self.bucket, "--prefix", self.prefix, "--output", "json"]
             if token:
@@ -310,10 +328,11 @@ class Memsync:
                 if not safe_name(name):
                     self.warn("S3 の %s は手元に置けない名前なので無視します (\\ や : を含むか、. で始まる)" % name)
                     continue
+                etag = str(obj.get("ETag", "")).strip('"')
+                self._remote_etags[name] = etag
                 if name == INDEX_NAME:
                     self._remote_index = True
                     continue
-                etag = str(obj.get("ETag", "")).strip('"')
                 result[name] = etag if re.fullmatch(r"[0-9a-f]{32}", etag) else "unknown:" + etag
             token = data.get("NextContinuationToken")
             if not token:
@@ -331,18 +350,44 @@ class Memsync:
         return reasons
 
     # ---- 取得と送信
-    def download(self, name):
+    def fetch(self, name):
+        """S3 のオブジェクトの (中身, ETag)。"""
         with tempfile.TemporaryDirectory() as tmp:
             dest = Path(tmp) / "download"
-            self.aws("s3", "cp", "--only-show-errors", self.key_uri(name), str(dest))
-            return normalize_bytes(dest.read_bytes())
+            text = self.aws("s3api", "get-object", "--bucket", self.bucket, "--key", self.prefix + name,
+                            "--output", "json", str(dest)).strip()
+            try:
+                etag = str((json.loads(text) if text else {}).get("ETag", "")).strip('"')
+            except (ValueError, AttributeError):
+                etag = ""
+            return normalize_bytes(dest.read_bytes()), etag
 
-    def upload(self, name, data):
+    def download(self, name):
+        return self.fetch(name)[0]
+
+    def upload(self, name, data, etag=None):
+        """条件付きで送る。etag は一覧や取得のときの S3 の ETag (None なら「まだ無いこと」を条件にする)。
+
+        条件が合わなかった (その後に他のマシンが書き換えた) ときは False を返す。
+        """
         with tempfile.TemporaryDirectory() as tmp:
             src = Path(tmp) / name
             src.write_bytes(data)
-            self.aws("s3", "cp", "--only-show-errors", str(src), self.key_uri(name),
-                     "--metadata", "pmva-origin=" + self.origin)
+            args = ["s3api", "put-object", "--bucket", self.bucket, "--key", self.prefix + name, "--body", str(src),
+                    "--metadata", "pmva-origin=" + self.origin, "--output", "json"]
+            if self._conditional:
+                rc, _, err = self.runner(args + (["--if-match", etag] if etag else ["--if-none-match", "*"]))
+                if rc == 0:
+                    return True
+                if "PreconditionFailed" in err or "ConditionalRequestConflict" in err:
+                    return False
+                if not ("Unknown options" in err and "--if-" in err):
+                    self.aws_failed(args, err)
+                self._conditional = False
+                self.warn("この AWS CLI は条件付き書き込み (--if-match / --if-none-match) に対応していないため、"
+                          "他のマシンが同時に書き込んだときに上書きすることがあります。AWS CLI を新しくしてください")
+            self.aws(*args)
+            return True
 
     def write_local(self, name, data):
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -388,9 +433,24 @@ class Memsync:
         local_lines = normalize_bytes(path.read_bytes()).decode("utf-8", errors="replace").split("\n")
         if local_lines and local_lines[-1] == "":
             local_lines.pop()
-        remote_text = None
+        for attempt in range(INDEX_PUT_ATTEMPTS):
+            if attempt:
+                self.say("%s: 送る間に他のマシンが書き換えました。取り直してマージし直します" % INDEX_NAME)
+                self.list_remote()
+            merged = self.merged_push_index(local_lines, remote_names, private_names, attempt == 0)
+            if merged is None or self.dry_run:
+                return
+            if self.upload(INDEX_NAME, *merged):
+                return
+        self.warn("%s を送れませんでした (他のマシンと書き込みが %d 回ぶつかりました)。しばらくしてからもう一度 push してください"
+                  % (INDEX_NAME, INDEX_PUT_ATTEMPTS))
+
+    def merged_push_index(self, local_lines, remote_names, private_names, first):
+        """S3 の索引に手元の行を足したもの (中身, 送るときの条件の ETag)。足す行が無ければ None。"""
+        remote_text, etag = None, None
         if self._remote_index:
-            remote_text = normalize_bytes(self.download(INDEX_NAME)).decode("utf-8", errors="replace")
+            data, etag = self.fetch(INDEX_NAME)
+            remote_text = data.decode("utf-8", errors="replace")
         remote_lines = remote_text.split("\n") if remote_text is not None else []
         if remote_lines and remote_lines[-1] == "":
             remote_lines.pop()
@@ -399,7 +459,8 @@ class Memsync:
         for line in local_lines:
             key = line_key(line)
             if SECRET_PATTERN.search(line.encode("utf-8")):
-                self.warn("%s の認証情報らしい文字列を含む行は送りません" % INDEX_NAME)
+                if first:
+                    self.warn("%s の認証情報らしい文字列を含む行は送りません" % INDEX_NAME)
                 continue
             if key is None:
                 if remote_text is None and line.strip():
@@ -408,12 +469,11 @@ class Memsync:
                 added.append(line)
                 have.add(key)
         if not added:
-            return
+            return None
         merged = remote_lines + added
         self.say("%s に %d 行を足して送ります" % (INDEX_NAME, len(added)))
         self.check_index_size(merged)
-        if not self.dry_run:
-            self.upload(INDEX_NAME, ("\n".join(merged) + "\n").encode("utf-8"))
+        return ("\n".join(merged) + "\n").encode("utf-8"), etag
 
     def check_index_size(self, lines):
         size = len(("\n".join(lines) + "\n").encode("utf-8"))
@@ -454,6 +514,7 @@ class Memsync:
                 if not self.force:
                     self.say("%s: 競合 (手元と S3 の両方が変わっています)。飛ばします" % name)
                     self.counts["conflict"] += 1
+                    self.conflicts.append(name)
                     continue
                 take = True
             if not take:
@@ -469,6 +530,7 @@ class Memsync:
                 data = self.download(name)
                 self.write_local(name, data)
                 new_state[name] = md5_of(data)
+                self.fetched.append(name)
         self.merge_pull_index(local_names)
         self.save_state(new_state)
         return self.summary()
@@ -498,6 +560,7 @@ class Memsync:
                 if not self.force:
                     self.say("%s: 競合 (手元と S3 の両方が変わっています)。飛ばします" % name)
                     self.counts["conflict"] += 1
+                    self.conflicts.append(name)
                     continue
                 send = True
             if not send:
@@ -508,11 +571,15 @@ class Memsync:
                 self.say("%s: 送りません (%s)" % (name, "、".join(reasons)))
                 self.counts["skipped"] += 1
                 continue
+            remote_names.add(name)
+            if not self.dry_run and not self.upload(name, data, self._remote_etags.get(name) if r is not None else None):
+                self.say("%s: 競合 (送る間に他のマシンが書き換えました)。飛ばします。pull してから確かめてください" % name)
+                self.counts["conflict"] += 1
+                self.conflicts.append(name)
+                continue
             self.say("送信: %s%s" % (name, " (競合を手元の内容で上書き)" if kind == "conflict" else ""))
             self.counts["put"] += 1
-            remote_names.add(name)
             if not self.dry_run:
-                self.upload(name, data)
                 new_state[name] = md5_of(data)
         for name in list(local):
             if self.local_reasons(local[name][1]):
@@ -538,16 +605,173 @@ class Memsync:
         return 0
 
 
-def main(argv=None, runner=None, out=None):
+# ---------------------------------------------------------------- Claude Code のフック
+
+def _same_dir(a, b):
+    return os.path.normcase(os.path.realpath(str(a))) == os.path.normcase(os.path.realpath(str(b)))
+
+
+def _acquire_lock(path, wait, stale=120):
+    """同じマシンで同時に動く同期 (複数の会話のフック) を 1 つにする。取れなければ False。
+
+    同期の途中で落ちて残ったロックは、stale 秒より古ければ奪う。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode("ascii"))
+            os.close(fd)
+            return True
+        except FileExistsError:
+            try:
+                if time.time() - path.stat().st_mtime > stale:
+                    path.unlink()
+                    continue
+            except OSError:
+                continue
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.1)
+
+
+def _hook_log(sync, event, msg):
+    """フックの失敗を状態ファイルの隣 (<状態ファイル>.log) に残す (フックの標準エラーは利用者に見えないことが多い)。"""
+    log = Path(str(sync.state_path) + ".log")
+    try:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        if log.is_file() and log.stat().st_size > HOOK_LOG_MAX:
+            log.write_bytes(log.read_bytes()[-HOOK_LOG_MAX // 2:])
+        with open(str(log), "a", encoding="utf-8") as f:
+            f.write("%s %s: %s\n" % (time.strftime("%Y-%m-%dT%H:%M:%S"), event, msg))
+    except OSError:
+        pass
+
+
+def hook_context(sync, with_conflicts):
+    """pull で届いたメモリ (と競合) を、会話に渡す文章にする。何も無ければ空。"""
+    parts, omitted = [], []
+    head = ("[共有メモリ] 他のマシン (MicroVM や手元の PC) で保存・更新された Claude Code の自動メモリを S3 から取得しました"
+            " (メモリのフォルダ: %s)。今後の作業ではこの内容も踏まえてください。" % sync.dir)
+    used = len(head) + 600          # 末尾の案内の分を残す
+    for name in sync.fetched:
+        try:
+            body = (sync.dir / name).read_text(encoding="utf-8", errors="replace").rstrip()
+        except OSError:
+            continue
+        block = "\n\n## %s\n%s" % (name, body)
+        if used + len(block) > HOOK_CONTEXT_MAX:
+            omitted.append(name)
+            continue
+        parts.append(block)
+        used += len(block)
+    tail = []
+    if omitted:
+        names = "、".join(omitted)
+        if len(names) > 300:
+            names = names[:300] + " ほか"
+        tail.append("\n\n文字数の上限のため本文を省いたファイル: %s。必要なら %s の中のこれらのファイルを読んでください"
+                    % (names, sync.dir))
+    if with_conflicts and sync.conflicts:
+        tail.append("\n\n競合して同期していないメモリ: %s (手元と S3 の両方で変わっています)。"
+                    "利用者に伝え、手元の PC で mvm memory status を実行して確かめるよう頼んでください" % "、".join(sync.conflicts))
+    if not parts and not omitted and not tail:
+        return ""
+    return (head + "".join(parts) + "".join(tail))[:HOOK_CONTEXT_MAX]
+
+
+def run_hook(event, sync, stdin_text, min_interval=0, now=time.time, lock_wait=10):
+    """Claude Code のフックから呼ぶ同期。標準出力に書く応答 (JSON の文字列か空) を返し、例外は投げない。
+
+      post-tool      PostToolUse (Write / Edit)。書いたファイルがメモリのフォルダの中なら push する
+      session-start  SessionStart。pull して、届いたメモリと競合を会話に渡す
+      prompt         UserPromptSubmit。前回の pull から min_interval 秒以上たっていれば pull して、届いたメモリを会話に渡す
+    """
+    try:
+        payload = json.loads(stdin_text or "{}")
+    except ValueError:
+        payload = None
+    if not isinstance(payload, dict):
+        return ""
+    if event == "post-tool":
+        tool_input = payload.get("tool_input")
+        path = tool_input.get("file_path") if isinstance(tool_input, dict) else None
+        if not isinstance(path, str) or not path.endswith(".md") or not _same_dir(Path(path).parent, sync.dir):
+            return ""
+    stamp = Path(str(sync.state_path) + ".pulled")
+    if event == "prompt" and min_interval > 0:
+        try:
+            if now() - float(stamp.read_text(encoding="utf-8").strip()) < min_interval:
+                return ""
+        except (OSError, ValueError):
+            pass
+    lock = Path(str(sync.state_path) + ".lock")
+    # 送信は飛ばすと次に書くまで送られないので長めに待つ (async なので会話は待たせない)
+    if not _acquire_lock(lock, lock_wait * 6 if event == "post-tool" else lock_wait):
+        sync.out("他の同期が動いているので、今回は飛ばします (%s)" % lock)
+        return ""
+    try:
+        if event == "post-tool":
+            sync.push()
+            return ""
+        stamp.write_text(str(now()), encoding="utf-8")
+        sync.pull()
+        text = hook_context(sync, with_conflicts=(event == "session-start"))
+        if not text:
+            return ""
+        # ASCII だけの JSON にする (Windows の標準出力の文字コードに左右されない)
+        return json.dumps({"hookSpecificOutput": {"hookEventName": HOOK_EVENTS[event], "additionalContext": text}})
+    except Exception as e:      # フックの失敗で会話を止めない
+        sync.out("error: %s" % e)
+        _hook_log(sync, event, str(e))
+        return ""
+    finally:
+        try:
+            lock.unlink()
+        except OSError:
+            pass
+
+
+def main(argv=None, runner=None, out=None, stdin=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    hook = argv[:1] == ["hook"]
     p = argparse.ArgumentParser(prog="memsync.py", description="Claude Code の自動メモリを S3 と同期する")
-    p.add_argument("action", choices=("pull", "push", "status"))
+    p.add_argument("action", choices=("pull", "push", "status", "hook"))
+    p.add_argument("event", nargs="?", choices=tuple(HOOK_EVENTS), help="hook のときのイベント")
+    p.add_argument("--min-interval", type=float, default=0,
+                   help="hook prompt で、前回の pull からこの秒数がたつまでは S3 を見に行かない (既定 0)")
+    p.add_argument("--region", help="AWS のリージョン (フックの環境に AWS_REGION が無いことがあるため明示する)")
     p.add_argument("--dir", required=True, help="メモリのフォルダ")
     p.add_argument("--uri", required=True, help="s3://<バケット>/memory/<repo-id>/")
     p.add_argument("--state", required=True, help="最後に同期したときの状態を置くファイル (メモリのフォルダの外)")
     p.add_argument("--origin", default="local", help="S3 のオブジェクトに付ける送り元の名前 (既定 local)")
     p.add_argument("--dry-run", action="store_true", help="何も書き換えず、することだけ表示")
     p.add_argument("--force", action="store_true", help="競合したときに、pull は S3、push は手元の内容を採用する")
-    args = p.parse_args(argv)
+    try:
+        args = p.parse_args(argv)
+    except SystemExit:
+        if hook:
+            return 0        # フックが 2 で終わると、Claude Code は利用者の指示を止めてしまう
+        raise
+    if args.region:
+        os.environ["AWS_REGION"] = os.environ["AWS_DEFAULT_REGION"] = args.region
+    if hook:
+        # 標準出力は会話に入るので、経過は標準エラーに出す
+        out = out or (lambda msg: print(msg, file=sys.stderr, flush=True))
+        try:
+            sync = Memsync(Path(args.dir).expanduser(), args.uri, args.state, args.origin, runner=runner, out=out)
+        except MemsyncError as e:
+            print("error: %s" % e, file=sys.stderr)
+            return 0
+        if not args.event:
+            print("error: hook のイベント (%s) を指定してください" % " / ".join(HOOK_EVENTS), file=sys.stderr)
+            return 0
+        text = stdin.read() if stdin else sys.stdin.buffer.read().decode("utf-8", errors="replace")
+        result = run_hook(args.event, sync, text, min_interval=args.min_interval)
+        if result:
+            print(result)
+        return 0
     try:
         sync = Memsync(Path(args.dir).expanduser(), args.uri, args.state, args.origin, args.dry_run, args.force, runner, out)
         return getattr(sync, args.action)()
