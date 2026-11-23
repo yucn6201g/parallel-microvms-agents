@@ -478,6 +478,16 @@ class SupervisorTest(unittest.TestCase):
         self.assertTrue(claude_json["hasCompletedOnboarding"])
         self.assertIn('trust_level = "trusted"', (self.home / ".codex" / "config.toml").read_text(encoding="utf-8"))
 
+    def test_skip_permissions_does_not_stop_at_consent_dialog(self):
+        # --claude-args "--dangerously-skip-permissions" で起動すると、Claude Code は同意の確認画面 (既定は「No, exit」) を出す。
+        # そこへ mvm send の Enter が入ると終了してしまうので、同意済みの設定を ~/.claude/settings.json に書いておく
+        payload = {"name": "sk", "agent": "claude", "claudeAuth": "none",
+                   "claudeArgs": "--dangerously-skip-permissions", "snapshotIntervalSeconds": 0}
+        self.hook("run", {"microvmId": "m", "runHookPayload": json.dumps(payload)})
+        self.wait_ready()
+        settings = json.loads((self.home / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        self.assertIs(settings.get("skipDangerousModePermissionPrompt"), True, settings)
+
     def test_send_keys_to_window(self):
         self.hook("run", {"microvmId": "m", "runHookPayload": json.dumps({"name": "t2", "agent": "none"})})
         self.wait_ready()
