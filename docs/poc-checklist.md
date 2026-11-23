@@ -258,6 +258,15 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 - [ ] Codex の `access-token`: 未確認 (トークンの発行と、ChatGPT への確認の通信が要る)
 - [x] `custom`: `bootstrap.sh` が環境変数・ファイル (権限 600)・Claude Code の設定・Codex の接続先を書くこと、`{{files}}` の置き換え、使えない名前を飛ばすことを確認 (`tests/test_supervisor.py`)。中身はエージェントの設定そのものなので、本物のエージェントでは確かめていない
 
+## J. 自動メモリの共有 (2026-11-23)
+
+- [x] `mvm memory` の 3 者比較、`MEMORY.md` の行のマージ、送らないもの (`share: false`、認証情報らしい文字列、1MB 超)、`--dry-run` / `--force`、repo-id の正規化とメモリのフォルダの解決: 自動テスト (`tests/test_memsync.py`、`tests/test_mvm.py`。AWS は `tests/aws_stub.py` の代わり)
+- [ ] VM で `bootstrap.sh` が `autoMemoryDirectory` を設定して `memsync.py pull` し、起動した Claude Code が取得したメモリを読むこと (`/memory` に出ること、手元で書いた内容を踏まえて答えること): 未確認 (実機のイメージが要る)
+- [ ] `snapshot.sh` (定期保存と `mvm stop`) が `memsync.py push` で VM で書いたメモリを S3 に送り、手元で `mvm memory pull` して読めること。送れなくても保存が続くこと: 未確認
+- [ ] `mvm infra deploy` で実行ロール (`memory/*` の Get / Put、`ListBucket` の `memory/*`) を更新した後に、VM から取得・送信できること。更新前は AccessDenied の案内が出て、起動は止まらないこと: 未確認
+- [ ] `mvm renew` / `--restore latest` で復元した VM が、`~/.claude/pmva-memory` と状態ファイルの復元後に、手元の変更だけを取得すること: 未確認
+- [ ] S3 の ETag が MD5 と一致すること (バケットが SSE-S3 の単一 PUT)。一致しないと毎回「S3 が新しい」と判定される: 未確認
+
 ## 結果
 
 | 項目 | 結果 / メモ |

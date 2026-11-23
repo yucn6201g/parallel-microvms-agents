@@ -678,6 +678,86 @@ class CliTest(unittest.TestCase):
         self.assertNotEqual(rc, 0)
         self.mvm("secret", "set", "notify-webhook", input=b"https://hooks.slack.com/services/T/B/X")
 
+    def test_memory_option_in_payload(self):
+        self.env["PMVA_STUB_QUOTA_GB"] = "64"
+        repo = "https://x-access-token:ghp_FAKEFAKEFAKE@github.com/Owner/Repo.git"
+        self.mvm("up", "m0", "--repo", "https://github.com/o/r.git")          # 既定では共有しない
+        self.mvm("up", "m1", "--repo", repo, "--memory")
+        rc, _, err = self.mvm("up", "m2", "--memory")                          # --repo が無ければ共有しない
+        self.assertIn("--repo が無いのでメモリは共有しません", err)
+        cfg = Path(self.env["PMVA_CONFIG"])
+        cfg.write_text(cfg.read_text(encoding="utf-8") + "MEMORY_SYNC=true\n", encoding="utf-8")
+        self.mvm("up", "m3", "--repo", "git@github.com:Owner/Repo.git")
+        self.mvm("up", "m4", "--repo", "https://github.com/o/r.git", "--no-memory")
+        _, err = self.mvm("up", "m5", "--repo", "/local/path/repo")[1:]
+        self.assertIn("メモリは共有しません", err)
+        m0, m1, m2, m3, m4, m5 = self.payloads()
+        self.assertNotIn("memory", m0)
+        self.assertEqual(m1["memory"], "s3://pmva-bucket/memory/github.com/owner/repo/")
+        self.assertNotIn("ghp_", m1["memory"], "URL のトークンは使わない")
+        self.assertNotIn("memory", m2)
+        self.assertEqual(m3["memory"], "s3://pmva-bucket/memory/github.com/owner/repo/")
+        self.assertNotIn("memory", m4)
+        self.assertNotIn("memory", m5)
+
+    def memory_repo(self):
+        """origin 付きの git リポジトリと、メモリのフォルダ (autoMemoryDirectory で場所を固定する)。"""
+        repo = Path(self.tmp.name) / "repo"
+        (repo / ".claude").mkdir(parents=True)
+        mem = Path(self.tmp.name) / "mem"
+        mem.mkdir()
+        (repo / ".claude" / "settings.local.json").write_text(
+            json.dumps({"autoMemoryDirectory": str(mem)}), encoding="utf-8")
+        subprocess.run(["git", "init", "-q", str(repo)], check=True, env=self.env)
+        subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", "https://github.com/Owner/Repo.git"],
+                       check=True, env=self.env)
+        return repo, mem
+
+    def test_memory_push_pull_status(self):
+        repo, mem = self.memory_repo()
+        (mem / "user_role.md").write_bytes(b"---\nname: role\n---\r\nI am a tester\r\n")
+        (mem / "private.md").write_text("---\nshare: false\n---\nmine\n", encoding="utf-8")
+        (mem / "MEMORY.md").write_text("- [Role](user_role.md) - role\n- [P](private.md) - p\n", encoding="utf-8")
+        rc, out, err = self.mvm("memory", "push", "--dir", str(repo))
+        s3 = self.stub_dir / "s3" / "pmva-bucket" / "memory" / "github.com" / "owner" / "repo"
+        self.assertEqual((s3 / "user_role.md").read_bytes(), b"---\nname: role\n---\nI am a tester\n")
+        self.assertEqual((s3 / "MEMORY.md").read_text(encoding="utf-8"), "- [Role](user_role.md) - role\n")
+        self.assertFalse((s3 / "private.md").exists())
+        self.assertIn("s3://pmva-bucket/memory/github.com/owner/repo/", err)
+        self.assertIn("送信 1", out)
+        self.assertIn("MEMORY_SYNC=true", err, "VM にも使わせる方法を案内する")
+        self.assertTrue((Path(self.env["PMVA_STATE_DIR"]) / "memory" / "github.com__owner__repo.json").is_file())
+        rc, out, _ = self.mvm("memory", "status", "--dir", str(repo))
+        self.assertRegex(out, r"user_role\.md +同期済み")
+        self.assertRegex(out, r"private\.md +送らない")
+        # 別の PC で pull する: ファイルが無い状態から取得し、索引にも足される
+        (mem / "user_role.md").unlink()
+        (mem / "MEMORY.md").unlink()
+        (Path(self.env["PMVA_STATE_DIR"]) / "memory" / "github.com__owner__repo.json").unlink()
+        rc, out, _ = self.mvm("memory", "pull", "--dir", str(repo), "--dry-run")
+        self.assertFalse((mem / "user_role.md").exists())
+        self.mvm("memory", "sync", "--dir", str(repo))
+        self.assertEqual((mem / "user_role.md").read_bytes(), b"---\nname: role\n---\nI am a tester\n")
+        self.assertIn("(user_role.md)", (mem / "MEMORY.md").read_text(encoding="utf-8"))
+        calls = [json.loads(l) for l in (self.stub_dir / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertTrue(any(c[:2] == ["s3api", "list-objects-v2"] for c in calls))
+
+    def test_memory_errors_say_what_to_do(self):
+        repo, _ = self.memory_repo()
+        subprocess.run(["git", "-C", str(repo), "remote", "set-url", "origin", "/srv/local/repo.git"], check=True, env=self.env)
+        rc, _, err = self.mvm("memory", "status", "--dir", str(repo), check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("origin", err)
+        rc, _, err = self.mvm("memory", "status", "--dir", self.tmp.name, check=False)   # git リポジトリではない
+        self.assertNotEqual(rc, 0)
+        subprocess.run(["git", "-C", str(repo), "remote", "set-url", "origin", "https://github.com/Owner/Repo.git"],
+                       check=True, env=self.env)
+        rc, _, err = self.mvm("memory", "push", "--dir", str(repo), check=False,
+                              env={**self.env, "PMVA_STUB_ERROR": "An error occurred (AccessDenied) when calling the ListObjectsV2 operation",
+                                   "PMVA_STUB_ERROR_CMDS": "s3api list-objects-v2"})
+        self.assertNotEqual(rc, 0)
+        self.assertIn("mvm infra deploy", err)
+
     def test_memory_quota_blocks_fleet_before_launch(self):
         rc, out, err = self.mvm("fleet", "3", check=False)  # 8GB の上限に 4GB x 3 は入らない
         self.assertNotEqual(rc, 0)

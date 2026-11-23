@@ -5,7 +5,7 @@
 
 | 分類 | コマンド |
 |---|---|
-| 準備 | [`doctor`](#doctor) / [`infra`](#infra) / [`secret`](#secret) / [`image`](#image) / [`profile`](#profile) |
+| 準備 | [`doctor`](#doctor) / [`infra`](#infra) / [`secret`](#secret) / [`image`](#image) / [`profile`](#profile) / [`memory`](#memory) |
 | 起動 | [`up`](#up) / [`fleet`](#fleet) |
 | 確認・指示 | [`ls`](#ls) / [`peek`](#peek) / [`follow`](#follow) / [`view`](#view) / [`top`](#top) / [`send`](#send) / [`wait`](#wait) / [`result`](#result) / [`watch`](#watch) / [`logs`](#logs) |
 | 接続 | [`ssh`](#ssh) / [`forward`](#forward) / [`ssh-config`](#ssh-config) / [`shell`](#shell) / [`token`](#token) |
@@ -116,6 +116,33 @@ mvm profile push [--name <名前>] [--agent claude|codex|both] [--dry-run]
 - VM の中では、skill・サブエージェント・コマンドを 1 つずつ丸ごと置き換えます。VM の中で作った別の名前のものは残します
 - 名前は英小文字・数字・ハイフン (既定 `default`)。チーム用と個人用など、いくつかのまとまりを使い分けられます
 
+### memory
+
+```bash
+mvm memory status|pull|push|sync [--dir <リポジトリのフォルダ>] [--dry-run] [--force]
+```
+
+Claude Code の自動メモリ (auto memory。Claude が `~/.claude/projects/<リポジトリ>/memory/` に書く、1 件 1 ファイルの `*.md` と索引の `MEMORY.md`) を、S3 経由で手元の PC と VM で共有します。`--dir` の既定は現在のフォルダです。
+
+| コマンド | 動き |
+|---|---|
+| `status` | 何も書き換えずに、ファイルごとの状態 (同期済み / 手元だけ / S3 だけ / 手元が新しい / S3 が新しい / 競合 / 送らない) を表示する |
+| `pull` | S3 から手元に取得する |
+| `push` | 手元から S3 に送る |
+| `sync` | `pull` してから `push` する |
+
+- **置き場所**: `s3://<バケット>/memory/<repo-id>/`。`<repo-id>` は `git remote get-url origin` から作ります (`https://github.com/Owner/Repo.git`、`git@github.com:Owner/Repo.git`、`ssh://git@github.com/Owner/Repo` はどれも `github.com/owner/repo`。URL に入っているトークンなどは使いません)。同じリポジトリなら、別の PC や VM も同じ場所を使います
+- **手元のメモリのフォルダ**: リポジトリのルート (worktree でもメインのルート) の `.claude/settings.local.json`、次に `~/.claude/settings.json` の `autoMemoryDirectory` を探し、無ければ Claude Code の既定の `~/.claude/projects/<パスの英数字以外を - にしたもの>/memory` です。パスが長くて 200 文字を超えるときは、`.claude/settings.local.json` に `autoMemoryDirectory` を書いてください
+- **VM との共有**: `config.env` の `MEMORY_SYNC=true` (または `mvm up --memory`) で、`--repo` 付きで起動した VM が起動時に取得し、定期保存 (`snapshot.sh`) のたびに送ります ([architecture.md](architecture.md#自動メモリの共有-mvm-memory))。起動中の VM に手元の変更を渡すには、VM の中で `python3 /opt/pmva/memsync.py pull ...` を動かすか、`mvm renew` します
+- **送るもの**: フォルダ直下の `*.md` と `MEMORY.md` だけ。改行は LF にそろえます
+- **送らないもの** (理由を表示します): frontmatter に `share: false` と書いたファイル (手元専用)、API キー・トークン・秘密鍵らしい文字列を含むファイル、1MB を超えるファイル。`share: false` のファイルを指す索引の行も送りません
+- **3 者比較**: 最後に同期したときの内容 (`.state/memory/<repo-id>.json`) を基準に、手元と S3 を比べます。片方だけが変わっていれば、変わった側を相手に写します (`pull` は S3 の変更、`push` は手元の変更だけを写し、`push` は S3 のほうが新しいファイルを上書きせずに「先に pull」と表示します)
+- **競合の解き方**: 手元と S3 の両方が変わったファイルは、既定では飛ばして「競合」と表示します。どちらかを採用するときは `--force` (`pull` は S3 の内容、`push` は手元の内容で上書き) を付けます。上書きしたくない内容は、先に別の名前で退避してください
+- **削除は伝わりません**: 手元で消したファイルは S3 に残り、`pull` しても取得しません (「手元で消したファイル」と表示します)。S3 から消したいときは、`aws s3 rm` で直接消してください
+- **`MEMORY.md`**: ファイルの内容ではなく、行の和集合でマージします。行はリンクの飛び先 (`](xxx.md)`) で見分けます。`pull` は S3 の索引の行のうち、手元の索引に無く、ファイルが手元にあるものを足し、`push` は手元の行のうち、S3 の索引に無く、ファイルが S3 にあるものを足します。行は消えません。200 行か 25KB を超えると警告します (Claude Code は先頭 200 行 / 25KB しか読みません)
+- `--dry-run` は何も書き換えず (状態も保存せず)、することだけを表示します。終わりに「取得 N、送信 N、競合 N、飛ばした N」を表示します
+- `mvm infra deploy` で更新した実行ロール (`memory/*` の読み書き) が要ります。手元の操作には、操作用ポリシーの既存の権限で足ります
+
 ---
 
 ## 起動
@@ -148,6 +175,7 @@ MicroVM を 1 台起動し、エージェントを tmux の中で開始します
 | `--notify` / `--no-notify` | `NOTIFY_WEBHOOK` | 完了・入力待ちを Webhook に通知する |
 | `--no-setup` | | リポジトリの `.pmva/setup.sh` を実行しない ([usage.md](usage.md#リポジトリごとの準備-pmvasetupsh)) |
 | `--profile <名前>` / `--no-profile` | `PROFILE` | 手元から送った設定のまとまり ([profile](#profile)) を使う / 使わない |
+| `--memory` / `--no-memory` | `MEMORY_SYNC` | Claude Code の自動メモリを手元と共有する ([memory](#memory))。`--repo` が無いときは共有しない |
 
 注意:
 

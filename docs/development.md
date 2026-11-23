@@ -73,7 +73,7 @@ CI と同じものを手元で実行できます。
 ```bash
 shellcheck -S warning bin/mvm scripts/install.sh image/bootstrap.sh image/snapshot.sh image/notify.sh image/agent-attach image/pmva-node
 pip install cfn-lint && cfn-lint infra/cloudformation.yaml infra/cloudformation-minimal.yaml
-python -m py_compile bin/mvm.py image/supervisor.py scripts/estimate_cost.py scripts/orchestrator_guard.py tests/*.py
+python -m py_compile bin/mvm.py image/supervisor.py image/memsync.py scripts/estimate_cost.py scripts/orchestrator_guard.py tests/*.py
 ```
 
 ワークフローを変えたときは `actionlint` (`pip install actionlint-py`) も通しておくと安心です。

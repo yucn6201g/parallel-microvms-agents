@@ -168,6 +168,15 @@ Resources:
                 s3:prefix:
                   - "workspaces/*"
                   - "workspace-history/*"
+                  - "memory/*"
+          # Claude Code の自動メモリの共有 (mvm memory、MEMORY_SYNC=true)。VM の起動時に取得し、定期保存のときに送る。
+          # 削除は伝えないので s3:DeleteObject は付けない
+          - Sid: SharedAgentMemory
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+            Resource: !Sub "${ArtifactBucket.Arn}/memory/*"
           # 手元の Claude Code / Codex の設定 (mvm profile push)。VM からは読むだけで、書き換えられない
           - Sid: ReadAgentProfiles
             Effect: Allow

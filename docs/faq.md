@@ -43,7 +43,7 @@ AWS Secrets Manager に保存し、MicroVM の起動時にだけ取り出しま�
 MicroVM は最大 8 時間で終了します。その前に `mvm renew <name>` で、保存 → 新しい VM で復元をしてください。ブランチと会話の履歴も引き継ぎます ([usage.md](usage.md#8-時間を超えて続ける))。
 
 **Q. VM のエージェントは、手元の Claude Code / Codex と同じ設定 (ルール、skill) で動きますか?**
-リポジトリに入っている設定 (`CLAUDE.md`、`AGENTS.md`、`.claude/skills/` など) は、clone すればそのまま使われます。手元の自分用の設定 (`~/.claude/CLAUDE.md`、`~/.claude/skills/`、`~/.codex/AGENTS.md` など) は、`mvm profile push` で送り、`config.env` に `PROFILE=default` を書くと VM にも置かれます ([usage.md](usage.md#手元の設定を-vm-でも使う))。MCP の設定や手元のアプリにつなぐものは送りません。手元でしかできない作業は、手元のエージェントを司令塔にして分担します ([orchestrator.md](orchestrator.md))。
+リポジトリに入っている設定 (`CLAUDE.md`、`AGENTS.md`、`.claude/skills/` など) は、clone すればそのまま使われます。手元の自分用の設定 (`~/.claude/CLAUDE.md`、`~/.claude/skills/`、`~/.codex/AGENTS.md` など) は、`mvm profile push` で送り、`config.env` に `PROFILE=default` を書くと VM にも置かれます ([usage.md](usage.md#手元の設定を-vm-でも使う))。Claude Code の自動メモリ (Claude が覚えたこと) は、`config.env` に `MEMORY_SYNC=true` を書くと、`--repo` 付きの VM と手元で S3 経由で共有できます ([commands.md](commands.md#memory))。MCP の設定や手元のアプリにつなぐものは送りません。手元でしかできない作業は、手元のエージェントを司令塔にして分担します ([orchestrator.md](orchestrator.md))。
 
 **Q. VM の中のファイルは、終了したら消えますか?**
 VM のディスクは一時的なもので、終了すると消えます。`~/work` (リポジトリ) と `~/.claude`、`~/.codex` (会話の履歴) は、30 分ごとと `mvm stop` のときに S3 に保存され、`--restore latest` で戻せます。確実に残したい成果物は git に push してください。
