@@ -10,8 +10,9 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -27,8 +28,16 @@ def md5(data):
     return hashlib.md5(data).hexdigest()
 
 
+PRECONDITION_FAILED = ("An error occurred (PreconditionFailed) when calling the PutObject operation: "
+                       "At least one of the pre-conditions you specified did not hold")
+TRANSFERS = (["s3", "cp"], ["s3api", "put-object"], ["s3api", "get-object"])
+
+
 class FakeS3:
-    """memsync が呼ぶ aws の代わり (list-objects-v2 と s3 cp だけ)。"""
+    """memsync が呼ぶ aws の代わり (list-objects-v2、put-object、get-object、s3 cp)。
+
+    put-object は --if-match / --if-none-match を本物の S3 と同じく確かめ、合わなければ PreconditionFailed で失敗する。
+    """
 
     def __init__(self):
         self.objects = {}      # キー → 中身
@@ -37,6 +46,8 @@ class FakeS3:
         self.calls = []
         self.fail = None       # 設定すると全部の呼び出しがこのエラー文で失敗する
         self.page_size = 0     # 0 以外なら list-objects-v2 をこの件数ずつに分けて返す
+        self.before_put = None  # put-object の直前に呼ぶ関数 (キーを渡す)。他のマシンの同時書き込みを作る
+        self.old_cli = False   # True なら --if-match / --if-none-match を知らない古い AWS CLI として振る舞う
 
     def put(self, name, data, prefix=PREFIX):
         self.objects[prefix + name] = data if isinstance(data, bytes) else data.encode("utf-8")
@@ -44,10 +55,38 @@ class FakeS3:
     def get(self, name, prefix=PREFIX):
         return self.objects.get(prefix + name)
 
+    def etag(self, key):
+        return self.etags.get(key, md5(self.objects[key]))
+
     def __call__(self, args):
         self.calls.append(list(args))
         if self.fail:
             return 254, "", self.fail
+
+        def opt(k):
+            return args[args.index(k) + 1] if k in args else None
+        if self.old_cli and ("--if-match" in args or "--if-none-match" in args):
+            bad = [x for x in args if x in ("--if-match", "--if-none-match")]
+            return 252, "", "\nusage: aws [options]\naws: error: Unknown options: %s\n" % ", ".join(bad)
+        if args[:2] == ["s3api", "put-object"]:
+            key = opt("--key")
+            if self.before_put:
+                self.before_put(key)
+            if opt("--if-none-match") == "*" and key in self.objects:
+                return 254, "", PRECONDITION_FAILED
+            if "--if-match" in args and (key not in self.objects or self.etag(key) != opt("--if-match").strip('"')):
+                return 254, "", PRECONDITION_FAILED
+            self.objects[key] = Path(opt("--body")).read_bytes()
+            self.etags.pop(key, None)
+            if "--metadata" in args:
+                self.metadata[key] = opt("--metadata")
+            return 0, json.dumps({"ETag": '"%s"' % self.etag(key)}), ""
+        if args[:2] == ["s3api", "get-object"]:
+            key = opt("--key")
+            if key not in self.objects:
+                return 254, "", "An error occurred (NoSuchKey) when calling the GetObject operation: The specified key does not exist."
+            Path(args[-1]).write_bytes(self.objects[key])
+            return 0, json.dumps({"ETag": '"%s"' % self.etag(key), "ContentLength": len(self.objects[key])}), ""
         if args[:2] == ["s3api", "list-objects-v2"]:
             prefix = args[args.index("--prefix") + 1]
             keys = sorted(k for k in self.objects if k.startswith(prefix))
@@ -422,7 +461,7 @@ class PushTest(MemsyncTestCase):
         self.write("a.md", "x\n")
         self.s3.put("a.md", "x\n")
         self.sync().push()
-        self.assertFalse(any(c[:2] == ["s3", "cp"] for c in self.s3.calls))
+        self.assertFalse(any(c[:2] in TRANSFERS for c in self.s3.calls))
 
     def test_crlf_is_normalized_before_sending_and_comparing(self):
         self.write("a.md", b"one\r\ntwo\r\n")
@@ -431,7 +470,7 @@ class PushTest(MemsyncTestCase):
         self.assertEqual(self.get_state()["a.md"], md5(b"one\ntwo\n"))
         self.s3.calls.clear()
         self.sync().push()
-        self.assertFalse(any(c[:2] == ["s3", "cp"] for c in self.s3.calls), "改行だけの違いは同じ内容")
+        self.assertFalse(any(c[:2] in TRANSFERS for c in self.s3.calls), "改行だけの違いは同じ内容")
 
     def test_share_false_is_not_sent(self):
         self.write("private.md", "---\nname: p\nshare: false\n---\nsecret plans\n")
@@ -574,7 +613,7 @@ class StatusAndCliTest(MemsyncTestCase):
                             ("private.md", "送らない")):
             self.assertRegex(text, r"(?m)^%s +%s" % (name.replace(".", r"\."), label))
         self.assertEqual(self.state.read_text(encoding="utf-8"), before)
-        self.assertFalse(any(c[:2] == ["s3", "cp"] for c in self.s3.calls))
+        self.assertFalse(any(c[:2] in TRANSFERS for c in self.s3.calls))
 
     def test_access_denied_has_next_action(self):
         self.s3.fail = "An error occurred (AccessDenied) when calling the ListObjectsV2 operation: Access Denied"
@@ -615,6 +654,225 @@ class StatusAndCliTest(MemsyncTestCase):
         self.assertTrue(self.state.is_file())
 
 
+class ConditionalWriteTest(MemsyncTestCase):
+    """同時に書き込んだときに、他のマシンの書き込みを黙って上書きしない (S3 の条件付き書き込み)。"""
+
+    def puts(self, name):
+        return [c for c in self.s3.calls if c[:2] == ["s3api", "put-object"] and c[c.index("--key") + 1] == PREFIX + name]
+
+    def test_new_file_is_created_only_if_absent(self):
+        self.write("a.md", "a\n")
+        self.sync().push()
+        (put,) = self.puts("a.md")
+        self.assertEqual(put[put.index("--if-none-match") + 1], "*")
+        self.assertNotIn("--if-match", put)
+
+    def test_update_requires_the_listed_etag(self):
+        self.s3.put("a.md", "old\n")
+        self.set_state(a=md5(b"old\n"))
+        self.write("a.md", "new\n")
+        self.sync().push()
+        (put,) = self.puts("a.md")
+        self.assertEqual(put[put.index("--if-match") + 1], md5(b"old\n"))
+        self.assertEqual(self.s3.get("a.md"), b"new\n")
+
+    def test_file_changed_by_another_machine_meanwhile_is_a_conflict(self):
+        self.s3.put("a.md", "old\n")
+        self.set_state(a=md5(b"old\n"))
+        self.write("a.md", "mine\n")
+        self.s3.before_put = lambda key: self.s3.put("a.md", "theirs\n") if key.endswith("a.md") else None
+        self.sync().push()
+        self.assertEqual(self.s3.get("a.md"), b"theirs\n", "他のマシンの書き込みを上書きしない")
+        self.assertEqual(self.get_state()["a.md"], md5(b"old\n"), "基準は進めない (次の pull で競合として見える)")
+        self.assertIn("競合 1", self.text())
+        self.assertIn("a.md", self.text())
+
+    def test_new_file_created_by_another_machine_meanwhile_is_a_conflict(self):
+        self.write("a.md", "mine\n")
+        self.s3.before_put = lambda key: self.s3.put("a.md", "theirs\n") if key.endswith("a.md") and not self.s3.get("a.md") else None
+        self.sync().push()
+        self.assertEqual(self.s3.get("a.md"), b"theirs\n")
+        self.assertNotIn("a.md", self.get_state())
+        self.assertIn("競合 1", self.text())
+
+    def test_index_is_merged_again_when_another_machine_updated_it(self):
+        self.s3.put("b.md", "b\n")
+        self.s3.put("MEMORY.md", "- [B](b.md) - b\n")
+        self.write("a.md", "a\n")
+        self.write("MEMORY.md", "- [A](a.md) - a\n")
+        raced = []
+
+        def race(key):
+            if key.endswith("MEMORY.md") and not raced:
+                raced.append(key)
+                self.s3.put("c.md", "c\n")
+                self.s3.put("MEMORY.md", "- [B](b.md) - b\n- [C](c.md) - c\n")
+        self.s3.before_put = race
+        self.sync().push()
+        index = self.s3.get("MEMORY.md").decode("utf-8")
+        self.assertIn("(b.md)", index)
+        self.assertIn("(c.md)", index, "他のマシンが足した行を消さない")
+        self.assertIn("(a.md)", index)
+        self.assertEqual(len(self.puts("MEMORY.md")), 2, "取り直して送り直す")
+
+    def test_index_gives_up_after_repeated_races(self):
+        self.write("a.md", "a\n")
+        self.write("MEMORY.md", "- [A](a.md) - a\n")
+        self.s3.put("MEMORY.md", "- [X](x.md) - x\n")
+        counter = []
+
+        def race(key):
+            if key.endswith("MEMORY.md"):
+                counter.append(1)
+                self.s3.put("MEMORY.md", "- [X](x.md) - x\n" * (len(counter) + 1))
+        self.s3.before_put = race
+        self.sync().push()
+        self.assertLessEqual(len(self.puts("MEMORY.md")), 5)
+        self.assertIn("MEMORY.md", self.text())
+        self.assertIn("もう一度", self.text())
+
+    def test_old_cli_without_conditional_options_still_sends(self):
+        self.s3.old_cli = True
+        self.write("a.md", "a\n")
+        self.write("MEMORY.md", "- [A](a.md) - a\n")
+        self.sync().push()
+        self.assertEqual(self.s3.get("a.md"), b"a\n")
+        self.assertIn("(a.md)", self.s3.get("MEMORY.md").decode("utf-8"))
+        self.assertIn("AWS CLI", self.text(), "同時書き込みを検出できないことを伝える")
+
+
+class HookTest(MemsyncTestCase):
+    """Claude Code のフックから呼ぶ同期 (memsync.run_hook)。"""
+
+    def setUp(self):
+        super().setUp()
+        self.now = 1000.0
+
+    def hook(self, event, payload=None, min_interval=0):
+        text = json.dumps(payload if payload is not None else {"hook_event_name": event, "cwd": str(self.dir)})
+        return memsync.run_hook(event, self.sync(), text, min_interval=min_interval, now=lambda: self.now)
+
+    def context(self, output):
+        data = json.loads(output)
+        return data["hookSpecificOutput"]["additionalContext"]
+
+    def test_write_into_memory_folder_is_pushed(self):
+        self.write("a.md", "a\n")
+        out = self.hook("post-tool", {"tool_name": "Write", "tool_input": {"file_path": str(self.dir / "a.md")}})
+        self.assertEqual(out, "")
+        self.assertEqual(self.s3.get("a.md"), b"a\n")
+
+    def test_windows_style_path_is_matched(self):
+        self.write("a.md", "a\n")
+        path = str(self.dir / "a.md").replace("/", "\\") if os.name == "nt" else str(self.dir / "." / "a.md")
+        self.hook("post-tool", {"tool_name": "Edit", "tool_input": {"file_path": path}})
+        self.assertEqual(self.s3.get("a.md"), b"a\n")
+
+    def test_write_outside_memory_folder_does_nothing(self):
+        other = Path(self.tmp.name) / "src.md"
+        other.write_text("x\n", encoding="utf-8")
+        self.write("a.md", "a\n")
+        for path in (str(other), str(self.dir / "sub" / "a.md"), str(self.dir / "a.txt"), ""):
+            self.assertEqual(self.hook("post-tool", {"tool_name": "Write", "tool_input": {"file_path": path}}), "")
+        self.hook("post-tool", {"tool_name": "Bash", "tool_input": {"command": "ls"}})
+        self.assertEqual(self.s3.calls, [], "メモリ以外の書き込みでは AWS を呼ばない")
+
+    def test_session_start_pulls_and_tells_what_arrived(self):
+        self.s3.put("project_deploy.md", "---\nname: deploy\n---\nデプロイは金曜にしない\n")
+        self.s3.put("MEMORY.md", "- [Deploy](project_deploy.md) - 金曜は避ける\n")
+        ctx = self.context(self.hook("session-start"))
+        self.assertEqual(json.loads(self.hook("session-start") or '{"x": 1}').get("x"), 1, "2 回目は何も届かない")
+        self.assertIn("デプロイは金曜にしない", ctx)
+        self.assertIn("project_deploy.md", ctx)
+        self.assertIn(str(self.dir), ctx)
+        self.assertEqual(self.read("project_deploy.md"), "---\nname: deploy\n---\nデプロイは金曜にしない\n".encode("utf-8"))
+
+    def test_hook_event_name_matches_claude_code(self):
+        self.s3.put("a.md", "a\n")
+        self.assertEqual(json.loads(self.hook("prompt"))["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit")
+        self.s3.put("b.md", "b\n")
+        self.assertEqual(json.loads(self.hook("session-start"))["hookSpecificOutput"]["hookEventName"], "SessionStart")
+
+    def test_prompt_with_nothing_new_outputs_nothing(self):
+        self.assertEqual(self.hook("prompt"), "")
+        self.assertTrue(any(c[:2] == ["s3api", "list-objects-v2"] for c in self.s3.calls))
+
+    def test_prompt_is_throttled(self):
+        self.s3.put("a.md", "a\n")
+        self.assertIn("a.md", self.context(self.hook("prompt", min_interval=60)))
+        self.s3.calls.clear()
+        self.s3.put("b.md", "b\n")
+        self.now += 30
+        self.assertEqual(self.hook("prompt", min_interval=60), "")
+        self.assertEqual(self.s3.calls, [], "間隔が短いときは S3 を見に行かない")
+        self.now += 31
+        self.assertIn("b.md", self.context(self.hook("prompt", min_interval=60)))
+
+    def test_context_is_kept_under_the_limit(self):
+        for i in range(8):
+            self.s3.put("big%d.md" % i, ("x" * 2000 + "\n"))
+        ctx = self.context(self.hook("session-start"))
+        self.assertLessEqual(len(ctx), memsync.HOOK_CONTEXT_MAX)
+        self.assertIn("big7.md", ctx, "入りきらなかったファイルも名前は伝える")
+        self.assertIn("読んで", ctx)
+
+    def test_updated_file_is_reported(self):
+        self.s3.put("a.md", "v1\n")
+        self.hook("session-start")
+        self.s3.put("a.md", "v2\n")
+        self.assertIn("v2", self.context(self.hook("prompt")))
+
+    def test_conflicts_are_reported_at_session_start(self):
+        self.s3.put("a.md", "theirs\n")
+        self.write("a.md", "mine\n")
+        ctx = self.context(self.hook("session-start"))
+        self.assertIn("a.md", ctx)
+        self.assertIn("競合", ctx)
+        self.assertEqual(self.read("a.md"), b"mine\n", "フックでは --force しない")
+
+    def test_failure_never_breaks_the_session(self):
+        self.s3.fail = "Could not connect to the endpoint URL"
+        for event in ("session-start", "prompt"):
+            self.assertEqual(self.hook(event), "")
+        self.write("a.md", "a\n")
+        self.assertEqual(self.hook("post-tool", {"tool_input": {"file_path": str(self.dir / "a.md")}}), "")
+        log = Path(str(self.state) + ".log").read_text(encoding="utf-8")
+        self.assertIn("Could not connect", log)
+
+    def test_broken_input_is_ignored(self):
+        self.assertEqual(memsync.run_hook("post-tool", self.sync(), "not json", now=lambda: self.now), "")
+        self.assertEqual(memsync.run_hook("post-tool", self.sync(), "[1]", now=lambda: self.now), "")
+        self.assertEqual(self.s3.calls, [])
+
+    def test_busy_lock_skips_instead_of_waiting_forever(self):
+        self.s3.put("a.md", "a\n")
+        lock = Path(str(self.state) + ".lock")
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.write_text("other", encoding="utf-8")
+        self.assertEqual(memsync.run_hook("prompt", self.sync(), "{}", now=lambda: self.now, lock_wait=0.2), "")
+        self.assertEqual(self.s3.calls, [], "他の同期が動いている間は何もしない")
+        self.assertTrue(lock.exists(), "他の同期のロックは消さない")
+        os.utime(str(lock), (0, 0))      # 古いロック (同期の途中で落ちた) は奪う
+        self.assertIn("a.md", self.context(memsync.run_hook("prompt", self.sync(), "{}", now=time.time, lock_wait=0.2)))
+        self.assertFalse(lock.exists())
+
+    def test_cli_hook_writes_only_the_hook_response_to_stdout(self):
+        self.s3.put("a.md", "a\n")
+        args = ["hook", "prompt", "--dir", str(self.dir), "--uri", URI, "--state", str(self.state), "--origin", "vm-1"]
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = memsync.main(args, runner=self.s3, stdin=io.StringIO("{}"))
+        self.assertEqual(rc, 0)
+        self.assertIn("a.md", json.loads(out.getvalue())["hookSpecificOutput"]["additionalContext"])
+        self.assertIn("取得", err.getvalue(), "経過は標準エラーに出す (標準出力は会話に入る)")
+        self.s3.fail = "boom"
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+            self.assertEqual(memsync.main(args[:2] + ["--min-interval", "0"] + args[2:], runner=self.s3,
+                                          stdin=io.StringIO("{}")), 0, "失敗しても 0 で終わる")
+        self.assertEqual(out.getvalue(), "")
+
+
 class ImageWiringTest(unittest.TestCase):
     """VM に memsync.py を入れる配線 (Dockerfile、zip の実行権限、bootstrap.sh / snapshot.sh からの呼び出し)。"""
 
@@ -637,6 +895,16 @@ class ImageWiringTest(unittest.TestCase):
         self.assertIn("memsync.py push", snapshot)
         for script in (bootstrap, snapshot):
             self.assertIn("pmva-memory.state.json", script)
+
+    def test_bootstrap_installs_memory_hooks(self):
+        bootstrap = self.read("image/bootstrap.sh")
+        section = bootstrap.split("# 自動メモリのフック", 1)[1].split("\n# Codex", 1)[0]
+        for name in ("SessionStart", "UserPromptSubmit", "PostToolUse", "session-start", "prompt", "post-tool"):
+            self.assertIn('"%s"' % name, section)
+        self.assertIn("/opt/pmva/memsync.py", section)
+        self.assertIn("hook", section)
+        self.assertIn('"async": true', section, "送信は会話を待たせない")
+        self.assertIn("Write|Edit", section)
 
 
 if __name__ == "__main__":

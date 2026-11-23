@@ -270,6 +270,15 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 - [x] `mvm renew` で復元した VM が、`~/.claude/pmva-memory` と状態ファイルの復元後に、手元の変更だけを取得すること: 2026-11-23 に確認。手元で 1 件に追記して `push` した後に `renew` すると、新しい VM ではその 1 件だけが書き直され (ほかは復元時の更新時刻のまま)、追記が届いた。`renew` の保存時の送信は「S3 のほうが新しい」として VM の古い内容で上書きしなかった。`--restore latest` は `renew` と同じ復元の経路のため個別には試していない
 - [x] S3 の ETag が MD5 と一致すること (バケットが SSE-S3 の単一 PUT): 2026-11-23 に確認。`head-object` の ETag と、手元のファイルを LF にそろえた MD5 が一致 (`ServerSideEncryption` は `AES256`)。`push` 直後の `status` もすべて「同期済み」
 
+### J2. フックによる自動の同期 (段階 2)
+
+- [x] フックの処理 (書いたら送る、会話の開始時と指示のたびに取得して会話に渡す、60 秒の間引き、ロック、失敗しても 0 で終わる)、条件付き書き込み (他のマシンの書き込みを上書きしない、`MEMORY.md` の取り直し、古い AWS CLI での退避)、`mvm memory install-hooks` / `uninstall-hooks` / `hook`: 自動テスト (`tests/test_memsync.py`、`tests/test_mvm.py`)。VM の `settings.json` にフックが入ること・外れることは `tests/test_supervisor.py` (Linux)
+- [ ] 本物の S3 で `put-object --if-match <ETag>` / `--if-none-match "*"` が通り、書き換えられた後は `PreconditionFailed` になること: 未確認 (ETag を引用符なしで渡している)
+- [ ] VM の AWS CLI (Amazon Linux 2023 の `awscli-2`) が `--if-match` を知っていること: 未確認 (知らなければ警告を出して条件なしで送る)
+- [ ] VM で Claude Code がメモリを書いた直後に S3 に届くこと (PostToolUse、`async`): 未確認
+- [ ] 手元で `install-hooks` した会話に、VM が書いたメモリが次の指示のときに届くこと (UserPromptSubmit の `additionalContext`): 未確認
+- [ ] Windows の手元で、フックが Git Bash から `"<python.exe>" "<mvm.py>" memory hook ...` を動かせること: 未確認
+
 ## 結果
 
 | 項目 | 結果 / メモ |

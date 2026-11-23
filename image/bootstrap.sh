@@ -361,13 +361,30 @@ jq 'def pmva(ev; arg):
 # S3 から取得する。同期の状態ファイルは、スナップショット (~/.claude を含む) でメモリと一緒に戻るよう ~/.claude に置く
 # (メモリのフォルダの中に置くと Claude Code が読んでしまう)。保存は snapshot.sh が行う
 MEMORY="$(j .memory)"
+memory_dir="$HOME/.claude/pmva-memory"
+memory_state="$HOME/.claude/pmva-memory.state.json"
 if [ -n "$MEMORY" ]; then
   log "shared memory: $MEMORY"
-  memory_dir="$HOME/.claude/pmva-memory"
   mkdir -p "$memory_dir"
   jq --arg d "$memory_dir" '.autoMemoryDirectory = $d' "$settings" > "$settings.tmp" && mv "$settings.tmp" "$settings"
-  python3 /opt/pmva/memsync.py pull --dir "$memory_dir" --uri "$MEMORY" --state "$HOME/.claude/pmva-memory.state.json" --origin "$NAME" || warn "memory pull failed: $MEMORY"
+  python3 /opt/pmva/memsync.py pull --dir "$memory_dir" --uri "$MEMORY" --state "$memory_state" --origin "$NAME" || warn "memory pull failed: $MEMORY"
 fi
+# 自動メモリのフック (mvm up --memory): 会話の開始時と指示のたび (60 秒に 1 回まで) に S3 から取得して、
+# 届いたメモリを会話に渡す。メモリを書いたらすぐ送る (async なので会話を待たせない)。
+# 共有しないときは、以前の起動で入れたフックを外す
+jq --arg uri "$MEMORY" --arg dir "$memory_dir" --arg state "$memory_state" --arg name "$NAME" '
+  def cmd(ev; extra): "python3 /opt/pmva/memsync.py hook " + ev + " --dir " + ($dir | @sh) + " --uri " + ($uri | @sh)
+                      + " --state " + ($state | @sh) + " --origin " + ($name | @sh) + extra;
+  def strip(ev): .hooks[ev] = [(.hooks[ev] // [])[] | select([.hooks[]?.command? // "" | contains("/opt/pmva/memsync.py")] | any | not)]
+                 | if .hooks[ev] == [] then del(.hooks[ev]) else . end;
+  def add(ev; entry): .hooks[ev] = (.hooks[ev] // []) + [entry];
+  strip("SessionStart") | strip("UserPromptSubmit") | strip("PostToolUse")
+  | if $uri == "" then . else
+      add("SessionStart"; {"hooks": [{"type": "command", "command": cmd("session-start"; ""), "timeout": 60}]})
+      | add("UserPromptSubmit"; {"hooks": [{"type": "command", "command": cmd("prompt"; " --min-interval 60"), "timeout": 30}]})
+      | add("PostToolUse"; {"matcher": "Write|Edit",
+                            "hooks": [{"type": "command", "command": cmd("post-tool"; ""), "async": true, "timeout": 120}]})
+    end' "$settings" > "$settings.tmp" && mv "$settings.tmp" "$settings"
 # Codex: notify はトップレベルのキーなので、テーブル ([projects...]) より前に置く
 codex_cfg="$HOME/.codex/config.toml"
 if ! grep -q '^notify *=' "$codex_cfg" 2>/dev/null; then
