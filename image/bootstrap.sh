@@ -424,6 +424,10 @@ claude_json="$HOME/.claude.json"
 [ -s "$claude_json" ] || echo '{}' > "$claude_json"
 jq --arg d "$WORKDIR" '.hasCompletedOnboarding = true | .projects[$d].hasTrustDialogAccepted = true' \
   "$claude_json" > "$claude_json.tmp" && mv "$claude_json.tmp" "$claude_json"
+# --dangerously-skip-permissions で起動したときの同意の確認画面も済ませておく。既定の選択肢が「No, exit」なので、
+# 止まったまま mvm send の Enter が入ると Claude Code が終了してしまう。VM は隔離環境なので、引数にかかわらず常に書く
+# (この設定だけでは許可の確認は省かれない。省くかどうかは --claude-args で決まる)
+jq '.skipDangerousModePermissionPrompt = true' "$settings" > "$settings.tmp" && mv "$settings.tmp" "$settings"
 grep -qF "[projects.\"$WORKDIR\"]" "$HOME/.codex/config.toml" 2>/dev/null \
   || printf '\n[projects."%s"]\ntrust_level = "trusted"\n' "$WORKDIR" >> "$HOME/.codex/config.toml"
 

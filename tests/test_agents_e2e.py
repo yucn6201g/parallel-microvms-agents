@@ -110,7 +110,7 @@ class AgentE2ETest(unittest.TestCase):
         if with_notification:
             hooks["Notification"] = "claude-notification"
         # bootstrap.sh と同じ形のフックと、API キーの渡し方 (apiKeyHelper)
-        settings = {"apiKeyHelper": str(helper),
+        settings = {"apiKeyHelper": str(helper), "skipDangerousModePermissionPrompt": True,
                     "hooks": {ev: [{"hooks": [{"type": "command", "command": f"{NOTIFY} {kind}"}]}] for ev, kind in hooks.items()}}
         (self.home / ".claude" / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
         (self.home / ".claude.json").write_text(json.dumps(

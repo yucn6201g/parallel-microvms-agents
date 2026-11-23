@@ -35,6 +35,7 @@
 
 ### 修正
 
+- `--claude-args "--dangerously-skip-permissions"` (または `DEFAULT_CLAUDE_ARGS` に同じ指定) で起動すると、Claude Code が許可を省くことへの同意の確認画面 (既定の選択肢は「No, exit」) で止まり、そこへ `mvm send` すると Claude Code が終了していた。VM の `~/.claude/settings.json` に同意済みの設定 (`skipDangerousModePermissionPrompt`) を書き、確認画面を出さずに作業を始める。イメージの作り直し (`mvm image build`) が必要
 - AWS の認証が切れているときなど、問い合わせに失敗しただけなのに「無い」と案内していた。`mvm image status` / `up` / `build` は「イメージはまだありません (mvm image build)」、`up` / `infra outputs` は「スタックが見つかりません。先に mvm infra deploy を実行してください」、`up --profile` は「設定のまとまりがまだありません」と出て、要らない作り直しを招くおそれがあった。失敗の理由 (認証切れなら `aws sso login`、権限、通信) と次にやることを出して止める。`mvm doctor` のスタックとシークレットの項目も同じ
 - `mvm image prune` / `mvm image delete` (`--yes` なし) と `mvm infra delete` を、端末の無いところ (司令塔のエージェント、CI、パイプ) から実行すると、確認の答えを読めずに `EOFError` のトレースバックで落ちていた。何も削除せずに、`--yes` を付ける (`infra delete` は端末から実行する) よう案内して中止する。パイプで `y` を渡したときは従来どおり進む
 - 版の確認のワークフロー (`agent-versions.yml`) が、固定した版を最新に上げた後も Issue「Claude Code / Codex の新しい版があります」を古い内容のまま開いておいた。最新に追いついていれば、その Issue を閉じる

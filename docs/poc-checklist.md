@@ -131,6 +131,8 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
   - VM 内の初期化 (`bootstrap.sh`) が各方式で正しく設定することは、偽の認証情報を使った自動テスト (`tests/test_supervisor.py`) で確認済み: apiKeyHelper、`CLAUDE_CODE_OAUTH_TOKEN`、ゲートウェイの環境変数、Codex の `auth.json` と `codex login --with-api-key`、GitHub トークン、ファイルの権限 (600)、保存 (スナップショット) に認証情報が入らないこと
   - 修正 15: 登録していないシークレットを `oauth-token` に指定すると、空のトークンのまま「準備完了」になっていた → 失敗として扱う (このテストで発見)
 - [x] 起動直後にオンボーディングや「このフォルダを信頼しますか？」の確認で止まらない
+- [ ] `--claude-args "--dangerously-skip-permissions"` で起動しても、許可を省くことへの同意の確認画面で止まらず、`mvm send` の指示で作業する (実機は未確認)
+  - 2026-11-23 にイメージ 8.0 で、確認画面 (既定は「No, exit」) で止まり、`mvm send` の Enter で Claude Code が終了することを確認 → `bootstrap.sh` が `~/.claude/settings.json` に `skipDangerousModePermissionPrompt` を書くよう修正。固定した版の Claude Code で確認画面が出ないことは自動テスト (`tests/test_agents_e2e.py`) で確認済み
 - [x] `mvm up ... --prompt "..."` の初期指示が入力・実行される
 - [x] `mvm send` で送った指示 (日本語を含む) がエージェントに届き、Enter で送信される
 - [x] `sudo` は**使えない**: コンテナに no_new_privs が付いている (`sudo: The "no new privileges" flag is set`)。イメージから sudo を外し、root が必要な作業は `mvm shell` (root) で行う方針にした
