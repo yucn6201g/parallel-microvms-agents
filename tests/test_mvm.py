@@ -755,7 +755,8 @@ class CliTest(unittest.TestCase):
         settings_path.write_text(json.dumps(settings), encoding="utf-8")
         for _ in range(2):          # 入れ直しても重複しない
             rc, _, err = self.mvm("memory", "install-hooks", "--dir", str(repo))
-        self.assertIn(str(settings_path), err)
+        # Windows の CI では一時フォルダが短い名前 (RUNNER~1) になり、git の返す名前と違うので末尾で比べる
+        self.assertIn(str(Path("repo") / ".claude" / "settings.local.json"), err)
         data = json.loads(settings_path.read_text(encoding="utf-8"))
         self.assertEqual(data["autoMemoryDirectory"], str(mem), "ほかの設定は残す")
         hooks = data["hooks"]
