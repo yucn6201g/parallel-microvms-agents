@@ -707,7 +707,8 @@ def run_hook(event, sync, stdin_text, min_interval=0, now=time.time, lock_wait=1
         except (OSError, ValueError):
             pass
     lock = Path(str(sync.state_path) + ".lock")
-    if not _acquire_lock(lock, lock_wait):
+    # 送信は飛ばすと次に書くまで送られないので長めに待つ (async なので会話は待たせない)
+    if not _acquire_lock(lock, lock_wait * 6 if event == "post-tool" else lock_wait):
         sync.out("他の同期が動いているので、今回は飛ばします (%s)" % lock)
         return ""
     try:
@@ -740,6 +741,7 @@ def main(argv=None, runner=None, out=None, stdin=None):
     p.add_argument("event", nargs="?", choices=tuple(HOOK_EVENTS), help="hook のときのイベント")
     p.add_argument("--min-interval", type=float, default=0,
                    help="hook prompt で、前回の pull からこの秒数がたつまでは S3 を見に行かない (既定 0)")
+    p.add_argument("--region", help="AWS のリージョン (フックの環境に AWS_REGION が無いことがあるため明示する)")
     p.add_argument("--dir", required=True, help="メモリのフォルダ")
     p.add_argument("--uri", required=True, help="s3://<バケット>/memory/<repo-id>/")
     p.add_argument("--state", required=True, help="最後に同期したときの状態を置くファイル (メモリのフォルダの外)")
@@ -752,6 +754,8 @@ def main(argv=None, runner=None, out=None, stdin=None):
         if hook:
             return 0        # フックが 2 で終わると、Claude Code は利用者の指示を止めてしまう
         raise
+    if args.region:
+        os.environ["AWS_REGION"] = os.environ["AWS_DEFAULT_REGION"] = args.region
     if hook:
         # 標準出力は会話に入るので、経過は標準エラーに出す
         out = out or (lambda msg: print(msg, file=sys.stderr, flush=True))

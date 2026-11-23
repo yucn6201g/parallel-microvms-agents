@@ -372,9 +372,10 @@ fi
 # 自動メモリのフック (mvm up --memory): 会話の開始時と指示のたび (60 秒に 1 回まで) に S3 から取得して、
 # 届いたメモリを会話に渡す。メモリを書いたらすぐ送る (async なので会話を待たせない)。
 # 共有しないときは、以前の起動で入れたフックを外す
-jq --arg uri "$MEMORY" --arg dir "$memory_dir" --arg state "$memory_state" --arg name "$NAME" '
+# (エージェントの環境には AWS_REGION が無いことがあるので、リージョンはコマンドに書く)
+jq --arg uri "$MEMORY" --arg dir "$memory_dir" --arg state "$memory_state" --arg name "$NAME" --arg region "$AWS_REGION" '
   def cmd(ev; extra): "python3 /opt/pmva/memsync.py hook " + ev + " --dir " + ($dir | @sh) + " --uri " + ($uri | @sh)
-                      + " --state " + ($state | @sh) + " --origin " + ($name | @sh) + extra;
+                      + " --state " + ($state | @sh) + " --origin " + ($name | @sh) + " --region " + ($region | @sh) + extra;
   def strip(ev): .hooks[ev] = [(.hooks[ev] // [])[] | select([.hooks[]?.command? // "" | contains("/opt/pmva/memsync.py")] | any | not)]
                  | if .hooks[ev] == [] then del(.hooks[ev]) else . end;
   def add(ev; entry): .hooks[ev] = (.hooks[ev] // []) + [entry];

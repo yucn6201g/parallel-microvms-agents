@@ -10,10 +10,12 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "image"))
@@ -855,6 +857,32 @@ class HookTest(MemsyncTestCase):
         os.utime(str(lock), (0, 0))      # 古いロック (同期の途中で落ちた) は奪う
         self.assertIn("a.md", self.context(memsync.run_hook("prompt", self.sync(), "{}", now=time.time, lock_wait=0.2)))
         self.assertFalse(lock.exists())
+
+    def test_cli_hook_sets_region(self):
+        # VM のエージェントの環境には AWS_REGION が無いことがあるので、フックのコマンドで渡す
+        seen = []
+
+        def runner(args):
+            seen.append((os.environ.get("AWS_REGION"), os.environ.get("AWS_DEFAULT_REGION")))
+            return self.s3(args)
+        args = ["hook", "prompt", "--region", "ap-northeast-1", "--dir", str(self.dir), "--uri", URI, "--state", str(self.state)]
+        with mock.patch.dict(os.environ, {}, clear=False), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            os.environ.pop("AWS_REGION", None)
+            self.assertEqual(memsync.main(args, runner=runner, stdin=io.StringIO("{}")), 0)
+        self.assertEqual(seen[0], ("ap-northeast-1", "ap-northeast-1"))
+
+    def test_push_waits_longer_for_the_lock(self):
+        # 送信は飛ばすと次に書くまで送られないので、取得より長く待つ
+        self.write("a.md", "a\n")
+        lock = Path(str(self.state) + ".lock")
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.write_text("other", encoding="utf-8")
+        timer = threading.Timer(0.5, lock.unlink)
+        timer.start()
+        self.addCleanup(timer.cancel)
+        event = json.dumps({"tool_input": {"file_path": str(self.dir / "a.md")}})
+        self.assertEqual(memsync.run_hook("post-tool", self.sync(), event, now=lambda: self.now, lock_wait=0.2), "")
+        self.assertEqual(self.s3.get("a.md"), b"a\n")
 
     def test_cli_hook_writes_only_the_hook_response_to_stdout(self):
         self.s3.put("a.md", "a\n")

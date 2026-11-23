@@ -749,7 +749,8 @@ class CliTest(unittest.TestCase):
         repo, mem = self.memory_repo()
         settings_path = repo / ".claude" / "settings.local.json"
         settings = json.loads(settings_path.read_text(encoding="utf-8"))
-        mine = {"hooks": [{"type": "command", "command": "echo mine"}]}
+        # 「memory hook」を含む利用者自身のフックも残す
+        mine = {"hooks": [{"type": "command", "command": "echo mine; echo memory hook done"}]}
         settings["hooks"] = {"PostToolUse": [mine]}
         settings_path.write_text(json.dumps(settings), encoding="utf-8")
         for _ in range(2):          # 入れ直しても重複しない
@@ -759,7 +760,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(data["autoMemoryDirectory"], str(mem), "ほかの設定は残す")
         hooks = data["hooks"]
         self.assertEqual(hooks["PostToolUse"][0], mine, "利用者のフックは残す")
-        commands = {ev: [h["command"] for e in hooks[ev] for h in e["hooks"] if "memory hook" in h["command"]]
+        commands = {ev: [h["command"] for e in hooks[ev] for h in e["hooks"] if "mvm.py" in h["command"]]
                     for ev in ("SessionStart", "UserPromptSubmit", "PostToolUse")}
         self.assertEqual({ev: len(c) for ev, c in commands.items()},
                          {"SessionStart": 1, "UserPromptSubmit": 1, "PostToolUse": 1})
@@ -773,6 +774,9 @@ class CliTest(unittest.TestCase):
         data = json.loads(settings_path.read_text(encoding="utf-8"))
         self.assertEqual(data["hooks"], {"PostToolUse": [mine]})
         self.assertEqual(data["autoMemoryDirectory"], str(mem))
+        settings_path.unlink()          # 設定が無いときに外しても、ファイルを作らない
+        self.mvm("memory", "uninstall-hooks", "--dir", str(repo))
+        self.assertFalse(settings_path.exists())
         settings_path.write_text("{broken", encoding="utf-8")
         rc, _, err = self.mvm("memory", "install-hooks", "--dir", str(repo), check=False)
         self.assertNotEqual(rc, 0)

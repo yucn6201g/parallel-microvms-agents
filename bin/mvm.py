@@ -2980,12 +2980,12 @@ def cmd_memory(args):
     return rc
 
 
-MEMORY_HOOK_MARK = "memory hook "      # mvm memory install-hooks が入れたフックの印 (コマンドに含まれる)
+MEMORY_HOOK_MARK = '/mvm.py" memory hook '    # mvm memory install-hooks が入れたフックの印 (コマンドに含まれる)
 
 
 def memory_hook_entries():
     """手元の Claude Code に入れるフック (イベント → 設定の 1 項目)。Windows でも Git Bash で動くよう / 区切りにする。"""
-    base = f'"{Path(sys.executable).as_posix()}" "{(ROOT / "bin" / "mvm.py").as_posix()}" {MEMORY_HOOK_MARK}'
+    base = f'"{Path(sys.executable).as_posix()}" "{(ROOT / "bin").as_posix()}{MEMORY_HOOK_MARK}'
     return {
         "SessionStart": {"hooks": [{"type": "command", "command": base + "session-start", "timeout": 60}]},
         "UserPromptSubmit": {"hooks": [{"type": "command", "command": base + "prompt --min-interval 60", "timeout": 30}]},
@@ -3008,6 +3008,9 @@ def cmd_memory_hooks(args, install):
         die(str(e))
     path = top / ".claude" / "settings.local.json"
     data = {}
+    if not install and not path.is_file():
+        log(f"{path} がないので、外すフックはありません")
+        return 0
     if path.is_file():
         try:
             data = json.loads(path.read_text(encoding="utf-8"))

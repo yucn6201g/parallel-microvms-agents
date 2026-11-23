@@ -632,6 +632,7 @@ class SupervisorTest(unittest.TestCase):
             self.assertEqual(argv[:4], ["python3", "/opt/pmva/memsync.py", "hook", name])
             self.assertEqual(argv[argv.index("--uri") + 1], uri)
             self.assertEqual(argv[argv.index("--origin") + 1], "mem-1")
+            self.assertIn("--region", argv, "エージェントの環境に AWS_REGION が無くても動くように")
             self.assertEqual(argv[argv.index("--state") + 1], str(self.home / ".claude" / "pmva-memory.state.json"))
         self.assertIn("--min-interval", prompt["command"])
         self.assertTrue(post["async"])
