@@ -261,11 +261,14 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 ## J. 自動メモリの共有 (2026-11-23)
 
 - [x] `mvm memory` の 3 者比較、`MEMORY.md` の行のマージ、送らないもの (`share: false`、認証情報らしい文字列、1MB 超)、`--dry-run` / `--force`、repo-id の正規化とメモリのフォルダの解決: 自動テスト (`tests/test_memsync.py`、`tests/test_mvm.py`。AWS は `tests/aws_stub.py` の代わり)
-- [ ] VM で `bootstrap.sh` が `autoMemoryDirectory` を設定して `memsync.py pull` し、起動した Claude Code が取得したメモリを読むこと (`/memory` に出ること、手元で書いた内容を踏まえて答えること): 未確認 (実機のイメージが要る)
-- [ ] `snapshot.sh` (定期保存と `mvm stop`) が `memsync.py push` で VM で書いたメモリを S3 に送り、手元で `mvm memory pull` して読めること。送れなくても保存が続くこと: 未確認
-- [ ] `mvm infra deploy` で実行ロール (`memory/*` の Get / Put、`ListBucket` の `memory/*`) を更新した後に、VM から取得・送信できること。更新前は AccessDenied の案内が出て、起動は止まらないこと: 未確認
-- [ ] `mvm renew` / `--restore latest` で復元した VM が、`~/.claude/pmva-memory` と状態ファイルの復元後に、手元の変更だけを取得すること: 未確認
-- [ ] S3 の ETag が MD5 と一致すること (バケットが SSE-S3 の単一 PUT)。一致しないと毎回「S3 が新しい」と判定される: 未確認
+- [x] VM で `bootstrap.sh` が `autoMemoryDirectory` を設定して `memsync.py pull` し、起動した Claude Code が取得したメモリを読むこと: 2026-11-23 に実機で確認 (イメージ 7.0、Claude Code の oauth-token)。手元から `mvm memory push` した 10 件と `MEMORY.md` が `~/.claude/pmva-memory/` に置かれ、`~/.claude/settings.json` の `autoMemoryDirectory` がそこを指した。`mvm up --memory --prompt` で「ファイルを調べずにメモリだけで答えて」と聞くと、手元で書いたマージの決まりと Linux のテストの動かし方を索引から答えた
+- [ ] 同上のうち、VM の Claude Code の `/memory` に取得したメモリが出ること: 未確認 (画面を開いていない)
+- [x] `snapshot.sh` (`mvm save` / `mvm stop`) が `memsync.py push` で VM で書いたメモリを S3 に送り、手元で `mvm memory pull` して読めること: 2026-11-23 に実機で確認。VM の Claude に覚えさせた 1 件が `mvm save` で送られ (索引の 1 行も)、手元の `pull` で取得 1・索引に 1 行追加。中身は UTF-8 / LF のまま
+- [ ] 同上のうち、送れなくても保存が続くこと: 未確認 (送信を失敗させる状況を実機で作っていない。自動テストのみ)
+- [x] `mvm infra deploy` で実行ロール (`memory/*` の Get / Put、`ListBucket` の `memory/*`) を更新した後に、VM から取得・送信できること: 2026-11-23 に確認。ポリシー `pmva-microvm-runtime` に `SharedAgentMemory` と `memory/*` の一覧が入り、上の取得・送信が通った
+- [ ] 同上のうち、更新前は AccessDenied の案内が出て、起動は止まらないこと: 未確認 (確認の前にスタックを更新したため)
+- [x] `mvm renew` で復元した VM が、`~/.claude/pmva-memory` と状態ファイルの復元後に、手元の変更だけを取得すること: 2026-11-23 に確認。手元で 1 件に追記して `push` した後に `renew` すると、新しい VM ではその 1 件だけが書き直され (ほかは復元時の更新時刻のまま)、追記が届いた。`renew` の保存時の送信は「S3 のほうが新しい」として VM の古い内容で上書きしなかった。`--restore latest` は `renew` と同じ復元の経路のため個別には試していない
+- [x] S3 の ETag が MD5 と一致すること (バケットが SSE-S3 の単一 PUT): 2026-11-23 に確認。`head-object` の ETag と、手元のファイルを LF にそろえた MD5 が一致 (`ServerSideEncryption` は `AES256`)。`push` 直後の `status` もすべて「同期済み」
 
 ## 結果
 
