@@ -132,7 +132,7 @@ Claude Code の自動メモリ (1 件 1 ファイルの `*.md` と索引 `MEMORY
 - **S3 の配置**: `s3://<バケット>/memory/<repo-id>/<名前>.md`。`<repo-id>` は origin の URL を `host/owner/name` (小文字、`.git` と認証情報なし) にしたもの。同じリポジトリなら、PC も VM も同じ場所を指します
 - **手元**: `mvm memory pull|push|sync` が、Claude Code の自動メモリのフォルダと S3 を同期します。最後に同期した内容 (`.state/memory/`) を基準にした 3 者比較で、競合は `--force` で解きます。`MEMORY.md` は行の和集合でマージします。削除は伝えません
 - **VM**: `mvm up` (`MEMORY_SYNC=true` か `--memory`、`--repo` 付き) は `runHookPayload` の `memory` に S3 の場所を入れます。`bootstrap.sh` が `~/.claude/settings.json` の `autoMemoryDirectory` を `~/.claude/pmva-memory` にして、clone の後に `memsync.py pull` します。`snapshot.sh` が、ワークスペースの保存の前に `memsync.py push` します (失敗しても保存は続けます)。同期の状態ファイルは、メモリと一緒にスナップショットで戻るよう `~/.claude/pmva-memory.state.json` に置き、メモリのフォルダの中には置きません (Claude Code が読んでしまうため)
-- **実行ロール**: `memory/*` の `s3:GetObject` / `s3:PutObject` と、`s3:ListBucket` (`memory/*`)。`s3:DeleteObject` は付けません
+- **実行ロール**: `memory/*` の `s3:GetObject` / `s3:PutObject` と、`s3:ListBucket` (`memory/*`)。`s3:DeleteObject` は付けません (VM のエージェントが共有のメモリを消せないように)。消すのは手元の操作用ポリシー (`memory/*` の `s3:DeleteObject`) だけです
 - 認証情報らしい文字列を含むファイル、`share: false` のファイル、1MB を超えるファイルは送りません
 
 ### 推論の過程を手元で見る (`mvm follow`)

@@ -414,6 +414,12 @@ Resources:
             Resource:
               - !GetAtt ArtifactBucket.Arn
               - !Sub "${ArtifactBucket.Arn}/*"
+          # 共有の自動メモリから間違った記憶を消す (mvm memory は削除を伝えないので、aws s3 rm で直接消す)。
+          # VM の実行ロールには付けない
+          - Sid: DeleteSharedMemory
+            Effect: Allow
+            Action: s3:DeleteObject
+            Resource: !Sub "${ArtifactBucket.Arn}/memory/*"
           - Sid: ManageAgentSecrets
             Effect: Allow
             Action:
