@@ -36,6 +36,11 @@ def without_comment_lines(text):
     return "\n".join(l for l in text.splitlines() if not l.strip().startswith("#")).rstrip()
 
 
+def policy_statements(text):
+    """ポリシーのリソース定義のテキストを、`- Sid:` ごとの文に分ける (コメント行は除く)。"""
+    return re.split(r"\n\s*- Sid:", without_comment_lines(text))[1:]
+
+
 class TemplateTest(unittest.TestCase):
     def setUp(self):
         self.full, self.minimal = sections(FULL), sections(MINIMAL)
@@ -54,6 +59,20 @@ class TemplateTest(unittest.TestCase):
         missing = [n for n in self.full["Resources"] if n not in self.minimal["Resources"]
                    and not n.startswith(OPTIONAL_PREFIXES)]
         self.assertEqual(missing, [], "標準にだけある必須リソース")
+
+    def test_operator_can_delete_shared_memory(self):
+        # docs/commands.md の memory は「S3 から消したいときは aws s3 rm で直接消す」と案内している。
+        # 日常の操作用ポリシーだけで消せないと、間違ったメモリを消すのに管理者の権限が要る
+        for path, tmpl in ((FULL, self.full), (MINIMAL, self.minimal)):
+            statements = policy_statements(tmpl["Resources"]["OperatorPolicy"])
+            self.assertTrue(any("s3:DeleteObject" in s and "/memory/*" in s for s in statements),
+                            f"{path.name}: 操作用ポリシーで memory/* を消せない")
+
+    def test_microvm_cannot_delete_shared_memory(self):
+        # VM の中のエージェントが共有のメモリを消せないようにする (削除は伝えない設計)
+        for path, tmpl in ((FULL, self.full), (MINIMAL, self.minimal)):
+            body = without_comment_lines(tmpl["Resources"]["RuntimePolicy"])
+            self.assertNotIn("DeleteObject", body, f"{path.name}: 実行時ポリシーに削除の権限がある")
 
     def test_same_outputs_and_parameters(self):
         self.assertEqual(self.minimal["Outputs"], self.full["Outputs"], "mvm が読む出力は両方で同じにする")

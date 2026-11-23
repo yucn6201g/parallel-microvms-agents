@@ -6,7 +6,7 @@
 
 ### 追加
 
-- Claude Code の自動メモリ (Claude が覚えたこと) を、手元の PC と MicroVM で共有する。`mvm memory status|pull|push|sync` で手元と S3 (`memory/<repo-id>/`) を同期し、`config.env` の `MEMORY_SYNC=true` (または `mvm up --memory`) で、`--repo` 付きの VM が起動時に取得し、定期保存のときに送る。最後に同期した内容を基準に比べ、競合は `--force` で解く。`MEMORY.md` は行の和集合でマージする。frontmatter に `share: false` と書いたファイル、認証情報らしい文字列を含むファイル、1MB を超えるファイルは送らない。削除は伝えない。実行ロールに `memory/*` の読み書きを追加 (`mvm infra deploy` が必要)。VM の中の動き (取得と送信) は実機で未確認 ([docs/poc-checklist.md](docs/poc-checklist.md))
+- Claude Code の自動メモリ (Claude が覚えたこと) を、手元の PC と MicroVM で共有する。`mvm memory status|pull|push|sync` で手元と S3 (`memory/<repo-id>/`) を同期し、`config.env` の `MEMORY_SYNC=true` (または `mvm up --memory`) で、`--repo` 付きの VM が起動時に取得し、定期保存のときに送る。最後に同期した内容を基準に比べ、競合は `--force` で解く。`MEMORY.md` は行の和集合でマージする。frontmatter に `share: false` と書いたファイル、認証情報らしい文字列を含むファイル、1MB を超えるファイルは送らない。削除は伝えない。実行ロールに `memory/*` の読み書きを、操作用ポリシーに `memory/*` の削除 (間違ったメモリを `aws s3 rm` で消すため) を追加 (`mvm infra deploy` が必要)。VM の中の動き (取得と送信) は実機で未確認 ([docs/poc-checklist.md](docs/poc-checklist.md))
 - `mvm image prune [--keep N] [--yes]`: イメージの古いバージョンだけを削除する。`build` のたびに増える版は自動では消えず、1 版 (約 2.3GB) ごとに約 $0.22/月の保存料金がかかっていた。既定では最新の ACTIVE 版を含めて 2 版を残し、ビルド中の版と起動中の VM が使っている版は消さない
 - 最小構成の CloudFormation テンプレート `infra/cloudformation-minimal.yaml`。`config.env` の `INFRA_TEMPLATE=minimal` で、キープアライブ・毎晩の自動停止・予算アラートを作らずに使える
 - `mvm wait`: エージェントの応答が終わるか、許可・入力待ちになるまで待つ (`--timeout`、`--any`、`--json`)。エージェントの状態 (作業中・完了・入力待ち・終了など) は、VM の中でエージェントのフックが記録する
