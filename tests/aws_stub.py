@@ -39,6 +39,12 @@ cmd = " ".join(a[:2])
 if a[:1] == ["--version"]:
     print("aws-cli/stub")
     sys.exit(0)
+# PMVA_STUB_ERROR: AWS CLI のエラー文 (認証切れ、権限なし、通信エラーなど)。PMVA_STUB_ERROR_CMDS
+# (「s3api head-object,secretsmanager describe-secret」の形) が空なら全部の呼び出しを、あればそれだけを失敗させる
+if os.environ.get("PMVA_STUB_ERROR"):
+    only = [c for c in os.environ.get("PMVA_STUB_ERROR_CMDS", "").split(",") if c]
+    if not only or cmd in only:
+        fail(os.environ["PMVA_STUB_ERROR"])
 if cmd == "sts get-caller-identity":
     out({"Account": "123456789012", "Arn": os.environ.get("PMVA_STUB_ARN", "arn:aws:iam::123456789012:user/test")})
 if a[:1] == ["iam"]:  # PMVA_STUB_IAM=admin で管理者、denied で権限なし

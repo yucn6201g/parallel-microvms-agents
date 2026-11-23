@@ -261,6 +261,7 @@ def stack_output(key):
     if not cache.exists():
         r = aws("cloudformation", "describe-stacks", "--stack-name", C["STACK_NAME"], check=False)
         if not r:
+            die_unless_not_found(f"スタック {C['STACK_NAME']} ")
             die(f"スタック {C['STACK_NAME']} が見つかりません。先に mvm infra deploy を実行してください")
         cache.write_text(json.dumps(r["Stacks"][0].get("Outputs", [])), encoding="utf-8")
     for o in json.loads(cache.read_text(encoding="utf-8")):
@@ -296,7 +297,10 @@ def check_memory_quota(running, adding):
 
 
 def find_image_arn():
-    r = lmv("list-microvm-images", "--name-filter", C["IMAGE_NAME"], check=False) or {}
+    r = lmv("list-microvm-images", "--name-filter", C["IMAGE_NAME"], check=False)
+    if r is None:   # 一覧を取れなかった (認証切れなど)。「イメージが無い」とは区別する
+        die_unless_not_found(f"イメージ {C['IMAGE_NAME']} ")
+        r = {}
     for item in r.get("items", []):
         if item.get("name") == C["IMAGE_NAME"]:
             return item["imageArn"]
@@ -341,7 +345,7 @@ def aws_error_hint(err):
         return ("AWS の認証情報が見つからないか無効です → AWS_PROFILE (config.env または環境変数) とプロファイルの設定を確かめ、"
                 "mvm doctor で確かめてください")
     if "AccessDenied" in err or "not authorized" in err:
-        return "VM の状態を見る権限がありません → 使っているプロファイルが正しいかを mvm doctor で確かめてください"
+        return "この操作の権限がありません → 使っているプロファイルが正しいかを mvm doctor で確かめてください"
     if any(m in err for m in AWS_NETWORK):
         return "AWS に接続できません → ネットワーク (プロキシ、VPN) を確かめてください"
     if any(m in err for m in THROTTLE_MARKERS):
@@ -349,6 +353,27 @@ def aws_error_hint(err):
     lines = [x.strip() for x in err.splitlines() if x.strip()]
     first = lines[0][:160] if lines else "AWS から状態を取得できませんでした"
     return f"{first} → mvm doctor で AWS の設定を確かめてください"
+
+
+# 「その名前のものは無い」ことを表すエラー文 (Secrets Manager / Lambda、CloudFormation、S3 の head-object)
+AWS_NOT_FOUND = ("ResourceNotFound", "does not exist", "(404)", "NoSuchKey", "NoSuchBucket")
+
+
+def aws_not_found(err):
+    """check=False の呼び出しの失敗が「無い」ためか。認証切れ・権限・通信の失敗は「無い」に含めない。"""
+    if any(m in err for m in AWS_AUTH_EXPIRED + AWS_AUTH_MISSING + AWS_NETWORK):
+        return False
+    return any(m in err for m in AWS_NOT_FOUND)
+
+
+def die_unless_not_found(what):
+    """check=False の呼び出しが失敗した直後に呼ぶ。「無い」ためなら戻り、それ以外なら理由と次にやることを出して終わる。
+
+    認証切れなどを「無い」と取り違えると、要らない作り直し (infra deploy、image build) を案内してしまうため。
+    """
+    err = last_aws_error()
+    if not aws_not_found(err):
+        die(f"{what}を AWS に問い合わせられませんでした: {aws_error_hint(err)}")
 
 
 _state_errors = {}   # vm_state が UNKNOWN を返したときの理由 (名前 → aws_error_hint の結果)
@@ -851,6 +876,8 @@ def infra_findings():
     stack = C["STACK_NAME"]
     r = aws("cloudformation", "describe-stacks", "--stack-name", stack, check=False)
     if not r:
+        if not aws_not_found(last_aws_error()):
+            return [f"  NG   AWS の構成 (スタック {stack}) を確かめられません: {aws_error_hint(last_aws_error())}"]
         return [f"  NG   AWS の構成 (スタック {stack}) がありません。mvm infra deploy を実行してください (管理者の権限が必要)"]
     info = r["Stacks"][0]
     lines = []
@@ -944,6 +971,8 @@ def auth_findings():
     for name, kind, setting, why in secrets:
         if aws("secretsmanager", "describe-secret", "--secret-id", name, check=False):
             lines.append(f"  ok   シークレット {name} ({setting})")
+        elif not aws_not_found(last_aws_error()):
+            lines.append(f"  !!   {why} のシークレット {name} を確かめられません: {aws_error_hint(last_aws_error())}")
         else:
             lines.append(f"  !!   {why} のシークレット {name} がありません。mvm secret set {kind} で登録してください")
     return lines
@@ -1704,6 +1733,7 @@ def build_payload(name, a):
         check_profile_name(profile)
         profile_uri = f"s3://{bucket}/{PROFILE_PREFIX}{profile}.tar.gz"
         if not aws("s3api", "head-object", "--bucket", bucket, "--key", f"{PROFILE_PREFIX}{profile}.tar.gz", check=False):
+            die_unless_not_found(f"設定のまとまり {profile} ")
             die(f"設定のまとまり {profile} がまだありません。mvm profile push --name {profile} で送ってください "
                 "(使わないなら --no-profile)")
     ssh_key = read_ssh_public_key()
