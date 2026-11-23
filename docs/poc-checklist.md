@@ -279,7 +279,7 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 - [x] 手元で `install-hooks` した会話に、VM が書いたメモリが次の指示のときに届くこと (UserPromptSubmit の `additionalContext`): 2026-11-23 に確認。手元の `claude -p --input-format stream-json` で会話を開いたまま VM に書かせ、60 秒の間引きを越えてから次の指示で「ツールを使わずに、届いたメモリのファイル名と合言葉を答えて」と聞くと、両方を答えた。手元のメモリのフォルダにもファイルと索引の行が置かれた。対話の画面 (`claude` を端末で開いた会話) では試していない
 - [x] 逆向き (手元で書いたら送り、VM の会話に次の指示で届く): 2026-11-23 に確認。手元の `claude -p` に同じメモリへ 1 行追記させると 1 秒ほどで S3 に届き、VM の会話で次の指示を送ると、追記の合言葉を答えた
 - [x] Windows の手元で、フックが `"<python.exe>" "<mvm.py>" memory hook ...` を動かせること: 2026-11-23 に確認 (Windows 11、Claude Code 2.1.220、Python 3.14)。SessionStart のフックが終了コード 0 で「取得 0、送信 0、…」を返し、上の UserPromptSubmit・PostToolUse も動いた
-- [ ] `mvm up --claude-args "--dangerously-skip-permissions"` で起動した Claude Code が、確認画面で止まらずに指示を受けられること: 未対応。2026-11-23 の確認中に、許可を省くことの確認画面 (既定は「No, exit」) で止まり、`mvm send` の Enter で終了することを見つけた (フックとは別の不具合)
+- 確認中に見つけた別の不具合: `mvm up --claude-args "--dangerously-skip-permissions"` で起動すると、Claude Code が許可を省くことの確認画面 (既定は「No, exit」) で止まり、`mvm send` の Enter で終了した。#64 で修正済み (実機での確認は C 節の項目)
 
 ## 結果
 
