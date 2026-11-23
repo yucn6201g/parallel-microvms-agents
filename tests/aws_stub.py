@@ -190,12 +190,31 @@ if cmd == "cloudformation describe-stack-resources":  # 依存関係の順に 1 
                              "ResourceType": "AWS::Lambda::Function" if "Function" in u else "AWS::Lambda::Permission",
                              "ResourceStatus": "DELETE_FAILED"} for u in pending[:1]]})
 # s3 cp (手元 → S3) は s3/<バケット>/<キー> に置き、s3api head-object はそこを見る
-paths = [x for x in a[2:] if not x.startswith("--")]
+paths = [x for i, x in enumerate(a[2:], start=2) if not x.startswith("--") and a[i - 1] != "--metadata"]
 if cmd == "s3 cp" and len(paths) == 2 and paths[1].startswith("s3://"):
     dest = D / "s3" / paths[1][len("s3://"):]
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(Path(paths[0]).read_bytes())
+    if opt("--metadata"):   # --metadata pmva-origin=x は <キー>.metadata に書く (オブジェクトとは別のファイル)
+        Path(str(dest) + ".metadata").write_text(opt("--metadata"), encoding="utf-8")
     sys.exit(0)
+if cmd == "s3 cp" and len(paths) == 2 and paths[0].startswith("s3://"):   # S3 → 手元
+    src = D / "s3" / paths[0][len("s3://"):]
+    if not src.is_file():
+        fail("An error occurred (404) when calling the HeadObject operation: Key \"%s\" does not exist" % paths[0])
+    Path(paths[1]).write_bytes(src.read_bytes())
+    sys.exit(0)
+if cmd == "s3api list-objects-v2":   # s3/<バケット>/ の下のうち、--prefix で始まるキー。ETag は中身の MD5 (PMVA_STUB_ETAG_<名前> で上書き)
+    import hashlib
+    root = D / "s3" / opt("--bucket")
+    prefix = opt("--prefix") or ""
+    contents = []
+    for f in sorted(root.rglob("*")) if root.exists() else []:
+        key = f.relative_to(root).as_posix()
+        if f.is_file() and key.startswith(prefix) and not key.endswith(".metadata"):
+            etag = os.environ.get("PMVA_STUB_ETAG_" + key.rsplit("/", 1)[-1].replace(".", "_").replace("-", "_"))                 or hashlib.md5(f.read_bytes()).hexdigest()
+            contents.append({"Key": key, "ETag": '"%s"' % etag, "Size": f.stat().st_size})
+    out({"Contents": contents} if contents else {})
 if cmd == "s3api head-object":
     obj = D / "s3" / opt("--bucket") / opt("--key")
     if obj.exists():

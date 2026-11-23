@@ -32,7 +32,7 @@ Claude Code / Codex を AWS Lambda MicroVMs 上で並列に動かし、手元の
 python -m unittest discover -s tests -v
 shellcheck -S warning bin/mvm scripts/install.sh image/bootstrap.sh image/snapshot.sh image/notify.sh image/agent-attach image/pmva-node
 cfn-lint infra/cloudformation.yaml infra/cloudformation-minimal.yaml
-python -m py_compile bin/mvm.py image/supervisor.py scripts/estimate_cost.py scripts/orchestrator_guard.py tests/*.py
+python -m py_compile bin/mvm.py image/supervisor.py image/memsync.py scripts/estimate_cost.py scripts/orchestrator_guard.py tests/*.py
 ```
 
 - `tests/test_supervisor.py` は Linux で `tmux` と `jq` があるときだけ動く

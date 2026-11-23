@@ -14,6 +14,7 @@ import collections
 import errno
 import getpass
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -64,7 +65,7 @@ DEFAULTS = {
     "BEDROCK_REGION": "", "CLAUDE_MODEL": "", "USE_GITHUB_TOKEN": "true", "ENABLE_BEDROCK": "true",
     "GIT_USER_NAME": "", "GIT_USER_EMAIL": "", "SSH_PUBLIC_KEY_FILE": "~/.ssh/id_ed25519.pub",
     "BUDGET_MONTHLY_USD": "0", "BUDGET_EMAIL": "", "KEEPALIVE_RATE_MINUTES": "5", "KEEPALIVE_ACTIVE_SECONDS": "900",
-    "NOTIFY_WEBHOOK": "false", "NIGHTLY_STOP_TIME": "", "NIGHTLY_STOP_TIMEZONE": "Asia/Tokyo",
+    "NOTIFY_WEBHOOK": "false", "MEMORY_SYNC": "false", "NIGHTLY_STOP_TIME": "", "NIGHTLY_STOP_TIMEZONE": "Asia/Tokyo",
     "INFRA_TEMPLATE": "full", "SETUP_TIMEOUT_SECONDS": "1800", "IMAGE_BROWSER_DEPS": "true", "IMAGE_EXTRA_PACKAGES": "",
     "PROFILE": "", "ANTHROPIC_AWS_WORKSPACE_ID": "", "ANTHROPIC_AWS_REGION": "", "ENABLE_ANTHROPIC_AWS": "false",
 }
@@ -1379,7 +1380,7 @@ def build_artifact_zip(dest):
     """image/ を zip にする。Windows で clone した場合に備え、改行を LF に、実行権限を付けて格納する。
     Dockerfile の一部の ARG は config.env の値に書き換える (Lambda MicroVMs のビルドには引数を渡せないため)。"""
     src = ROOT / "image"
-    executables = {"supervisor.py", "bootstrap.sh", "snapshot.sh", "notify.sh", "agent-attach", "pmva-node"}
+    executables = {"supervisor.py", "bootstrap.sh", "snapshot.sh", "notify.sh", "memsync.py", "agent-attach", "pmva-node"}
     build_args = image_build_args()
     with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
         for p in sorted(src.rglob("*")):
@@ -1727,6 +1728,16 @@ def build_payload(name, a):
     branch = a.branch or (f"pmva/{name}" if a.repo else "")
     bucket = stack_output("ArtifactBucketName")
     restore = f"s3://{bucket}/workspaces/{name}/latest.tar.gz" if a.restore == "latest" else (a.restore or "")
+    memory_uri = ""
+    if as_bool(C["MEMORY_SYNC"]) if getattr(a, "memory", None) is None else a.memory:
+        if not a.repo:
+            log("--repo が無いのでメモリは共有しません")
+        else:
+            ms = load_memsync()
+            try:
+                memory_uri = f"s3://{bucket}/memory/{ms.normalize_repo_id(a.repo)}/"
+            except ms.MemsyncError as e:
+                log(f"メモリは共有しません: {e}")
     profile = "" if a.no_profile else (a.profile or C["PROFILE"])
     profile_uri = ""
     if profile:
@@ -1752,7 +1763,7 @@ def build_payload(name, a):
         "notifySecret": f"{prefix}/notify-webhook" if notify else "",
         "setupTimeoutSeconds": int(C["SETUP_TIMEOUT_SECONDS"]),
         "skipSetup": "true" if a.no_setup else "",
-        "profile": profile_uri,
+        "profile": profile_uri, "memory": memory_uri,
         **anthropic_aws,
     }
     return {k: v for k, v in payload.items() if v != ""}
@@ -2909,6 +2920,58 @@ def cmd_logs(args):
         return 0
 
 
+# ---------------------------------------------------------------- 自動メモリの共有 (image/memsync.py)
+
+_memsync = []
+
+
+def load_memsync():
+    """VM と共通の実装 image/memsync.py を読み込む (mvm は常にリポジトリのチェックアウトから動く)。"""
+    if not _memsync:
+        path = ROOT / "image" / "memsync.py"
+        spec = importlib.util.spec_from_file_location("pmva_memsync", str(path))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _memsync.append(module)
+    return _memsync[0]
+
+
+def memory_aws_runner(args):
+    """memsync が使う AWS CLI の実行関数 (mvm の認証・リージョンの設定で動かす)。"""
+    for attempt in range(4):
+        p = subprocess.run([aws_bin(), *args], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           env=aws_env())
+        if p.returncode == 0 or attempt == 3 or not any(m in p.stderr for m in THROTTLE_MARKERS):
+            break
+        time.sleep(2 ** attempt)
+    return p.returncode, p.stdout, p.stderr
+
+
+def cmd_memory(args):
+    ms = load_memsync()
+    directory = Path(args.dir) if args.dir else Path.cwd()
+    try:
+        repo_id = ms.normalize_repo_id(ms.git_remote_url(directory))
+        memory_dir = ms.resolve_memory_dir(directory)
+        uri = f"s3://{stack_output('ArtifactBucketName')}/memory/{repo_id}/"
+        state = ms.state_file_for(STATE_DIR, repo_id)
+        log(f"メモリのフォルダ: {memory_dir}")
+        log(f"S3: {uri}")
+
+        def run(action):
+            sync = ms.Memsync(memory_dir, uri, state, "local", getattr(args, "dry_run", False), getattr(args, "force", False),
+                              memory_aws_runner)
+            return getattr(sync, action)()
+        rc = 0
+        for action in ("pull", "push") if args.action == "sync" else (args.action,):
+            rc = rc or run(action)
+    except ms.MemsyncError as e:
+        die(str(e))
+    if args.action != "status" and not as_bool(C["MEMORY_SYNC"]):
+        log("mvm up で VM にもメモリを使わせるには、config.env に MEMORY_SYNC=true を書いてください (--memory でも指定できます)")
+    return rc
+
+
 # ---------------------------------------------------------------- 引数
 
 def add_up_options(p):
@@ -2936,6 +2999,9 @@ def add_up_options(p):
     p.add_argument("--notify", dest="notify", action="store_true", default=None,
                    help="完了・入力待ちを <prefix>/notify-webhook の URL に通知する")
     p.add_argument("--no-notify", dest="notify", action="store_false", help="通知しない")
+    p.add_argument("--memory", dest="memory", action="store_true", default=None,
+                   help="Claude Code の自動メモリを手元と共有する (--repo が必要。mvm memory)")
+    p.add_argument("--no-memory", dest="memory", action="store_false", help="メモリを共有しない")
 
 
 def build_parser():
@@ -3042,6 +3108,12 @@ def build_parser():
     x.add_argument("--agent", choices=("claude", "codex", "both"), default="both")
     x.add_argument("--dry-run", action="store_true", help="push で、送るものを表示するだけにする")
     x.set_defaults(func=cmd_profile)
+    x = sub.add_parser("memory", help="Claude Code の自動メモリを S3 経由で MicroVM と共有する (status / pull / push / sync)")
+    x.add_argument("action", choices=("status", "pull", "push", "sync"))
+    x.add_argument("--dir", help="リポジトリのフォルダ (既定は現在のフォルダ)")
+    x.add_argument("--dry-run", action="store_true", help="何も書き換えず、することだけ表示する (status では無視)")
+    x.add_argument("--force", action="store_true", help="競合したとき、pull は S3、push は手元の内容を採用する (status では無視)")
+    x.set_defaults(func=cmd_memory)
     x = sub.add_parser("orchestrator", help="手元の Claude Code / Codex を司令塔にする (MicroVM に作業を任せる skill と設定)")
     x.add_argument("action", choices=("install", "uninstall"))
     x.add_argument("agent", choices=("claude", "codex"))

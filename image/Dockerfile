@@ -108,11 +108,11 @@ RUN arch="$([ "${TARGETARCH:-arm64}" = amd64 ] && echo x86_64 || echo aarch64)" 
 # root が必要な作業は mvm shell (root で入る) から行うか、必要なパッケージをこのイメージに追加する。
 RUN useradd -m -u 1000 -s /bin/bash agent
 
-COPY supervisor.py bootstrap.sh snapshot.sh notify.sh /opt/pmva/
+COPY supervisor.py bootstrap.sh snapshot.sh notify.sh memsync.py /opt/pmva/
 COPY agent-attach pmva-node /usr/local/bin/
 COPY tmux.conf /home/agent/.tmux.conf
 COPY bashrc.pmva /home/agent/.bashrc.pmva
-RUN chmod 0755 /opt/pmva/supervisor.py /opt/pmva/bootstrap.sh /opt/pmva/snapshot.sh /opt/pmva/notify.sh \
+RUN chmod 0755 /opt/pmva/supervisor.py /opt/pmva/bootstrap.sh /opt/pmva/snapshot.sh /opt/pmva/notify.sh /opt/pmva/memsync.py \
       /usr/local/bin/agent-attach /usr/local/bin/pmva-node \
  && echo '[ -f ~/.bashrc.pmva ] && . ~/.bashrc.pmva' >> /home/agent/.bashrc \
  && mkdir -p /home/agent/work /home/agent/.pmva \

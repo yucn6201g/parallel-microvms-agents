@@ -357,6 +357,17 @@ jq 'def pmva(ev; arg):
     | pmva("Stop"; "claude-stop") | pmva("StopFailure"; "claude-stop-failure")
     | pmva("Notification"; "claude-notification")' \
   "$settings" > "$settings.tmp" && mv "$settings.tmp" "$settings"
+# Claude Code の自動メモリを手元と共有する (mvm up --memory)。メモリのフォルダを ~/.claude/pmva-memory にして、
+# S3 から取得する。同期の状態ファイルは、スナップショット (~/.claude を含む) でメモリと一緒に戻るよう ~/.claude に置く
+# (メモリのフォルダの中に置くと Claude Code が読んでしまう)。保存は snapshot.sh が行う
+MEMORY="$(j .memory)"
+if [ -n "$MEMORY" ]; then
+  log "shared memory: $MEMORY"
+  memory_dir="$HOME/.claude/pmva-memory"
+  mkdir -p "$memory_dir"
+  jq --arg d "$memory_dir" '.autoMemoryDirectory = $d' "$settings" > "$settings.tmp" && mv "$settings.tmp" "$settings"
+  python3 /opt/pmva/memsync.py pull --dir "$memory_dir" --uri "$MEMORY" --state "$HOME/.claude/pmva-memory.state.json" --origin "$NAME" || warn "memory pull failed: $MEMORY"
+fi
 # Codex: notify はトップレベルのキーなので、テーブル ([projects...]) より前に置く
 codex_cfg="$HOME/.codex/config.toml"
 if ! grep -q '^notify *=' "$codex_cfg" 2>/dev/null; then

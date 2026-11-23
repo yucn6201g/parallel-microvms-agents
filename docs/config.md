@@ -71,6 +71,7 @@
 | `CLAUDE_MODEL` | (空) | Claude のモデル / Bedrock の推論プロファイル ID。空ならエージェントの既定 |
 | `USE_GITHUB_TOKEN` | `true` | `<PMVA_PREFIX>/github-token` を clone / push に使う。トークンを登録していないなら `false` にする (登録しないまま `true` だと初期化が失敗する) |
 | `NOTIFY_WEBHOOK` | `false` | `true` で、応答の完了・入力待ちを `<PMVA_PREFIX>/notify-webhook` の URL に通知する |
+| `MEMORY_SYNC` | `false` | `true` で、`--repo` 付きで起動した VM が Claude Code の自動メモリを手元と共有する (起動時に S3 から取得し、定期保存のときに送る。[`mvm memory`](commands.md#memory))。`mvm infra deploy` で実行ロールの更新が要る。`mvm up --memory` / `--no-memory` で 1 台ごとに変えられる |
 
 ## Git と SSH
 

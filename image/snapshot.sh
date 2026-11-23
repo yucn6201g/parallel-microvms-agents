@@ -16,6 +16,12 @@ REGION="$(jq -r '.region // empty' "$SESSION")"
 [ -n "$BUCKET" ] && [ -n "$NAME" ] || { echo "snapshot disabled; skip"; exit 0; }
 export AWS_REGION="$REGION" AWS_DEFAULT_REGION="$REGION"
 
+# 共有しているメモリ (mvm up --memory) を S3 に送る。失敗しても保存は続ける
+MEMORY="$(jq -r '.memory // empty' "$SESSION")"
+if [ -n "$MEMORY" ] && [ -d "$HOME/.claude/pmva-memory" ]; then
+  python3 /opt/pmva/memsync.py push --dir "$HOME/.claude/pmva-memory" --uri "$MEMORY" --state "$HOME/.claude/pmva-memory.state.json" --origin "$NAME" || echo "warning: memory push failed: $MEMORY"
+fi
+
 paths=()
 for p in work .claude .codex; do
   [ -e "$HOME/$p" ] && paths+=("$p")
