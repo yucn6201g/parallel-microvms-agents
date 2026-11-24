@@ -284,6 +284,14 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 - [x] Windows の手元で、フックが `"<python.exe>" "<mvm.py>" memory hook ...` を動かせること: 2026-11-23 に確認 (Windows 11、Claude Code 2.1.220、Python 3.14)。SessionStart のフックが終了コード 0 で「取得 0、送信 0、…」を返し、上の UserPromptSubmit・PostToolUse も動いた
 - 確認中に見つけた別の不具合: `mvm up --claude-args "--dangerously-skip-permissions"` で起動すると、Claude Code が許可を省くことの確認画面 (既定は「No, exit」) で止まり、`mvm send` の Enter で終了した。#64 で修正済み (実機での確認は C 節の項目)
 
+#### 手動の同期と `snapshot.sh` もフックと同じロックを取る (#68)
+
+- [x] 手動の `pull` / `push` / `rm` / `revert` と `snapshot.sh` の送信がロックを取ること、ロックを待つ・待ちきれずに止まること、`--lock-wait`、長い同期でロックの時刻を新しくすること: 自動テスト (`tests/test_memsync.py` の `CliLockTest`、`ImageWiringTest`)
+- [x] 他の同期がロックを持っていると、`snapshot.sh` はメモリの送信を 10 秒であきらめ、ワークスペースの保存は続けること: 2026-11-24 に確認 (イメージ 10.0、`mvm up --memory`)。VM の中で新しいロックを置いてから `snapshot.sh` を動かすと、「最長 10 秒」待ってから警告を出し、ワークスペースを保存して終了コード 0 で終わった (12.4 秒)。送れなかったメモリは `status` で「手元だけ」のまま残り、次の送信で送られた
+- [x] フックと `snapshot.sh` がほぼ同時に動いても、状態ファイルが壊れないこと: 2026-11-24 に確認。どちらを先に動かしても、後の方がロックの外れるのを待ってから送った。フックの送信 (6 件、5 秒) 中に `snapshot.sh` を動かすと、`snapshot.sh` は待った後に「送信 0」。`snapshot.sh` の送信 (2 件) 中にフックを動かすと、フックは待った後に自分の 1 件を送った。どちらの後も、状態ファイルは JSON として読めて全件の記録があり、`*.pmva-tmp` もロックも残らず、`status` はすべて「同期済み」
+- [x] VM の Claude がメモリを書いた直後の `mvm stop` で、メモリの送信とワークスペースの保存が両方済むこと: 2026-11-24 に確認。`mvm send` で Claude にメモリを 1 件書かせ、ファイルができた直後に `mvm stop` すると、保存はフックの送信を待ってから続き、5 秒で終了した。メモリ本体はフックで、索引の 1 行は保存のときの送信で S3 に届いた。`workspace-history/` は保存 1 回分だけ増え、終了時のフックは保存を飛ばした
+- [x] 終了時のフックの保存 (`mvm stop` を通さない終了。50 秒で打ち切り) で、ロックが空かなくてもワークスペースを保存できること: 2026-11-24 に確認。VM の中で新しいロックを置いてから `terminate-microvm` を直接呼ぶと、フックの開始 (13:28:16) から 10 秒後にメモリの送信をあきらめて tar を作り (13:28:26)、13 秒で保存を終えた (`snapshot (terminate) rc=0`)。`workspaces/<名前>/latest.tar.gz` と `workspace-history/` に保存が 1 件ずつできた。ロックのせいで送れなかったメモリは S3 に届かない (ワークスペースの保存には入る)
+
 ### J3. 履歴・戻す・消す (段階 3)
 
 - [x] 送るたびの履歴 (`.history/<名前>/<時刻>-<送り元>-<md5 先頭 8 文字>.md` のキー、`pmva-origin` のメタデータ、`MEMORY.md` と送らなかったファイルと `--dry-run` では書かない、書けなくても同期は止まらない): 自動テスト (`tests/test_memsync.py` の `HistoryTest`)
