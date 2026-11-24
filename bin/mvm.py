@@ -11,6 +11,7 @@
 import argparse
 import base64
 import collections
+import csv
 import errno
 import getpass
 import hashlib
@@ -30,6 +31,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -2513,6 +2515,11 @@ def wait_check(name, idle_limit):
         st = vm_api(name, "GET", "/status?lines=0", timeout=15)
     except SystemExit as e:
         return dict(r, state="unreachable", error=str(e.code))
+    return summarize_status(r, st, idle_limit)
+
+
+def summarize_status(r, st, idle_limit):
+    """/status の応答から、セッションの代表の状態を決める (wait と watch で共通)。"""
     agents = st.get("agents")
     r.update(idleSeconds=st.get("idleSeconds"), bootstrap=st.get("bootstrap"))
     boot = str(st.get("bootstrap") or "")
@@ -2593,31 +2600,290 @@ def cmd_send(args):
     return 0 if r.get("ok") else 1
 
 
-def clear_screen():
-    os.system("cls" if IS_WINDOWS else "clear")
+# ---------------------------------------------------------------- 一覧ボード (mvm watch)
+
+WATCH_VM_INTERVAL = 60      # get-microvm (AWS CLI) を 1 台につき呼ぶ間隔の下限 (秒)
+WATCH_IDLE_LIMIT = 300      # stalled とみなす、画面と CPU が動かない秒数 (mvm wait --idle の既定と同じ)
+WATCH_EVENT_CHARS = 200     # /events で受け取る 1 件の文字数の上限
+WATCH_LABELS = dict(AGENT_STATE_LABELS, stalled="動きが止まった", suspended="一時停止中", terminated="終了",
+                    unreachable="応答なし", starting="起動の準備中")
+WATCH_HEADS = ("名前", "状態", "経過", "メモリ (使用/全体 最大)", "最後の出来事")
+WATCH_COLORS = {"red": "\x1b[31m", "yellow": "\x1b[33m", "green": "\x1b[32m"}
+WATCH_LOG_COLUMNS = ("time", "name", "vm", "state", "usedMiB", "totalMiB", "peakMiB", "oomKills")
+CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def display_width(text):
+    """端末での表示幅。全角 (W / F) は 2 桁、結合文字は 0 桁として数える。"""
+    return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else (0 if unicodedata.combining(c) else 1)
+               for c in text)
+
+
+def cut_width(text, width, ellipsis="…"):
+    """表示幅が width に収まるように切る。切ったときは末尾を ellipsis にする。"""
+    if display_width(text) <= width:
+        return text
+    budget = width - display_width(ellipsis)
+    if budget < 0:
+        return ""
+    out, used = "", 0
+    for c in text:
+        w = display_width(c)
+        if used + w > budget:
+            break
+        out, used = out + c, used + w
+    return out + ellipsis
+
+
+def pad_width(text, width):
+    """表示幅が width になるまで、右に空白を足す。"""
+    return text + " " * max(0, width - display_width(text))
+
+
+def format_elapsed(seconds):
+    if seconds is None:
+        return "-"
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}秒"
+    if seconds < 3600:
+        return f"{seconds // 60}分"
+    hours, minutes = divmod(seconds // 60, 60)
+    return f"{hours}時間{minutes}分" if minutes else f"{hours}時間"
+
+
+class WatchBoard:
+    """mvm watch が回をまたいで覚えておくもの (メモリの最大、VM の状態、最後の出来事)。"""
+
+    def __init__(self):
+        self.peaks = {}          # 名前 → 見た usedMiB の最大
+        self.vm = {}             # 名前 → (VM の状態, get-microvm を呼んだ時刻)
+        self.recheck = set()     # /status が失敗した台。次の回は get-microvm で確かめ直す
+        self.events = {}         # (名前, エージェント) → {"file", "offset", "last"}
+        self.agent_states = {}   # (名前, エージェント) → [状態, 状態が変わった時刻]
+
+    def vm_state(self, name, now):
+        """get-microvm は 1 台あたり WATCH_VM_INTERVAL 秒に 1 回まで。その間は直前の結果を使う。"""
+        cached = self.vm.get(name)
+        if cached and name not in self.recheck and now - cached[1] < WATCH_VM_INTERVAL:
+            return cached[0]
+        self.recheck.discard(name)
+        state = vm_state(name)
+        self.vm[name] = (state, now)
+        return state
+
+
+def watch_event_text(ev):
+    """会話記録の出来事 1 件を、format_event と同じラベルで 1 行にする。"""
+    lines = (x.strip() for x in format_event("", ev, False).splitlines())
+    return " ".join(x for x in lines if x)
+
+
+def watch_last_events(board, name, agents, now):
+    """各エージェントの最後の出来事を更新する。最初は末尾の 1 件、以後は file / offset の差分だけ取る。"""
+    for agent in agents:
+        # 状態が変わった時刻を覚える (--agent both で、どちらの出来事を出すかを決めるため)
+        state = (agents[agent] or {}).get("state")
+        seen = board.agent_states.setdefault((name, agent), [state, 0])
+        if seen[0] != state:
+            seen[0], seen[1] = state, now
+        ev = board.events.setdefault((name, agent), {"file": "", "offset": 0, "last": ""})
+        query = urllib.parse.urlencode({"agent": agent, "file": ev["file"], "offset": ev["offset"],
+                                        "tail": 1, "max": WATCH_EVENT_CHARS})
+        try:
+            r = vm_api(name, "GET", f"/events?{query}", timeout=15)
+        except SystemExit:
+            continue
+        if "events" not in r:
+            continue    # 古いイメージ (/events が無い) や記録の無い台は、出来事を出さない
+        if r.get("reset"):
+            ev["last"] = ""
+        if r["events"]:
+            ev["last"] = watch_event_text(r["events"][-1])
+        ev["file"], ev["offset"] = r.get("file") or "", r.get("offset") or 0
+
+
+def watch_shown_agent(board, name, agents):
+    """出来事を出すエージェント。状態が最近変わった方、分からなければ claude を優先する。"""
+    order = sorted(agents, key=lambda a: (a != "claude", a))
+    return max(order, key=lambda a: board.agent_states.get((name, a), [None, 0])[1]) if order else None
+
+
+def watch_since(agents, state, now):
+    """代表のエージェント (状態が代表の状態と同じもの。なければ先頭) の、今の状態になってからの秒数。"""
+    chosen = [v for v in agents.values() if v.get("state") == state] or list(agents.values())
+    for v in chosen:
+        if isinstance(v.get("since"), (int, float)):
+            return max(0, int(now - v["since"]))
+    return None
+
+
+def watch_notes(name, row, summary):
+    """要対応の台の注意の行 (先頭の「!! 」は付けない)。"""
+    notes = []
+    state = row["state"]
+    if state == "UNKNOWN":
+        notes.append(f"{name}: {state_error(name) or aws_error_hint('')}")
+    if state == "failed":
+        notes.append(f"{name}: 起動の準備に失敗しました ({summary.get('bootstrap')}) → mvm peek {name} で確かめてください")
+    if state == "stalled":
+        notes.append(f"{name}: 画面と CPU が {summary.get('idleSeconds')} 秒動いていません → mvm peek {name} で確かめてください")
+    for agent, v in row["agents"].items():
+        if v.get("state") == "waiting":
+            notes.append(f"{name} ({agent}): {WATCH_LABELS['waiting']}: {v.get('message') or ''}".rstrip(": "))
+        if v.get("state") == "error":
+            notes.append(f"{name} ({agent}): エラー {v.get('error') or 'unknown'}: {v.get('message') or ''}".rstrip(": ")
+                         + f" → {agent_error_hint(name, v.get('error'))}")
+    if row["oomKills"]:
+        notes.append(f"{name}: メモリ不足でプロセスが {row['oomKills']} 回強制終了されました → mvm top {name} で内訳を確認")
+    return notes
+
+
+def watch_row(board, name, now):
+    """1 台分の表示用データ。VM が止まっているときは /status も /events も呼ばない (起こして課金されるため)。"""
+    row = {"name": name, "vm": board.vm_state(name, now), "state": "", "agents": {}, "sinceSeconds": None,
+           "memory": None, "oomKills": 0, "lastEvent": "", "notes": []}
+    if row["vm"] != "RUNNING":
+        row["state"] = row["vm"]
+        row["notes"] = watch_notes(name, row, {})
+        return row
+    try:
+        st = vm_api(name, "GET", "/status?lines=0", timeout=15)
+    except SystemExit as e:
+        board.recheck.add(name)
+        row["state"] = "unreachable"
+        row["notes"] = [f"{name}: VM の状態 API が応答しません ({e.code})。続くときは mvm peek {name} で確かめてください"]
+        return row
+    summary = summarize_status({"name": name}, st, WATCH_IDLE_LIMIT)
+    row.update(state=summary["state"], agents=summary.get("agents") or {}, oomKills=st.get("oomKills") or 0)
+    row["sinceSeconds"] = watch_since(row["agents"], row["state"], now)
+    mem = st.get("memory") or {}
+    if mem.get("totalMiB"):
+        used = mem.get("usedMiB") or 0
+        board.peaks[name] = max(board.peaks.get(name, 0), used)
+        row["memory"] = {"usedMiB": used, "totalMiB": mem["totalMiB"], "peakMiB": board.peaks[name]}
+    watch_last_events(board, name, row["agents"], now)
+    shown = watch_shown_agent(board, name, row["agents"])
+    if shown:
+        row["lastEvent"] = board.events.get((name, shown), {}).get("last", "")
+    row["notes"] = watch_notes(name, row, summary)
+    return row
+
+
+def watch_collect(board, now):
+    """終了していない全セッションの表示用データ (台ごとの dict のリスト)。"""
+    return [watch_row(board, name, now) for name in session_names() if not load_session(name).get("terminated")]
+
+
+def watch_level(row):
+    """色を決める区分。red (エラー・OOM) / yellow (要対応) / green (完了) / "" (ふつう)。"""
+    if row["state"] in ("error", "failed") or row["oomKills"] or any(
+            v.get("state") == "error" for v in row["agents"].values()):
+        return "red"
+    if row["notes"] or row["state"] in ("waiting", "stalled", "UNKNOWN"):
+        return "yellow"
+    return "green" if row["state"] == "done" else ""
+
+
+def watch_cells(row):
+    mem = row["memory"]
+    memory = (f"{gib(mem['usedMiB'])}/{gib(mem['totalMiB'])}G 最大{gib(mem['peakMiB'])}G" if mem else "-")
+    if row["oomKills"]:
+        memory = (memory if mem else "") + f" !!OOM×{row['oomKills']}"
+    return (row["name"], WATCH_LABELS.get(row["state"], row["state"]), format_elapsed(row["sinceSeconds"]),
+            memory.strip(), row["lastEvent"] or "-")
+
+
+def format_watch(rows, width, color, stamp, interval):
+    """一覧ボードの文字列。width は端末の桁数 (日本語は全角 2 桁として数える)、color は ANSI の色を付けるか。"""
+    def paint(text, level):
+        return f"{WATCH_COLORS[level]}{text}\x1b[0m" if color and level else text
+
+    def fit(text):
+        return cut_width(CONTROL_CHARS.sub(" ", text), width)
+
+    count = lambda pred: sum(1 for r in rows if pred(r))   # noqa: E731
+    lines = [fit(f"{stamp}  {len(rows)} 台 (作業中 {count(lambda r: r['state'] == 'working')}"
+                 f" / 要対応 {count(lambda r: watch_level(r) in ('red', 'yellow'))}"
+                 f" / 完了 {count(lambda r: r['state'] == 'done')})  {interval} 秒ごと / Ctrl-C で終了")]
+    if rows:
+        cells = [tuple(CONTROL_CHARS.sub(" ", c) for c in watch_cells(r)) for r in rows]
+        widths = [max(display_width(c[i]) for c in cells + [WATCH_HEADS]) for i in range(4)]
+        widths[0] = min(widths[0], 24)
+        rest = max(10, width - sum(w + 2 for w in widths))
+        for c, level in [(WATCH_HEADS, "")] + [(c, watch_level(r)) for c, r in zip(cells, rows)]:
+            parts = [pad_width(cut_width(c[i], widths[i]), widths[i]) for i in range(4)] + [cut_width(c[4], rest)]
+            lines.append(paint(cut_width("  ".join(parts), width).rstrip(), level))
+    else:
+        lines.append("表示するセッションがありません (mvm ls で確認)")
+    lines.append("")
+    for row in rows:
+        level = "red" if watch_level(row) == "red" else "yellow"
+        lines.extend(paint(fit("!! " + n), level) for n in row["notes"])
+    lines.append(fit("(表示中のセッションは自動サスペンドされません)"))
+    return "\n".join(lines)
+
+
+def watch_open_log(path):
+    """--log の CSV を開けるか確かめ、無ければ見出しの行を書く。"""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8", newline="") as f:
+            if f.tell() == 0:
+                csv.writer(f).writerow(WATCH_LOG_COLUMNS)
+    except OSError as e:
+        die(f"--log のファイル {path} に書き込めません ({e})。フォルダの場所と書き込み権限を確かめるか、"
+            "別のパスを --log に指定してください (Excel などで開いたままだと書けません)")
+
+
+def watch_append_log(path, rows, now):
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+    try:
+        with open(path, "a", encoding="utf-8", newline="") as f:
+            w = csv.writer(f)
+            if f.tell() == 0:
+                w.writerow(WATCH_LOG_COLUMNS)
+            for r in rows:
+                mem = r["memory"] or {}
+                w.writerow([stamp, r["name"], r["vm"], r["state"], mem.get("usedMiB", ""), mem.get("totalMiB", ""),
+                            mem.get("peakMiB", ""), r["oomKills"]])
+    except OSError as e:
+        die(f"--log のファイル {path} に書き込めません ({e})。Excel などで開いていれば閉じてから、もう一度実行してください")
 
 
 def cmd_watch(args):
+    if args.interval < 1:
+        die("秒には 1 以上を指定してください")
+    log_path = Path(args.log) if args.log else None
+    if log_path:
+        watch_open_log(log_path)
+    once = args.once or args.json
+    tty = sys.stdout.isatty()
+    if tty and IS_WINDOWS:
+        os.system("")   # コンソールで ANSI のエスケープシーケンスを使えるようにする
+    color = tty and not os.environ.get("NO_COLOR")
+    board = WatchBoard()
+    first = True
     try:
         while True:
-            out = [time.strftime("%Y-%m-%d %H:%M:%S")]
-            for name in session_names():
-                if load_session(name).get("terminated"):
-                    continue
-                state = vm_state(name)
-                out.append("")
-                if state == "RUNNING":
-                    try:
-                        out.append(format_status(vm_api(name, "GET", "/status?lines=6", timeout=15)))
-                    except SystemExit:
-                        out.append(f"[{name}] RUNNING (状態 API 応答なし)")
-                elif state == "UNKNOWN":
-                    out.append(f"[{name}] UNKNOWN: {state_error(name) or aws_error_hint('')}")
-                else:
-                    out.append(f"[{name}] {state}")
-            clear_screen()
-            print("\n".join(out))
-            print(f"\n({args.interval} 秒ごとに更新 / Ctrl-C で終了。表示中のセッションは自動サスペンドされません)", flush=True)
+            now = time.time()
+            rows = watch_collect(board, now)
+            if log_path:
+                watch_append_log(log_path, rows, now)
+            if args.json:
+                print_json(rows)
+                return 0
+            width = max(40, shutil.get_terminal_size((120, 24)).columns - 1)
+            text = format_watch(rows, width, color, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)), args.interval)
+            if once:
+                print(text)
+                return 0
+            if tty:
+                sys.stdout.write("\x1b[H\x1b[J" + text + "\n")
+                sys.stdout.flush()
+            else:
+                print(("" if first else "-" * min(width, 60) + "\n") + text, flush=True)
+            first = False
             time.sleep(args.interval)
     except KeyboardInterrupt:
         return 0
@@ -3250,8 +3516,11 @@ def build_parser():
     # "-" で始まる指示は "--" の後に書く (例: mvm send a1 -- -h)
     x.add_argument("text", nargs="+")
     x.set_defaults(func=cmd_send)
-    x = sub.add_parser("watch", help="全セッションの状態を定期表示")
-    x.add_argument("interval", nargs="?", type=int, default=60)
+    x = sub.add_parser("watch", help="全セッションを 1 台 1 行の一覧で定期表示 (状態、経過、メモリ、最後の出来事)")
+    x.add_argument("interval", nargs="?", type=int, default=10, help="更新の間隔 (秒。既定 10)")
+    x.add_argument("--once", action="store_true", help="1 回だけ表示して終わる")
+    x.add_argument("--json", action="store_true", help="台ごとの状態を JSON で 1 回出力する (--once を含む)")
+    x.add_argument("--log", metavar="CSV", help="毎回、台ごとの状態とメモリを CSV に追記する")
     x.set_defaults(func=cmd_watch)
     x = sub.add_parser("ssh", help="SSH over WebSocket で接続 (既定で tmux にアタッチ。切れたら自動で再接続)")
     x.add_argument("name")

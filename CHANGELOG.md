@@ -58,6 +58,8 @@
 
 ### 変更
 
+- `mvm watch` を、全台を 1 台 1 行で見渡せる一覧ボードに作り直した。状態、経過時間、メモリ (使用/全体と、動かしている間の最大)、最後の出来事 (会話の記録の最後の 1 件) を表示し、許可・入力待ち、エラー、`UNKNOWN`、メモリ不足 (OOM) などの要対応の台は表の下に理由とやることを出す。`--once`、`--json` (台ごとの状態の JSON)、`--log <CSV>` (台ごと・更新ごとの状態とメモリを追記。2GB の VM で足りるかの測定に使える) を追加し、端末の幅に合わせて日本語の桁をそろえ、端末なら色を付ける (`NO_COLOR` で無効)。通信を減らすため、AWS CLI の `get-microvm` は 1 台につき 60 秒に 1 回までにし、`SUSPENDED` の VM には `/status` も `/events` も呼ばない
+- `mvm watch` の既定の間隔を 60 秒から 10 秒に変更 (呼び出しを軽くしたので負荷はほぼ同じ)。画面の末尾は出さなくなったので、画面を見たいときは `mvm peek` / `mvm view` を使う
 - `mvm memory pull|push|sync` の「config.env に MEMORY_SYNC=true を書いてください」の案内を、そのリポジトリで初めて同期したときだけ出す (毎回出ていた)。あわせて `mvm memory install-hooks` を案内する
 - ドキュメントを利用者向けに整理した。README を短くし、`docs/setup.md` は構築と管理 (AWS の構成、操作用の IAM ユーザー、イメージの更新、片付け) に絞った。場面別の使い方 (`.pmva/setup.sh`、通知、VS Code、よく使うコマンド) は `docs/usage.md` に、症状ごとの確認方法は新しい `docs/troubleshooting.md` にまとめた。インストールスクリプトの最後の案内は `docs/quickstart.md` を指す
 - AWS から VM の状態を取れなかったとき (`UNKNOWN`)、`mvm ls` / `watch` / `wait` / `top` / `stop` / `renew` / `infra delete` に、理由 (認証切れ、認証情報が無い、権限が無い、接続できない など) とやるべきこと (`aws sso login`、`AWS_PROFILE` の確認、`mvm doctor`) を表示する。`ls --json` は `stateError`、`wait --json` は `error` に入れる。`infra delete` は、状態を取れないセッションを「起動中」と言わずに理由を出して止める
