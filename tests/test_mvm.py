@@ -10,6 +10,7 @@ import http.server
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import socket
 import ssl
@@ -524,6 +525,13 @@ class CliTest(unittest.TestCase):
         })
         for k in ("HTTPS_PROXY", "https_proxy", "PMVA_API_BASE_URL", "PMVA_WS_BASE_URL"):
             self.env.pop(k, None)
+        # mvm login などが webbrowser で開く URL を、本物のブラウザではなくファイルに書く (Windows も含めて)。
+        # webbrowser は BROWSER の "%s" 付きのコマンドを shlex で分けるので、パスは / 区切りで引用する
+        self.opened_url = t / "opened-url.txt"
+        recorder = t / "browser.py"
+        recorder.write_text(f"import sys\nopen({str(self.opened_url)!r}, 'w', encoding='utf-8').write(sys.argv[1])\n",
+                            encoding="utf-8")
+        self.env["BROWSER"] = " ".join(shlex.quote(Path(p).as_posix()) for p in (sys.executable, recorder)) + " %s"
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -1363,12 +1371,7 @@ class CliTest(unittest.TestCase):
             except OSError:
                 self.skipTest("この PC では 1455 番が使われている")
         env, record = self.fake_ssh(output=f"Starting local login server on http://localhost:1455.\n\n{self.LOGIN_URL}\n")
-        opened = Path(self.tmp.name) / "opened-url.txt"
-        if not IS_WINDOWS:   # webbrowser は BROWSER のコマンドに URL を渡す
-            browser = Path(self.tmp.name) / "browser.sh"
-            browser.write_text(f'#!/bin/sh\nprintf %s "$1" > "{opened}"\n', encoding="utf-8")
-            browser.chmod(0o755)
-            env["BROWSER"] = f"{browser} %s"
+        opened = self.opened_url   # setUp の BROWSER が、開こうとした URL をここに書く
         self.mvm("up", "l1", "--agent", "codex", "--codex-auth", "interactive", env=env)
         _, out, err = self.mvm("login", "l1", env=env)
         args = json.loads(record.read_text(encoding="utf-8"))
@@ -1378,16 +1381,15 @@ class CliTest(unittest.TestCase):
         self.assertIn("codex login", args[-1])
         self.assertNotIn("--device-auth", args[-1])
         self.assertIn(self.LOGIN_URL, out, "Codex の出力をそのまま見せる")
-        if not IS_WINDOWS:
-            for _ in range(50):
-                if opened.exists():
-                    break
-                time.sleep(0.1)
-            self.assertEqual(opened.read_text(encoding="utf-8"), self.LOGIN_URL)
+        # Windows でも本物のブラウザを開かず、BROWSER のコマンドに URL を渡したこと
+        for _ in range(50):
+            if opened.exists() and opened.read_text(encoding="utf-8"):
+                break
+            time.sleep(0.1)
+        self.assertEqual(opened.read_text(encoding="utf-8"), self.LOGIN_URL)
         self.assertIn("codex を起動し直して", err)
         # --no-browser では開かない。--device ではポートをつながない
-        if not IS_WINDOWS:
-            opened.unlink()
+        opened.unlink()
         self.mvm("login", "l1", "codex", "--device", "--no-browser", env=env)
         args = json.loads(record.read_text(encoding="utf-8"))
         self.assertIn("codex login --device-auth", args[-1])
