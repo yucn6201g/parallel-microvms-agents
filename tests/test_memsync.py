@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -1911,6 +1912,16 @@ class CliLockTest(MemsyncTestCase):
         self.assertEqual(self.s3.calls, [], "ロックが取れなければ何もしない")
         self.assertEqual(self.lock.read_text(encoding="utf-8"), "other", "他のロックは消さない")
 
+    def test_lock_wait_option_overrides_the_default(self):
+        self.write("a.md", "a\n")
+        self.hold_lock()
+        self.seen_lock = []
+        start = time.monotonic()
+        rc, _, err = self.main("push", "--lock-wait", "0.3", lock_wait=30)
+        self.assertEqual(rc, 1)
+        self.assertLess(time.monotonic() - start, 5, "--lock-wait の秒数で諦める")
+        self.assertIn("もう一度", err)
+
     def test_releases_the_lock_when_sync_fails(self):
         self.write("a.md", "a\n")
         self.s3.fail = "boom"
@@ -1990,6 +2001,17 @@ class ImageWiringTest(unittest.TestCase):
         self.assertIn("memsync.py push", snapshot)
         for script in (bootstrap, snapshot):
             self.assertIn("pmva-memory.state.json", script)
+
+    def test_snapshot_push_waits_for_the_lock_well_within_the_terminate_timeout(self):
+        # 終了時の保存 (supervisor の terminate フック) は snapshot.sh 全体を打ち切る。
+        # メモリの送信がロックを待ちすぎると、後ろのワークスペースの保存まで失われる
+        snapshot = self.read("image/snapshot.sh")
+        push = [l for l in snapshot.splitlines() if "memsync.py push" in l][0]
+        m = re.search(r"--lock-wait (\d+)", push)
+        self.assertIsNotNone(m, "snapshot.sh の送信はロックの待ち時間を短くする")
+        terminate = int(re.search(r'snapshot\("terminate", timeout=(\d+)\)', self.read("image/supervisor.py")).group(1))
+        self.assertLessEqual(int(m.group(1)) * 3, terminate, "待ち時間は打ち切りまでの時間の 1/3 以下")
+        self.assertGreater(memsync.CLI_LOCK_WAIT, int(m.group(1)))
 
     def test_bootstrap_installs_memory_hooks(self):
         bootstrap = self.read("image/bootstrap.sh")

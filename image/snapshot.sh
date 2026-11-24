@@ -17,9 +17,10 @@ REGION="$(jq -r '.region // empty' "$SESSION")"
 export AWS_REGION="$REGION" AWS_DEFAULT_REGION="$REGION"
 
 # 共有しているメモリ (mvm up --memory) を S3 に送る。失敗しても保存は続ける
+# 終了時の保存は supervisor が 50 秒で打ち切るので、会話のフックの同期 (ロック) は 10 秒までしか待たない
 MEMORY="$(jq -r '.memory // empty' "$SESSION")"
 if [ -n "$MEMORY" ] && [ -d "$HOME/.claude/pmva-memory" ]; then
-  python3 /opt/pmva/memsync.py push --dir "$HOME/.claude/pmva-memory" --uri "$MEMORY" --state "$HOME/.claude/pmva-memory.state.json" --origin "$NAME" || echo "warning: memory push failed: $MEMORY"
+  python3 /opt/pmva/memsync.py push --lock-wait 10 --dir "$HOME/.claude/pmva-memory" --uri "$MEMORY" --state "$HOME/.claude/pmva-memory.state.json" --origin "$NAME" || echo "warning: memory push failed: $MEMORY"
 fi
 
 paths=()

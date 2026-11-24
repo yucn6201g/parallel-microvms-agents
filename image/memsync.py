@@ -947,13 +947,14 @@ class Memsync:
             self.runner = runner
             _release_lock(lock)     # 残ると、LOCK_STALE 秒たつまで他の同期が待たされる
 
-    def run_action(self, action, name=None, only_origin=None, since=None, as_json=False, to=None):
+    def run_action(self, action, name=None, only_origin=None, since=None, as_json=False, to=None, lock_wait=None):
         """コマンド名から実行する (bin/mvm.py と main() が使う)。終了コードを返す。
 
         書き換える操作は、会話のフックと同じロックを取ってから行う (dry-run は何も書かないので取らない)。
+        lock_wait はロックを待つ秒数 (既定 CLI_LOCK_WAIT)。
         """
         if action in LOCKED_ACTIONS and not self.dry_run:
-            with self.locked(CLI_LOCK_WAIT, say_waiting=True):
+            with self.locked(CLI_LOCK_WAIT if lock_wait is None else lock_wait, say_waiting=True):
                 return self._run_action(action, name, only_origin, since, as_json, to)
         return self._run_action(action, name, only_origin, since, as_json, to)
 
@@ -1325,6 +1326,9 @@ def main(argv=None, runner=None, out=None, stdin=None):
     p.add_argument("--to", help="revert で、戻す版の時刻 (20261124T101503Z や 2026-11-24T10:15:03Z。その時刻以前で最新の版)")
     p.add_argument("--min-interval", type=float, default=0,
                    help="hook prompt で、前回の pull からこの秒数がたつまでは S3 を見に行かない (既定 0)")
+    p.add_argument("--lock-wait", type=float, default=None,
+                   help="pull / push / rm / revert で、他の同期 (会話のフックなど) が終わるのを待つ秒数 (既定 %d)。"
+                        "VM の終了時の保存は打ち切られるまでの時間が短いので、snapshot.sh は短くする" % CLI_LOCK_WAIT)
     p.add_argument("--region", help="AWS のリージョン (フックの環境に AWS_REGION が無いことがあるため明示する)")
     p.add_argument("--dir", required=True, help="メモリのフォルダ")
     p.add_argument("--uri", required=True, help="s3://<バケット>/memory/<repo-id>/")
@@ -1364,7 +1368,7 @@ def main(argv=None, runner=None, out=None, stdin=None):
     try:
         sync = Memsync(Path(args.dir).expanduser(), args.uri, args.state, (args.origin if args.action != "log" else None) or "local",
                        args.dry_run, args.force, runner, out)
-        return sync.run_action(args.action, args.event, args.origin, args.since, args.json, args.to)
+        return sync.run_action(args.action, args.event, args.origin, args.since, args.json, args.to, args.lock_wait)
     except MemsyncError as e:
         print("error: %s" % e, file=sys.stderr)
         return 1
