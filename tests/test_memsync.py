@@ -1808,7 +1808,7 @@ class WindowsBusyFileTest(MemsyncTestCase):
         # aws.exe やウイルス対策ソフトが一時ファイルをまだ開いていると、一時フォルダの後始末が PermissionError になる
         self.s3.put("a.md", "a\n")
         self.write("b.md", "b\n")
-        in_tmp = lambda p: os.path.basename(str(p)) in ("download", "b.md") and "memory" not in str(p)  # noqa: E731
+        in_tmp = lambda p: os.path.basename(str(p)) in ("download", "body") and "memory" not in str(p)  # noqa: E731
         fake = fail_first(os.unlink, times=3, only=in_tmp)
         with mock.patch.object(memsync, "BUSY_DELAY", 0), \
                 mock.patch.object(memsync.os, "unlink", fake), mock.patch.object(memsync.os, "remove", fake):
@@ -1818,6 +1818,33 @@ class WindowsBusyFileTest(MemsyncTestCase):
         self.assertGreaterEqual(len(fake.calls), 3)
         self.assertEqual((self.dir / "a.md").read_bytes(), b"a\n")
         self.assertEqual(self.s3.get("b.md"), b"b\n")
+
+    def busy_remove(self, name):
+        fake = fail_first(os.remove, only=self.dir / name)
+        return fake, mock.patch.multiple(memsync.os, remove=fake, unlink=fake)
+
+    def test_pull_deletes_memory_removed_elsewhere_even_if_busy(self):
+        self.write("a.md", "old\n")
+        self.set_state(a=md5(b"old\n"))
+        self.s3.put(".deleted.json", json.dumps(
+            {"files": {"a.md": [{"md5": md5(b"old\n"), "at": "2026-11-24T09:00:00Z", "by": "pc", "line": None}]}}))
+        fake, patch = self.busy_remove("a.md")
+        with patch:
+            sync = self.sync()
+            sync.pull()
+        self.assertEqual(len(fake.calls), 2)
+        self.assertFalse((self.dir / "a.md").exists())
+        self.assertEqual(sync.deleted, ["a.md"])
+
+    def test_rm_deletes_local_file_even_if_busy(self):
+        self.write("a.md", "a\n")
+        self.s3.put("a.md", "a\n")
+        fake, patch = self.busy_remove("a.md")
+        with patch:
+            self.assertEqual(self.sync().rm("a.md"), 0)
+        self.assertEqual(len(fake.calls), 2)
+        self.assertFalse((self.dir / "a.md").exists())
+        self.assertNotIn("消せませんでした", self.text())
 
 
 class ImageWiringTest(unittest.TestCase):

@@ -36,6 +36,7 @@
 
 ### 修正
 
+- Windows で、複数の会話のメモリ共有のフック (`mvm memory hook`) が同時に動くと、まれにトレースバック (`PermissionError: [Errno 13]`) で落ちていた。他の会話が外している最中のロックを作ろうとしたときに起きていた。待って取り直すようにした。あわせて、メモリのファイルの置き換えと削除 (`mvm memory rm`、他のマシンで消されたメモリの pull)、ロックの解放、S3 との受け渡しに使う一時フォルダの後始末も、他のプロセスがファイルを使用中で一時的に失敗したときは少し待ってやり直す
 - `--claude-args "--dangerously-skip-permissions"` (または `DEFAULT_CLAUDE_ARGS` に同じ指定) で起動すると、Claude Code が許可を省くことへの同意の確認画面 (既定の選択肢は「No, exit」) で止まり、そこへ `mvm send` すると Claude Code が終了していた。VM の `~/.claude/settings.json` に同意済みの設定 (`skipDangerousModePermissionPrompt`) を書き、確認画面を出さずに作業を始める。イメージの作り直し (`mvm image build`) が必要
 - AWS の認証が切れているときなど、問い合わせに失敗しただけなのに「無い」と案内していた。`mvm image status` / `up` / `build` は「イメージはまだありません (mvm image build)」、`up` / `infra outputs` は「スタックが見つかりません。先に mvm infra deploy を実行してください」、`up --profile` は「設定のまとまりがまだありません」と出て、要らない作り直しを招くおそれがあった。失敗の理由 (認証切れなら `aws sso login`、権限、通信) と次にやることを出して止める。`mvm doctor` のスタックとシークレットの項目も同じ
 - `mvm image prune` / `mvm image delete` (`--yes` なし) と `mvm infra delete` を、端末の無いところ (司令塔のエージェント、CI、パイプ) から実行すると、確認の答えを読めずに `EOFError` のトレースバックで落ちていた。何も削除せずに、`--yes` を付ける (`infra delete` は端末から実行する) よう案内して中止する。パイプで `y` を渡したときは従来どおり進む

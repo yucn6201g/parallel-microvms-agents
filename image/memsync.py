@@ -21,10 +21,12 @@ S3 への書き込みは条件付き (--if-match / --if-none-match) にして、
 """
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -43,6 +45,10 @@ SANITIZED_MAX = 200               # これを超えると Claude Code はフォ�
 INDEX_PUT_ATTEMPTS = 3            # MEMORY.md を送るときに、他のマシンと書き込みがぶつかったら取り直す回数
 HOOK_CONTEXT_MAX = 9500           # フックで会話に渡す文字数 (Claude Code は 1 万文字を超えるとファイルに逃がす)
 HOOK_LOG_MAX = 256 * 1024
+# Windows で、他のプロセスが開いている・消している最中のファイルを操作して PermissionError になったときに
+# 待ってやり直す回数と間隔 (合わせて 1 秒ほど)
+BUSY_RETRIES = 20
+BUSY_DELAY = 0.05
 # フックの名前 (memsync.py hook <名前>) → Claude Code のイベント名
 HOOK_EVENTS = {"session-start": "SessionStart", "prompt": "UserPromptSubmit", "post-tool": "PostToolUse"}
 
@@ -59,6 +65,40 @@ SHARE_FALSE_PATTERN = re.compile(r"^share:\s*[\"']?false[\"']?\s*(#.*)?$", re.IG
 
 class MemsyncError(Exception):
     """利用者に次の行動を伝えて終わるエラー。"""
+
+
+# ---------------------------------------------------------------- Windows で使用中のファイル
+
+def _retry_busy(func, *args):
+    """func(*args) を呼ぶ。PermissionError なら少し待ってやり直し、BUSY_RETRIES 回で諦めて投げる。
+
+    Windows では、他のプロセス (同時に動く別の会話のフック、aws.exe、ウイルス対策ソフトなど) が開いている、
+    または消している最中 (削除待ち) のファイルへの os.replace / os.remove などが PermissionError になる。
+    たいていすぐ終わるので、待てば通る。
+    """
+    for attempt in range(BUSY_RETRIES):
+        try:
+            return func(*args)
+        except PermissionError:
+            if attempt + 1 >= BUSY_RETRIES:
+                raise
+            time.sleep(BUSY_DELAY)
+
+
+@contextlib.contextmanager
+def _temp_dir():
+    """一時フォルダ。後始末で消せなくても (Windows で使用中)、同期そのものは失敗にしない。
+
+    tempfile.TemporaryDirectory は、後始末の PermissionError をそのまま投げる (Python 3.9)。
+    """
+    path = tempfile.mkdtemp(prefix="pmva-memsync-")
+    try:
+        yield path
+    finally:
+        try:
+            _retry_busy(shutil.rmtree, path)
+        except OSError:
+            shutil.rmtree(path, ignore_errors=True)      # 残っても OS の一時フォルダの中なので害は無い
 
 
 # ---------------------------------------------------------------- repo-id とメモリのフォルダ
@@ -463,7 +503,7 @@ class Memsync:
     # ---- 取得と送信
     def fetch(self, name):
         """S3 のオブジェクトの (中身, ETag)。"""
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir() as tmp:
             dest = Path(tmp) / "download"
             text = self.aws("s3api", "get-object", "--bucket", self.bucket, "--key", self.prefix + name,
                             "--output", "json", str(dest)).strip()
@@ -481,7 +521,7 @@ class Memsync:
 
         条件が合わなかった (その後に他のマシンが書き換えた) ときは False を返す。
         """
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir() as tmp:
             src = Path(tmp) / "body"       # name に / が入ることがある (.history/...) ので、名前は使わない
             src.write_bytes(data)
             args = ["s3api", "put-object", "--bucket", self.bucket, "--key", self.prefix + name, "--body", str(src),
@@ -502,7 +542,7 @@ class Memsync:
 
     def put_plain(self, rel, data):
         """条件なしで送る (履歴用)。失敗は MemsyncError。"""
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir() as tmp:
             src = Path(tmp) / "body"
             src.write_bytes(data)
             self.aws("s3api", "put-object", "--bucket", self.bucket, "--key", self.prefix + rel, "--body", str(src),
@@ -523,7 +563,15 @@ class Memsync:
         dest = self.dir / name
         tmp = self.dir / (name + ".pmva-tmp")
         tmp.write_bytes(data)
-        os.replace(str(tmp), str(dest))
+        try:
+            # 置き換える先を他のプロセス (エディタなど) が開いていると、Windows では PermissionError になる
+            _retry_busy(os.replace, str(tmp), str(dest))
+        except OSError:
+            try:
+                os.remove(str(tmp))
+            except OSError:
+                pass
+            raise
 
     # ---- MEMORY.md (行の和集合)
     def merge_pull_index(self, local_names):
@@ -722,7 +770,7 @@ class Memsync:
                 removed.append(name)
                 if not self.dry_run:
                     try:
-                        (self.dir / name).unlink()
+                        _retry_busy(os.remove, str(self.dir / name))
                     except OSError as e:
                         self.warn("%s を消せませんでした (%s)" % (name, e))
                         continue
@@ -942,7 +990,7 @@ class Memsync:
                       "もう一度 mvm memory rm %s を実行してください" % (INDEX_NAME, INDEX_PUT_ATTEMPTS, name))
         if name in local:
             try:
-                (self.dir / name).unlink()
+                _retry_busy(os.remove, str(self.dir / name))
             except OSError as e:
                 self.warn("手元の %s を消せませんでした (%s)。手で消してください" % (name, e))
         self.edit_local_index(lambda lines: [l for l in lines if line_key(l) != name])
@@ -1085,6 +1133,8 @@ def _acquire_lock(path, wait, stale=120):
     """同じマシンで同時に動く同期 (複数の会話のフック) を 1 つにする。取れなければ False。
 
     同期の途中で落ちて残ったロックは、stale 秒より古ければ奪う。
+    Windows では、他が外している最中 (削除待ち) のロックを作ろうとすると FileExistsError ではなく
+    PermissionError になるので、どちらも「まだ他が持っている」として待って取り直す。
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     deadline = time.monotonic() + wait
@@ -1094,16 +1144,23 @@ def _acquire_lock(path, wait, stale=120):
             os.write(fd, str(os.getpid()).encode("ascii"))
             os.close(fd)
             return True
-        except FileExistsError:
+        except (FileExistsError, PermissionError):
             try:
                 if time.time() - path.stat().st_mtime > stale:
-                    path.unlink()
+                    os.remove(str(path))
                     continue
             except OSError:
-                continue
+                pass        # もう外れた、または外している最中。少し待って取り直す
             if time.monotonic() >= deadline:
                 return False
             time.sleep(0.1)
+
+
+def _release_lock(path):
+    try:
+        _retry_busy(os.remove, str(path))
+    except OSError:
+        pass
 
 
 def _hook_log(sync, event, msg):
@@ -1202,10 +1259,7 @@ def run_hook(event, sync, stdin_text, min_interval=0, now=time.time, lock_wait=1
         _hook_log(sync, event, str(e))
         return ""
     finally:
-        try:
-            lock.unlink()
-        except OSError:
-            pass
+        _release_lock(lock)     # 残ると、stale 秒たつまで他の会話の同期が飛ばされる
 
 
 def main(argv=None, runner=None, out=None, stdin=None):
