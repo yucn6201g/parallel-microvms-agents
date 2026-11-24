@@ -5,7 +5,7 @@
   <microvmId>.payload  run-microvm の --run-hook-payload
   <microvmId>.term     terminate 済みの印
   secret-<name>        create-secret / put-secret-value で受け取った値
-  s3/<bucket>/<key>    s3 cp / s3api put-object で S3 に置いたファイル
+  s3/<bucket>/<key>    s3 cp / s3api put-object で S3 に置いたファイル (s3api delete-object で消える)
   deployed.json        cloudformation deploy で受け取ったテンプレートとパラメータ (describe-stacks / get-template が返す)
 """
 
@@ -232,9 +232,16 @@ if cmd == "s3api list-objects-v2":   # s3/<バケット>/ の下のうち、--pr
     for f in sorted(root.rglob("*")) if root.exists() else []:
         key = f.relative_to(root).as_posix()
         if f.is_file() and key.startswith(prefix) and not key.endswith(".metadata"):
+            if opt("--delimiter") and opt("--delimiter") in key[len(prefix):]:
+                continue    # 本物の S3 と同じく、delimiter を含むキーは Contents に入れない (CommonPrefixes になる)
             etag = os.environ.get("PMVA_STUB_ETAG_" + key.rsplit("/", 1)[-1].replace(".", "_").replace("-", "_"))                 or hashlib.md5(f.read_bytes()).hexdigest()
             contents.append({"Key": key, "ETag": '"%s"' % etag, "Size": f.stat().st_size})
     out({"Contents": contents} if contents else {})
+if cmd == "s3api delete-object":   # mvm memory rm。S3 のオブジェクトと --metadata の記録を消す (無くても成功する。本物と同じ)
+    obj = D / "s3" / opt("--bucket") / opt("--key")
+    obj.unlink(missing_ok=True)
+    Path(str(obj) + ".metadata").unlink(missing_ok=True)
+    out({})
 if cmd == "s3api head-object":
     obj = D / "s3" / opt("--bucket") / opt("--key")
     if obj.exists():

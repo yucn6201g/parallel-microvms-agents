@@ -14,6 +14,7 @@ import threading
 import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -21,6 +22,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "image"))
 import memsync  # noqa: E402
 
+T0 = datetime(2026, 11, 24, 10, 15, 3, tzinfo=timezone.utc)     # テストの「今」 (履歴の時刻)
+STAMP0 = "20261124T101503Z"
 BUCKET = "bkt"
 PREFIX = "memory/github.com/owner/repo/"
 URI = f"s3://{BUCKET}/{PREFIX}"
@@ -50,6 +53,7 @@ class FakeS3:
         self.page_size = 0     # 0 以外なら list-objects-v2 をこの件数ずつに分けて返す
         self.before_put = None  # put-object の直前に呼ぶ関数 (キーを渡す)。他のマシンの同時書き込みを作る
         self.old_cli = False   # True なら --if-match / --if-none-match を知らない古い AWS CLI として振る舞う
+        self.deny_delete = False  # True なら delete-object が AccessDenied で失敗する (VM の実行ロールと同じ)
 
     def put(self, name, data, prefix=PREFIX):
         self.objects[prefix + name] = data if isinstance(data, bytes) else data.encode("utf-8")
@@ -83,6 +87,12 @@ class FakeS3:
             if "--metadata" in args:
                 self.metadata[key] = opt("--metadata")
             return 0, json.dumps({"ETag": '"%s"' % self.etag(key)}), ""
+        if args[:2] == ["s3api", "delete-object"]:
+            if self.deny_delete:
+                return 254, "", "An error occurred (AccessDenied) when calling the DeleteObject operation: Access Denied"
+            self.objects.pop(opt("--key"), None)
+            self.metadata.pop(opt("--key"), None)
+            return 0, "", ""
         if args[:2] == ["s3api", "get-object"]:
             key = opt("--key")
             if key not in self.objects:
@@ -92,6 +102,8 @@ class FakeS3:
         if args[:2] == ["s3api", "list-objects-v2"]:
             prefix = args[args.index("--prefix") + 1]
             keys = sorted(k for k in self.objects if k.startswith(prefix))
+            if opt("--delimiter"):      # 本物の S3 と同じく、prefix の後ろに delimiter を含むキーは Contents に入れない
+                keys = [k for k in keys if opt("--delimiter") not in k[len(prefix):]]
             start = int(args[args.index("--continuation-token") + 1]) if "--continuation-token" in args else 0
             page = keys[start:start + self.page_size] if self.page_size else keys[start:]
             body = {"Contents": [{"Key": k, "ETag": '"%s"' % self.etags.get(k, md5(self.objects[k]))} for k in page]}
@@ -125,9 +137,11 @@ class MemsyncTestCase(unittest.TestCase):
         self.state = t / "state" / "m.json"
         self.s3 = FakeS3()
         self.lines = []
+        self.clock = [T0]
 
     def sync(self, **kw):
         kw.setdefault("origin", "local")
+        kw.setdefault("now", lambda: self.clock[0])
         return memsync.Memsync(self.dir, URI, self.state, runner=self.s3, out=self.lines.append, **kw)
 
     def write(self, name, data):
@@ -899,6 +913,819 @@ class HookTest(MemsyncTestCase):
             self.assertEqual(memsync.main(args[:2] + ["--min-interval", "0"] + args[2:], runner=self.s3,
                                           stdin=io.StringIO("{}")), 0, "失敗しても 0 で終わる")
         self.assertEqual(out.getvalue(), "")
+
+
+def history_keys(s3, name=None):
+    """S3 にある履歴のキー (prefix より後)。"""
+    start = PREFIX + ".history/" + (name + "/" if name else "")
+    return sorted(k[len(PREFIX):] for k in s3.objects if k.startswith(start))
+
+
+def put_calls(s3, name):
+    return [c for c in s3.calls if c[:2] == ["s3api", "put-object"] and c[c.index("--key") + 1] == PREFIX + name]
+
+
+def call_index(s3, op, name):
+    """op ("put-object" など) で name を指す最初の呼び出しの位置。"""
+    for i, c in enumerate(s3.calls):
+        if c[:2] == ["s3api", op] and c[c.index("--key") + 1] == PREFIX + name:
+            return i
+    raise AssertionError("%s %s の呼び出しがありません" % (op, name))
+
+
+class HistoryTest(MemsyncTestCase):
+    """送るたびの履歴 (.history/<名前>/<時刻>-<送り元>-<md5 先頭 8 文字>.md)。"""
+
+    def test_push_leaves_a_copy_with_key_and_metadata(self):
+        self.write("a.md", "mine\n")
+        self.sync(origin="agent-01").push()
+        key = "%s.history/a.md/%s-agent-01-%s.md" % (PREFIX, STAMP0, md5(b"mine\n")[:8])
+        self.assertEqual(self.s3.objects[key], b"mine\n")
+        self.assertEqual(self.s3.metadata[key], "pmva-origin=agent-01")
+        (put,) = put_calls(self.s3, ".history/a.md/%s-agent-01-%s.md" % (STAMP0, md5(b"mine\n")[:8]))
+        self.assertNotIn("--if-none-match", put, "履歴は条件なしで書く")
+        self.assertNotIn("--if-match", put)
+
+    def test_each_change_adds_a_version_and_unchanged_adds_none(self):
+        self.write("a.md", "v1\n")
+        self.sync().push()
+        self.clock[0] = datetime(2026, 11, 24, 11, 0, 0, tzinfo=timezone.utc)
+        self.write("a.md", "v2\n")
+        self.sync().push()
+        self.sync().push()
+        names = history_keys(self.s3, "a.md")
+        self.assertEqual(len(names), 2)
+        self.assertTrue(names[0].startswith(".history/a.md/20261124T101503Z-local-"))
+        self.assertTrue(names[1].startswith(".history/a.md/20261124T110000Z-local-"))
+
+    def test_index_is_not_recorded(self):
+        self.write("a.md", "a\n")
+        self.write("MEMORY.md", "- [A](a.md) - a\n")
+        self.sync().push()
+        self.assertEqual(history_keys(self.s3), [history_keys(self.s3, "a.md")[0]])
+        self.assertIsNotNone(self.s3.get("MEMORY.md"))
+
+    def test_dry_run_and_skipped_files_write_no_history(self):
+        self.write("a.md", "mine\n")
+        self.write("secret.md", "ghp_" + "A" * 36 + "\n")
+        self.sync(dry_run=True).push()
+        self.assertEqual(self.s3.objects, {})
+        self.sync().push()
+        self.assertEqual(history_keys(self.s3), [history_keys(self.s3, "a.md")[0]], "送らなかったファイルの履歴は残さない")
+
+    def test_conflict_writes_no_history(self):
+        self.s3.put("a.md", "old\n")
+        self.set_state(a=md5(b"old\n"))
+        self.write("a.md", "mine\n")
+        self.s3.before_put = lambda key: self.s3.put("a.md", "theirs\n") if key.endswith("/a.md") else None
+        self.sync().push()
+        self.assertEqual(history_keys(self.s3), [])
+
+    def test_history_failure_does_not_stop_the_sync(self):
+        def runner(args):
+            if ".history/" in " ".join(args):
+                return 254, "", "An error occurred (AccessDenied) when calling the PutObject operation: Access Denied"
+            return self.s3(args)
+        self.write("a.md", "a\n")
+        self.write("b.md", "b\n")
+        memsync.Memsync(self.dir, URI, self.state, runner=runner, out=self.lines.append).push()
+        self.assertEqual(self.s3.get("a.md"), b"a\n")
+        self.assertEqual(self.s3.get("b.md"), b"b\n", "履歴が失敗しても次のファイルを送る")
+        self.assertEqual(self.get_state(), {"a.md": md5(b"a\n"), "b.md": md5(b"b\n")})
+        self.assertIn("警告: a.md の履歴を残せませんでした", self.text())
+        self.assertIn("送信 2", self.text())
+
+    def test_parse_history_key_with_dashes_in_origin(self):
+        e = memsync.parse_history_key(".history/日本語.md/20261124T101503Z-vm-agent-01-abcd1234.md")
+        self.assertEqual((e["origin"], e["name"], e["md5"], e["at"]), ("vm-agent-01", "日本語.md", "abcd1234", T0))
+        for bad in (".history/a.md/notatime-local-abcd1234.md", ".history/a.md/20261124T101503Z-local-xyz.md",
+                    ".history/a.md/sub/20261124T101503Z-local-abcd1234.md", "a.md", ".history/20261124T101503Z-x-abcd1234.md"):
+            self.assertIsNone(memsync.parse_history_key(bad), bad)
+
+    def test_list_remote_does_not_fetch_history_keys(self):
+        for i in range(5):
+            self.s3.put(".history/a.md/2026112%dT000000Z-local-%08x.md" % (i, i), "x\n")
+        self.s3.put("a.md", "a\n")
+        self.s3.put(".deleted.json", json.dumps({"files": {}}))
+        sync = self.sync()
+        self.assertEqual(sync.list_remote(), {"a.md": md5(b"a\n")})
+        (call,) = [c for c in self.s3.calls if c[:2] == ["s3api", "list-objects-v2"]]
+        self.assertEqual(call[call.index("--delimiter") + 1], "/")
+        self.assertEqual(call[call.index("--prefix") + 1], PREFIX)
+        self.assertTrue(sync._deleted_etag, ".deleted.json は直下なので見つかる")
+        self.s3.calls.clear()
+        self.sync().history_log()
+        listing = [c for c in self.s3.calls if c[:2] == ["s3api", "list-objects-v2"]]
+        self.assertTrue(listing and all("--delimiter" not in c for c in listing), "履歴の一覧には付けない")
+
+    def test_history_and_marks_do_not_disturb_pull(self):
+        self.s3.put("a.md", "a\n")
+        self.s3.put(".history/a.md/%s-local-%s.md" % (STAMP0, md5(b"a\n")[:8]), "a\n")
+        self.s3.put(".deleted.json", json.dumps({"files": {}}))
+        self.sync().pull()
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ["a.md"])
+        self.assertIn("取得 1、送信 0、競合 0、飛ばした 0", self.text())
+
+    def test_old_s3_without_history_or_marks_works_as_before(self):
+        self.s3.put("a.md", "a\n")
+        self.s3.put("MEMORY.md", "- [A](a.md) - a\n")
+        self.sync().pull()
+        self.assertEqual(self.read("a.md"), b"a\n")
+        self.write("b.md", "b\n")
+        self.sync().push()
+        self.lines.clear()
+        self.sync().status()
+        self.assertRegex(self.text(), r"(?m)^a\.md +同期済み")
+        self.sync().history_log("a.md")
+        self.assertIn("履歴がありません", self.text())
+        with self.assertRaises(memsync.MemsyncError) as cm:
+            self.sync().revert("a.md")
+        self.assertIn("履歴がありません", str(cm.exception))
+
+
+class DeletedMarkTest(MemsyncTestCase):
+    """rm の削除の印 (.deleted.json) を pull / push / status / フックがどう扱うか。"""
+
+    def mark(self, name, data, line=None, by="pc", at="2026-11-24T09:00:00Z"):
+        raw = self.s3.get(".deleted.json")
+        files = json.loads(raw.decode("utf-8"))["files"] if raw else {}
+        data = data if isinstance(data, bytes) else data.encode("utf-8")
+        files.setdefault(name, []).insert(0, {"md5": md5(data), "at": at, "by": by, "line": line})
+        self.s3.put(".deleted.json", json.dumps({"files": files}))
+
+    def test_pull_removes_memory_deleted_elsewhere(self):
+        self.write("a.md", "old\n")
+        self.write("b.md", "keep\n")
+        self.write("MEMORY.md", "# 索引\n- [A](a.md) - a\n- [B](b.md) - b\n")
+        self.set_state(a=md5(b"old\n"), b=md5(b"keep\n"))
+        self.s3.put("b.md", "keep\n")
+        self.mark("a.md", "old\n", line="- [A](a.md) - a")
+        sync = self.sync()
+        sync.pull()
+        self.assertFalse((self.dir / "a.md").exists())
+        self.assertTrue((self.dir / "b.md").exists())
+        self.assertEqual(self.read("MEMORY.md").decode("utf-8"), "# 索引\n- [B](b.md) - b\n")
+        self.assertEqual(self.get_state(), {"b.md": md5(b"keep\n")})
+        self.assertEqual(sync.deleted, ["a.md"])
+        self.assertIn("他のマシンで消されたメモリ: a.md", self.text())
+        self.assertIn("取得 0、送信 0、競合 0、飛ばした 0、削除 1", self.text())
+
+    def test_pull_removes_when_s3_still_has_the_deleted_content(self):
+        self.write("a.md", "old\n")
+        self.s3.put("a.md", "old\n")        # 古い VM が送り直した
+        self.mark("a.md", "old\n")
+        sync = self.sync()
+        sync.pull()
+        self.assertFalse((self.dir / "a.md").exists())
+        self.assertIn("削除 1", self.text())
+        self.assertEqual(self.s3.get("a.md"), b"old\n", "S3 には触らない")
+
+    def test_pull_does_not_fetch_deleted_content_that_was_sent_again(self):
+        self.s3.put("a.md", "old\n")
+        self.mark("a.md", "old\n")
+        self.set_state(a=md5(b"old\n"))
+        self.s3.put("MEMORY.md", "- [A](a.md) - a\n")
+        self.sync().pull()
+        self.assertFalse((self.dir / "a.md").exists())
+        self.assertFalse((self.dir / "MEMORY.md").exists())
+        self.assertIn("取得しません", self.text())
+        self.assertIn("飛ばした 1", self.text())
+        self.assertNotIn("a.md", self.get_state())
+
+    def test_pull_leaves_a_file_rewritten_after_the_deletion(self):
+        self.write("a.md", "rewritten\n")
+        self.write("MEMORY.md", "- [A](a.md) - a\n")
+        self.set_state(a=md5(b"old\n"))
+        self.mark("a.md", "old\n")
+        sync = self.sync()
+        sync.pull()
+        self.assertEqual(self.read("a.md"), b"rewritten\n")
+        self.assertEqual(self.read("MEMORY.md"), b"- [A](a.md) - a\n")
+        self.assertEqual(sync.deleted, [])
+        self.assertNotIn("削除", self.text())
+
+    def test_pull_fetches_content_recreated_after_the_deletion(self):
+        self.write("a.md", "old\n")
+        self.set_state(a=md5(b"old\n"))
+        self.mark("a.md", "old\n")
+        self.s3.put("a.md", "new\n")           # 消した後に、別のマシンが作り直した
+        self.sync().pull()
+        self.assertEqual(self.read("a.md"), b"new\n")
+
+    def test_pull_does_not_delete_share_false_files(self):
+        data = "---\nshare: false\n---\nmine\n"
+        self.write("a.md", data)
+        self.mark("a.md", normalize(data))
+        self.sync().pull()
+        self.assertTrue((self.dir / "a.md").exists())
+        self.assertIn("share: false", self.text())
+
+    def test_pull_dry_run_changes_nothing(self):
+        self.write("a.md", "old\n")
+        self.write("MEMORY.md", "- [A](a.md) - a\n")
+        self.set_state(a=md5(b"old\n"))
+        self.mark("a.md", "old\n")
+        self.sync(dry_run=True).pull()
+        self.assertEqual(self.read("a.md"), b"old\n")
+        self.assertEqual(self.read("MEMORY.md"), b"- [A](a.md) - a\n")
+        self.assertIn("[dry-run] 他のマシンで消されたメモリ: a.md", self.text())
+        self.assertIn("[dry-run] MEMORY.md から", self.text())
+        self.assertEqual(self.get_state(), {"a.md": md5(b"old\n")})
+
+    def test_broken_marks_are_warned_and_ignored(self):
+        self.s3.put(".deleted.json", "{broken")
+        self.s3.put("a.md", "a\n")
+        self.sync().pull()
+        self.assertEqual(self.read("a.md"), b"a\n")
+        self.assertIn("警告", self.text())
+        self.assertIn(".deleted.json", self.text())
+
+    def test_push_does_not_send_deleted_content_or_its_index_line(self):
+        self.write("a.md", "old\n")
+        self.write("b.md", "b\n")
+        self.write("MEMORY.md", "- [A](a.md) - a\n- [B](b.md) - b\n")
+        self.s3.put("a.md", "old\n")            # 古い VM が送り直した内容
+        self.s3.put("b.md", "b\n")
+        self.s3.put("MEMORY.md", "- [B](b.md) - b\n")
+        self.mark("a.md", "old\n")
+        self.sync().push()
+        self.assertIn("mvm memory rm で消されたメモリなので送りません", self.text())
+        self.assertIn("飛ばした 1", self.text())
+        self.assertEqual(put_calls(self.s3, "MEMORY.md"), [], "索引の行も送らない")
+        self.assertEqual(history_keys(self.s3), [])
+
+    def test_push_does_not_resend_after_s3_copy_was_removed(self):
+        self.write("a.md", "old\n")
+        self.set_state(a=md5(b"old\n"))
+        self.mark("a.md", "old\n")
+        self.sync().push()
+        self.assertIsNone(self.s3.get("a.md"))
+        self.assertIn("飛ばした 1", self.text())
+
+    def test_push_sends_a_rewritten_file(self):
+        self.write("a.md", "rewritten\n")
+        self.mark("a.md", "old\n")
+        self.sync().push()
+        self.assertEqual(self.s3.get("a.md"), b"rewritten\n")
+
+    def test_status_shows_deleted(self):
+        self.write("a.md", "old\n")
+        self.write("b.md", "b\n")
+        self.mark("a.md", "old\n")
+        self.sync().status()
+        self.assertRegex(self.text(), r"(?m)^a\.md +消された \(mvm memory rm\)")
+        self.assertRegex(self.text(), r"(?m)^b\.md +手元だけ")
+
+    def test_hook_tells_the_conversation_about_deleted_memories(self):
+        self.write("a.md", "old\n")
+        self.set_state(a=md5(b"old\n"))
+        self.mark("a.md", "old\n")
+        out = memsync.run_hook("session-start", self.sync(), "{}")
+        self.assertTrue(out.isascii(), "ASCII だけの JSON")
+        ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("他のマシンで消されたメモリ: a.md (手元からも消しました。この記憶には頼らないでください)", ctx)
+        self.assertLessEqual(len(ctx), memsync.HOOK_CONTEXT_MAX)
+        self.assertFalse((self.dir / "a.md").exists())
+        self.assertEqual(memsync.run_hook("session-start", self.sync(), "{}"), "", "2 回目は何も伝えない")
+
+    def test_hook_context_stays_under_the_limit_with_many_deleted(self):
+        for i in range(120):
+            self.write("n%03d-%s.md" % (i, "x" * 20), "old\n")
+            self.mark("n%03d-%s.md" % (i, "x" * 20), "old\n")
+        ctx = json.loads(memsync.run_hook("session-start", self.sync(), "{}"))["hookSpecificOutput"]["additionalContext"]
+        self.assertLessEqual(len(ctx), memsync.HOOK_CONTEXT_MAX)
+        self.assertIn("ほか", ctx)
+
+
+class RmTest(MemsyncTestCase):
+    def marks(self):
+        return json.loads(self.s3.get(".deleted.json").decode("utf-8"))["files"]
+
+    def test_rm_marks_then_deletes_everywhere_in_order(self):
+        self.write("a.md", "local\n")
+        self.s3.put("a.md", "remote\n")
+        self.set_state(a=md5(b"base\n"))
+        self.write("MEMORY.md", "- [A](a.md) - local line\n- [B](b.md) - b\n")
+        self.s3.put("MEMORY.md", "- [A](a.md) - s3 line\n- [B](b.md) - b\n")
+        self.assertEqual(self.sync(origin="pc").rm("a.md"), 0)
+        entries = self.marks()["a.md"]
+        self.assertEqual([e["md5"] for e in entries], [md5(b"local\n"), md5(b"remote\n"), md5(b"base\n")])
+        for e in entries:
+            self.assertEqual((e["at"], e["by"], e["line"]), ("2026-11-24T10:15:03Z", "pc", "- [A](a.md) - s3 line"))
+        order = [call_index(self.s3, "put-object", ".deleted.json"), call_index(self.s3, "delete-object", "a.md"),
+                 call_index(self.s3, "put-object", "MEMORY.md")]
+        self.assertEqual(order, sorted(order), "印 → S3 のファイル → S3 の索引")
+        self.assertIsNone(self.s3.get("a.md"))
+        self.assertEqual(self.s3.get("MEMORY.md"), b"- [B](b.md) - b\n")
+        self.assertFalse((self.dir / "a.md").exists())
+        self.assertEqual(self.read("MEMORY.md"), b"- [B](b.md) - b\n")
+        self.assertEqual(self.get_state(), {})
+        self.assertEqual(self.s3.metadata[PREFIX + ".deleted.json"], "pmva-origin=pc")
+
+    def test_first_mark_is_created_only_if_absent_and_later_ones_are_conditional(self):
+        self.write("a.md", "a\n")
+        self.sync().rm("a.md")
+        (put,) = put_calls(self.s3, ".deleted.json")
+        self.assertEqual(put[put.index("--if-none-match") + 1], "*")
+        etag = md5(self.s3.get(".deleted.json"))
+        self.write("b.md", "b\n")
+        self.sync().rm("b.md")
+        self.assertEqual(put_calls(self.s3, ".deleted.json")[1][put_calls(self.s3, ".deleted.json")[1].index("--if-match") + 1], etag)
+        self.assertEqual(set(self.marks()), {"a.md", "b.md"})
+
+    def test_line_falls_back_to_the_local_index_and_is_null_without_one(self):
+        self.write("a.md", "a\n")
+        self.write("c.md", "c\n")
+        self.write("MEMORY.md", "- [A](a.md) - mine\n")
+        self.sync().rm("a.md")
+        self.sync().rm("c.md")
+        self.assertEqual(self.marks()["a.md"][0]["line"], "- [A](a.md) - mine")
+        self.assertIsNone(self.marks()["c.md"][0]["line"])
+
+    def test_rm_only_on_s3(self):
+        self.s3.put("a.md", "a\n")
+        self.sync().rm("a.md")
+        self.assertIsNone(self.s3.get("a.md"))
+        self.assertEqual(self.marks()["a.md"][0]["md5"], md5(b"a\n"))
+
+    def test_rm_keeps_newest_20_marks_first(self):
+        old = [{"md5": "%032x" % i, "at": "2026-11-0%dT00:00:00Z" % (i % 9 + 1), "by": "x", "line": None} for i in range(20)]
+        self.s3.put(".deleted.json", json.dumps({"files": {"a.md": old, "other.md": old[:1]}}))
+        self.write("a.md", "new\n")
+        self.sync().rm("a.md")
+        entries = self.marks()["a.md"]
+        self.assertEqual(len(entries), 20)
+        self.assertEqual(entries[0]["md5"], md5(b"new\n"))
+        self.assertEqual(entries[1]["md5"], old[0]["md5"])
+        self.assertEqual(self.marks()["other.md"], old[:1], "ほかの名前は変えない")
+
+    def test_rm_dry_run_writes_nothing(self):
+        self.write("a.md", "a\n")
+        self.s3.put("a.md", "a\n")
+        self.write("MEMORY.md", "- [A](a.md) - a\n")
+        self.s3.put("MEMORY.md", "- [A](a.md) - a\n")
+        self.set_state(a=md5(b"a\n"))
+        self.assertEqual(self.sync(dry_run=True).rm("a.md"), 0)
+        self.assertFalse(any(c[0:2] in (["s3api", "put-object"], ["s3api", "delete-object"]) for c in self.s3.calls))
+        self.assertEqual(self.read("a.md"), b"a\n")
+        self.assertEqual(self.get_state(), {"a.md": md5(b"a\n")})
+        for part in ("削除の印を付けます: a.md", "S3 から消します: a.md", "MEMORY.md から行を消します", "手元から消します"):
+            self.assertIn("[dry-run] " + part, self.text())
+
+    def test_rm_unknown_name_fails_with_next_step(self):
+        err = io.StringIO()
+        args = ["rm", "nothing.md", "--dir", str(self.dir), "--uri", URI, "--state", str(self.state)]
+        with redirect_stderr(err):
+            self.assertEqual(memsync.main(args, runner=self.s3, out=self.lines.append), 1)
+        self.assertIn("そのメモリはありません", err.getvalue())
+        self.assertIn("mvm memory status", err.getvalue())
+        self.assertIsNone(self.s3.get(".deleted.json"))
+
+    def test_rm_rejects_bad_names(self):
+        for name in ("MEMORY.md", "a.txt", "../a.md", "sub/a.md", ".hidden.md", "a\\b.md", "", None):
+            with self.assertRaises(memsync.MemsyncError, msg=repr(name)) as cm:
+                self.sync().rm(name)
+            self.assertIn(".md", str(cm.exception))
+        self.assertEqual(self.s3.calls, [])
+
+    def test_marks_race_is_retried_and_merged(self):
+        self.write("a.md", "a\n")
+        self.s3.put("a.md", "a\n")
+        self.set_state(a=md5(b"a\n"))
+        self.s3.put(".deleted.json", json.dumps({"files": {"x.md": [{"md5": "f" * 32, "at": "2026-11-23T00:00:00Z", "by": "vm", "line": None}]}}))
+        raced = []
+
+        def race(key):
+            if key.endswith(".deleted.json") and not raced:
+                raced.append(1)
+                files = json.loads(self.s3.get(".deleted.json").decode("utf-8"))
+                files["files"]["y.md"] = [{"md5": "e" * 32, "at": "2026-11-23T00:00:00Z", "by": "vm", "line": None}]
+                self.s3.put(".deleted.json", json.dumps(files))
+        self.s3.before_put = race
+        self.sync().rm("a.md")
+        self.assertEqual(set(self.marks()), {"x.md", "y.md", "a.md"}, "他のマシンの印を消さない")
+        self.assertEqual(len(put_calls(self.s3, ".deleted.json")), 2)
+        self.assertIsNone(self.s3.get("a.md"))
+
+    def test_marks_gives_up_after_repeated_races_without_deleting(self):
+        self.write("a.md", "a\n")
+        self.s3.put("a.md", "a\n")
+        counter = []
+
+        def race(key):
+            if key.endswith(".deleted.json"):
+                counter.append(1)
+                self.s3.put(".deleted.json", json.dumps({"files": {"z%d.md" % len(counter): []}}))
+        self.s3.before_put = race
+        with self.assertRaises(memsync.MemsyncError) as cm:
+            self.sync().rm("a.md")
+        self.assertIn("削除の印", str(cm.exception))
+        self.assertIn("もう一度", str(cm.exception))
+        self.assertEqual(len(counter), memsync.INDEX_PUT_ATTEMPTS)
+        self.assertEqual(self.s3.get("a.md"), b"a\n", "印が書けなければ何も消さない")
+        self.assertTrue((self.dir / "a.md").exists())
+
+    def test_index_race_is_retried(self):
+        self.write("a.md", "a\n")
+        self.s3.put("a.md", "a\n")
+        self.s3.put("MEMORY.md", "- [A](a.md) - a\n")
+        raced = []
+
+        def race(key):
+            if key.endswith("MEMORY.md") and not raced:
+                raced.append(1)
+                self.s3.put("MEMORY.md", "- [A](a.md) - a\n- [N](n.md) - 他のマシンが足した\n")
+        self.s3.before_put = race
+        self.sync().rm("a.md")
+        self.assertEqual(self.s3.get("MEMORY.md"), "- [N](n.md) - 他のマシンが足した\n".encode("utf-8"))
+        self.assertEqual(len(put_calls(self.s3, "MEMORY.md")), 2)
+
+    def test_access_denied_says_to_run_it_locally_and_keeps_the_rest(self):
+        self.write("a.md", "a\n")
+        self.s3.put("a.md", "a\n")
+        self.s3.deny_delete = True
+        with self.assertRaises(memsync.MemsyncError) as cm:
+            self.sync().rm("a.md")
+        self.assertIn("手元の PC", str(cm.exception))
+        self.assertIn("s3:DeleteObject", str(cm.exception))
+        self.assertIn("a.md", self.marks(), "印は書き込み済み")
+        self.assertTrue((self.dir / "a.md").exists(), "S3 を消せなかったときは手元も消さない")
+        self.s3.deny_delete = False
+        self.sync().rm("a.md")
+        self.assertIsNone(self.s3.get("a.md"))
+
+    def test_other_machine_removes_it_on_pull_and_never_sends_it_back(self):
+        # 手元 (self.dir) で rm → 別のマシン (dir2) が pull で消し、push しても送り返さない
+        dir2 = Path(self.tmp.name) / "memory2"
+        dir2.mkdir()
+        state2 = Path(self.tmp.name) / "state2.json"
+        self.write("a.md", "a\n")
+        self.write("MEMORY.md", "- [A](a.md) - a\n")
+        self.sync().push()
+
+        def other():
+            return memsync.Memsync(dir2, URI, state2, origin="vm-1", runner=self.s3, out=self.lines.append)
+        other().pull()
+        self.assertEqual((dir2 / "a.md").read_bytes(), b"a\n")
+        self.sync().rm("a.md")
+        self.assertIsNone(self.s3.get("a.md"))
+        sync2 = other()
+        sync2.pull()
+        self.assertFalse((dir2 / "a.md").exists())
+        self.assertNotIn("(a.md)", (dir2 / "MEMORY.md").read_text(encoding="utf-8"))
+        self.assertEqual(sync2.deleted, ["a.md"])
+        other().push()
+        self.assertIsNone(self.s3.get("a.md"))
+
+    def test_old_vm_sending_it_back_is_ignored_by_everyone(self):
+        self.write("a.md", "a\n")
+        self.sync().push()
+        self.sync().rm("a.md")
+        self.s3.put("a.md", "a\n")                  # 印を読まない古い VM が送り直した
+        sync = self.sync()
+        sync.pull()
+        self.assertFalse((self.dir / "a.md").exists())
+        self.assertIn("取得しません", self.text())
+
+
+class LogTest(MemsyncTestCase):
+    def hist(self, name, stamp, origin, text):
+        data = text.encode("utf-8")
+        self.s3.put(".history/%s/%s-%s-%s.md" % (name, stamp, origin, md5(data)[:8]), data)
+        return md5(data)[:8]
+
+    def setUp(self):
+        super().setUp()
+        self.h1 = self.hist("a.md", "20261124T090000Z", "local", "a1\n")
+        self.h2 = self.hist("b.md", "20261124T093000Z", "vm-agent-01", "b1\n")
+        self.h3 = self.hist("a.md", "20261124T101503Z", "vm-agent-01", "a2\n")
+        self.s3.put(".deleted.json", json.dumps({"files": {"b.md": [
+            {"md5": md5(b"b1\n"), "at": "2026-11-24T10:00:00Z", "by": "local", "line": None}]}}))
+
+    def run_log(self, *args, **kw):
+        self.lines.clear()
+        rc = self.sync().history_log(*args, **kw)
+        self.assertEqual(rc, 0)
+        return list(self.lines)
+
+    def test_table_is_oldest_first_with_deletes_mixed_in(self):
+        rows = self.run_log()
+        self.assertEqual(len(rows), 4)
+        self.assertEqual([r.split()[0] + " " + r.split()[1] for r in rows],
+                         ["2026-11-24 09:00:00Z", "2026-11-24 09:30:00Z", "2026-11-24 10:00:00Z", "2026-11-24 10:15:03Z"])
+        self.assertRegex(rows[0], r"^2026-11-24 09:00:00Z  local +書いた +a\.md$")
+        self.assertRegex(rows[1], r"vm-agent-01 +書いた +b\.md$")
+        self.assertRegex(rows[2], r"local +消した +b\.md$")
+        self.assertRegex(rows[3], r"vm-agent-01 +書いた +a\.md$")
+
+    def test_name_filter(self):
+        rows = self.run_log("b.md")
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(r.endswith("b.md") for r in rows))
+        listing = [c for c in self.s3.calls if c[:2] == ["s3api", "list-objects-v2"]]
+        self.assertIn(PREFIX + ".history/b.md/", [c[c.index("--prefix") + 1] for c in listing])
+
+    def test_origin_filter(self):
+        rows = self.run_log(only_origin="vm-agent-01")
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all("vm-agent-01" in r for r in rows))
+        self.assertEqual(len(self.run_log(only_origin="local")), 2)
+        self.assertTrue(self.run_log(only_origin="nobody")[0].startswith("履歴はありません"))
+
+    def test_since_relative_and_absolute(self):
+        self.clock[0] = datetime(2026, 11, 24, 10, 30, 0, tzinfo=timezone.utc)
+        self.assertEqual(len(self.run_log(since="30m")), 2)         # 10:00 以降: 削除と a2
+        self.assertEqual(len(self.run_log(since="2h")), 4)          # 08:30 以降
+        self.assertEqual(len(self.run_log(since="1d")), 4)
+        self.assertEqual(len(self.run_log(since="2026-11-24T10:00:00Z")), 2, "その時刻を含む")
+        self.assertTrue(self.run_log(since="2026-11-24T19:15:04+09:00")[0].startswith("履歴はありません"), "UTC 10:15:04 より後はない")
+        self.assertEqual(len(self.run_log(since="2026-11-24")), 4)
+
+    def test_parse_since(self):
+        now = datetime(2026, 11, 24, 12, 0, 0, tzinfo=timezone.utc)
+        self.assertEqual(memsync.parse_since("30m", now), datetime(2026, 11, 24, 11, 30, tzinfo=timezone.utc))
+        self.assertEqual(memsync.parse_since("2h", now), datetime(2026, 11, 24, 10, 0, tzinfo=timezone.utc))
+        self.assertEqual(memsync.parse_since("3d", now), datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc))
+        self.assertEqual(memsync.parse_since("2026-11-24T10:00:00Z"), datetime(2026, 11, 24, 10, 0, tzinfo=timezone.utc))
+        self.assertEqual(memsync.parse_since("2026-11-24"), datetime(2026, 11, 24, tzinfo=timezone.utc))
+        self.assertEqual(memsync.parse_since("2026-11-24T10:00:00"), datetime(2026, 11, 24, 10, 0, tzinfo=timezone.utc))
+        self.assertEqual(memsync.parse_since("2026-11-24T19:00:00+09:00"), datetime(2026, 11, 24, 10, 0, tzinfo=timezone.utc))
+        # 99999999999d と 0001-01-01T00:00:00+09:00 は、日時の範囲を外れる (OverflowError で落ちていた)
+        for bad in ("", "yesterday", "5x", "-3d", "1.5h", "2026-13-40", "h", "99999999999d", "0001-01-01T00:00:00+09:00"):
+            with self.assertRaises(memsync.MemsyncError, msg=bad) as cm:
+                memsync.parse_since(bad, now)
+            self.assertIn("--since", str(cm.exception))
+            self.assertIn("30m", str(cm.exception), "次にすることを書く")
+
+    def test_bad_since_is_an_error_before_any_aws_call(self):
+        with self.assertRaises(memsync.MemsyncError):
+            self.sync().history_log(since="soon")
+        self.assertEqual(self.s3.calls, [])
+
+    def test_json(self):
+        (text,) = self.run_log("a.md", as_json=True)
+        data = json.loads(text)
+        self.assertEqual(data, [
+            {"at": "2026-11-24T09:00:00Z", "origin": "local", "action": "write", "name": "a.md", "md5": self.h1,
+             "key": ".history/a.md/20261124T090000Z-local-%s.md" % self.h1},
+            {"at": "2026-11-24T10:15:03Z", "origin": "vm-agent-01", "action": "write", "name": "a.md", "md5": self.h3,
+             "key": ".history/a.md/20261124T101503Z-vm-agent-01-%s.md" % self.h3}])
+        (text,) = self.run_log("b.md", as_json=True)
+        delete = [e for e in json.loads(text) if e["action"] == "delete"]
+        self.assertEqual(delete, [{"at": "2026-11-24T10:00:00Z", "origin": "local", "action": "delete", "name": "b.md",
+                                   "md5": md5(b"b1\n"), "key": ".deleted.json"}])
+
+    def test_json_empty_is_an_empty_array(self):
+        self.assertEqual(self.run_log(only_origin="nobody", as_json=True), ["[]"])
+
+    def test_pagination(self):
+        for i in range(5):
+            self.hist("p.md", "2026112%dT000000Z" % i, "local", "p%d\n" % i)
+        self.s3.page_size = 2
+        self.assertEqual(len(self.run_log("p.md")), 5)
+
+    def test_no_history_says_older_memories_have_none(self):
+        self.s3.objects.clear()
+        (text,) = self.run_log()
+        self.assertIn("段階 3 より前に送られたメモリには履歴がありません", text)
+
+    def test_log_writes_nothing(self):
+        self.run_log()
+        self.assertFalse(any(c[:2] in (["s3api", "put-object"], ["s3api", "delete-object"]) for c in self.s3.calls))
+        self.assertFalse(self.state.exists())
+
+
+class RevertTest(MemsyncTestCase):
+    def hist(self, name, stamp, origin, data):
+        data = data if isinstance(data, bytes) else data.encode("utf-8")
+        self.s3.put(".history/%s/%s-%s-%s.md" % (name, stamp, origin, md5(data)[:8]), data)
+
+    def three_versions(self, current=b"v3\n"):
+        for stamp, origin, text in (("20261124T080000Z", "local", b"v1\n"), ("20261124T090000Z", "vm-1", b"v2\n"),
+                                    ("20261124T100000Z", "local", b"v3\n")):
+            self.hist("a.md", stamp, origin, text)
+        self.s3.put("a.md", current)
+        self.write("a.md", current)
+        self.set_state(a=md5(current))
+
+    def test_default_goes_back_one_version(self):
+        self.three_versions()
+        self.s3.calls.clear()
+        self.assertEqual(self.sync(origin="pc").revert("a.md"), 0)
+        self.assertEqual(self.s3.get("a.md"), b"v2\n")
+        self.assertEqual(self.read("a.md"), b"v2\n")
+        self.assertEqual(self.get_state(), {"a.md": md5(b"v2\n")})
+        (put,) = put_calls(self.s3, "a.md")
+        self.assertEqual(put[put.index("--if-match") + 1], md5(b"v3\n"), "今の S3 の ETag を条件にする")
+        key = ".history/a.md/%s-pc-%s.md" % (STAMP0, md5(b"v2\n")[:8])
+        self.assertEqual(self.s3.get(key), b"v2\n", "戻したことも履歴に新しい版として残る")
+        self.assertIn("戻しました: a.md", self.text())
+
+    def test_reverting_twice_walks_back_through_history(self):
+        self.three_versions()
+        self.sync().revert("a.md")
+        self.clock[0] = datetime(2026, 11, 24, 11, 0, 0, tzinfo=timezone.utc)
+        self.sync().revert("a.md")
+        self.assertEqual(self.s3.get("a.md"), b"v3\n", "最新の履歴は戻した版 (v2) なので、その 1 つ前は v3")
+
+    def test_to_picks_the_latest_version_at_or_before_the_time(self):
+        for to, expected in (("20261124T094500Z", b"v2\n"), ("20261124T090000Z", b"v2\n"), ("2026-11-24T08:30:00Z", b"v1\n"),
+                             ("2026-11-24T18:30:00+09:00", b"v2\n"), ("20261124T080000Z", b"v1\n")):
+            self.s3.objects.clear()
+            self.three_versions()
+            self.sync().revert("a.md", to=to)
+            self.assertEqual(self.s3.get("a.md"), expected, to)
+
+    def test_to_errors(self):
+        self.three_versions()
+        with self.assertRaises(memsync.MemsyncError) as cm:
+            self.sync().revert("a.md", to="20261124T070000Z")
+        self.assertIn("mvm memory log", str(cm.exception))
+        with self.assertRaises(memsync.MemsyncError) as cm:
+            self.sync().revert("a.md", to="tomorrow")
+        self.assertIn("--to", str(cm.exception))
+        self.assertEqual(self.s3.get("a.md"), b"v3\n")
+
+    def test_to_the_current_version_does_nothing(self):
+        self.three_versions()
+        self.s3.calls.clear()
+        self.assertEqual(self.sync().revert("a.md", to="20261124T100000Z"), 0)
+        self.assertIn("何もしません", self.text())
+        self.assertFalse(any(c[:2] == ["s3api", "put-object"] for c in self.s3.calls))
+
+    def test_unsynced_local_change_stops_without_force(self):
+        self.three_versions()
+        self.write("a.md", "mine\n")
+        with self.assertRaises(memsync.MemsyncError) as cm:
+            self.sync().revert("a.md")
+        self.assertIn("--force", str(cm.exception))
+        self.assertIn("mvm memory push", str(cm.exception))
+        self.assertEqual(self.read("a.md"), b"mine\n")
+        self.assertEqual(self.s3.get("a.md"), b"v3\n")
+        self.sync(force=True).revert("a.md")
+        self.assertEqual(self.read("a.md"), b"v2\n")
+        self.assertEqual(self.s3.get("a.md"), b"v2\n")
+
+    def test_local_equal_to_s3_but_not_base_is_not_unsynced(self):
+        self.three_versions()
+        self.set_state(a=md5(b"v1\n"))      # 基準は古いが、手元と S3 は同じ
+        self.sync().revert("a.md")
+        self.assertEqual(self.s3.get("a.md"), b"v2\n")
+
+    def test_dry_run_shows_the_version_and_changes_nothing(self):
+        self.three_versions(current=b"v3\n")
+        self.s3.calls.clear()
+        self.sync(dry_run=True).revert("a.md")
+        self.assertEqual(self.s3.get("a.md"), b"v3\n", "今のまま")
+        self.assertEqual(self.read("a.md"), b"v3\n")
+        self.assertEqual(self.get_state(), {"a.md": md5(b"v3\n")})
+        self.assertFalse(any(c[:2] == ["s3api", "put-object"] for c in self.s3.calls))
+        self.assertIn("[dry-run] 戻す版: 20261124T090000Z (書いたマシン vm-1", self.text())
+        self.assertIn("    | v2", self.lines)
+
+    def test_dry_run_preview_is_first_five_lines(self):
+        self.hist("a.md", "20261124T080000Z", "local", "".join("old%d\n" % i for i in range(8)))
+        self.s3.put("a.md", "now\n")
+        self.sync(dry_run=True).revert("a.md")
+        previews = [l for l in self.lines if l.startswith("    | ")]
+        self.assertEqual(previews, ["    | old%d" % i for i in range(5)])
+
+    def test_revert_after_rm_restores_content_removes_mark_and_index_lines(self):
+        data = b"---\nname: a\n---\nkept\n"
+        self.hist("a.md", "20261124T080000Z", "local", data)
+        self.s3.put(".deleted.json", json.dumps({"files": {
+            "a.md": [{"md5": md5(data), "at": "2026-11-24T09:00:00Z", "by": "pc", "line": "- [A](a.md) - 大事な記憶"}],
+            "z.md": [{"md5": "d" * 32, "at": "2026-11-24T09:00:00Z", "by": "pc", "line": None}]}}))
+        self.s3.put("MEMORY.md", "- [B](b.md) - b\n")
+        self.write("MEMORY.md", "- [B](b.md) - b\n")
+        self.sync().revert("a.md")
+        self.assertEqual(self.s3.get("a.md"), data)
+        self.assertEqual(self.read("a.md"), data)
+        (put,) = put_calls(self.s3, "a.md")
+        self.assertIn("--if-none-match", put, "S3 に無いので「まだ無いこと」を条件にする")
+        files = json.loads(self.s3.get(".deleted.json").decode("utf-8"))["files"]
+        self.assertEqual(list(files), ["z.md"], "印を外す (ほかの名前は残す)")
+        self.assertEqual(self.s3.get("MEMORY.md").decode("utf-8"), "- [B](b.md) - b\n- [A](a.md) - 大事な記憶\n")
+        self.assertEqual(self.read("MEMORY.md").decode("utf-8"), "- [B](b.md) - b\n- [A](a.md) - 大事な記憶\n")
+        # 戻したメモリは、印が外れたので pull / push でまた消えたり送り返されたりしない
+        self.sync().pull()
+        self.sync().push()
+        self.assertEqual(self.read("a.md"), data)
+        self.assertEqual(self.s3.get("a.md"), data)
+
+    def test_index_line_is_not_duplicated_and_missing_files_are_created(self):
+        data = b"kept\n"
+        self.hist("a.md", "20261124T080000Z", "local", data)
+        self.s3.put(".deleted.json", json.dumps({"files": {"a.md": [
+            {"md5": md5(data), "at": "2026-11-24T09:00:00Z", "by": "pc", "line": "- [A](a.md) - x"}]}}))
+        self.s3.put("MEMORY.md", "- [A](a.md) - すでにある\n")      # S3 には行がある。手元には索引が無い
+        self.sync().revert("a.md")
+        self.assertEqual(self.s3.get("MEMORY.md").decode("utf-8"), "- [A](a.md) - すでにある\n")
+        self.assertEqual(self.read("MEMORY.md").decode("utf-8"), "- [A](a.md) - x\n")
+
+    def test_only_the_reverted_content_is_unmarked(self):
+        old, new = b"old\n", b"new\n"
+        self.hist("a.md", "20261124T080000Z", "local", old)
+        self.s3.put(".deleted.json", json.dumps({"files": {"a.md": [
+            {"md5": md5(new), "at": "2026-11-24T09:00:00Z", "by": "pc", "line": None},
+            {"md5": md5(old), "at": "2026-11-24T08:30:00Z", "by": "pc", "line": None}]}}))
+        self.sync().revert("a.md")
+        files = json.loads(self.s3.get(".deleted.json").decode("utf-8"))["files"]
+        self.assertEqual([e["md5"] for e in files["a.md"]], [md5(new)])
+
+    def test_no_history_and_bad_names(self):
+        self.s3.put("a.md", "a\n")
+        with self.assertRaises(memsync.MemsyncError) as cm:
+            self.sync().revert("a.md")
+        self.assertIn("履歴がありません", str(cm.exception))
+        for name in ("MEMORY.md", "a.txt", "", None):
+            with self.assertRaises(memsync.MemsyncError):
+                self.sync().revert(name)
+
+    def test_only_one_version_means_nothing_to_go_back_to(self):
+        self.hist("a.md", "20261124T080000Z", "local", "v1\n")
+        self.s3.put("a.md", "v1\n")
+        with self.assertRaises(memsync.MemsyncError) as cm:
+            self.sync().revert("a.md")
+        self.assertIn("戻せる版がありません", str(cm.exception))
+
+    def test_other_machine_writing_meanwhile_stops_the_revert(self):
+        self.three_versions()
+        self.s3.before_put = lambda key: self.s3.put("a.md", "theirs\n") if key.endswith("/a.md") else None
+        with self.assertRaises(memsync.MemsyncError) as cm:
+            self.sync().revert("a.md")
+        self.assertIn("他のマシンが書き換えました", str(cm.exception))
+        self.assertEqual(self.s3.get("a.md"), b"theirs\n")
+        self.assertEqual(self.read("a.md"), b"v3\n")
+
+    def test_corrupted_history_is_refused(self):
+        self.three_versions()
+        self.s3.put(".history/a.md/20261124T095900Z-local-%s.md" % md5(b"v2\n")[:8], "tampered\n")
+        self.s3.objects.pop(PREFIX + ".history/a.md/20261124T090000Z-vm-1-%s.md" % md5(b"v2\n")[:8])
+        with self.assertRaises(memsync.MemsyncError) as cm:
+            self.sync().revert("a.md")
+        self.assertIn("合いません", str(cm.exception))
+        self.assertEqual(self.s3.get("a.md"), b"v3\n")
+
+
+class AdminCliTest(MemsyncTestCase):
+    def main(self, *argv):
+        args = list(argv) + ["--dir", str(self.dir), "--uri", URI, "--state", str(self.state)]
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = memsync.main(args, runner=self.s3, out=lambda m: print(m))
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_push_log_rm_revert_through_main(self):
+        self.write("a.md", "v1\n")
+        self.assertEqual(self.main("push", "--origin", "vm-7")[0], 0)
+        self.write("a.md", "v2\n")
+        self.assertEqual(self.main("push", "--origin", "vm-7")[0], 0)
+        rc, out, _ = self.main("log", "a.md", "--origin", "vm-7", "--since", "2000-01-01", "--json")
+        self.assertEqual(rc, 0)
+        self.assertEqual([e["origin"] for e in json.loads(out)], ["vm-7", "vm-7"])
+        self.assertEqual(json.loads(self.main("log", "--origin", "someone", "--json")[1]), [])
+        rc, out, _ = self.main("log")
+        self.assertIn("a.md", out)
+        rc, out, _ = self.main("revert", "a.md", "--dry-run")
+        self.assertEqual(rc, 0)
+        self.assertIn("戻す版", out)
+        self.assertEqual(self.main("revert", "a.md")[0], 0)
+        self.assertEqual(self.read("a.md"), b"v1\n")
+        self.assertEqual(self.main("rm", "a.md")[0], 0)
+        self.assertFalse((self.dir / "a.md").exists())
+        self.assertIsNone(self.s3.get("a.md"))
+        self.assertIn("a.md", json.loads(self.s3.get(".deleted.json").decode("utf-8"))["files"])
+
+    def test_origin_of_rm_is_recorded_as_the_machine_name(self):
+        self.write("a.md", "a\n")
+        self.main("rm", "a.md", "--origin", "vm-7")
+        self.assertEqual(json.loads(self.s3.get(".deleted.json").decode("utf-8"))["files"]["a.md"][0]["by"], "vm-7")
+
+    def test_errors_are_nonzero_with_next_steps(self):
+        rc, _, err = self.main("rm")
+        self.assertEqual(rc, 1)
+        self.assertIn(".md", err)
+        rc, _, err = self.main("revert", "a.md")
+        self.assertEqual(rc, 1)
+        self.assertIn("履歴がありません", err)
+        rc, _, err = self.main("log", "--since", "soon")
+        self.assertEqual(rc, 1)
+        self.assertIn("--since", err)
+        rc, _, err = self.main("pull", "a.md")
+        self.assertEqual(rc, 1)
+        self.assertIn("余分な引数", err)
+
+    def test_hook_with_a_bad_event_still_exits_zero(self):
+        for argv in (["hook", "nonsense"], ["hook"], ["hook", "a.md"]):
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = memsync.main(argv + ["--dir", str(self.dir), "--uri", URI, "--state", str(self.state)],
+                                  runner=self.s3, stdin=io.StringIO("{}"))
+            self.assertEqual(rc, 0, argv)
+            self.assertEqual(out.getvalue(), "")
+            self.assertIn("hook のイベント", err.getvalue())
+        self.assertEqual(self.s3.calls, [])
 
 
 class ImageWiringTest(unittest.TestCase):

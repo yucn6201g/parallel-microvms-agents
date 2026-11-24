@@ -129,11 +129,15 @@ Claude Code の hooks と Codex の `notify` から `image/notify.sh` を呼び�
 
 Claude Code の自動メモリ (1 件 1 ファイルの `*.md` と索引 `MEMORY.md`) を、手元の PC と VM で共有します。同期の実装は `image/memsync.py` の 1 つで、VM は CLI として、手元の `mvm` は関数として読み込んで使います。
 
-- **S3 の配置**: `s3://<バケット>/memory/<repo-id>/<名前>.md`。`<repo-id>` は origin の URL を `host/owner/name` (小文字、`.git` と認証情報なし) にしたもの。同じリポジトリなら、PC も VM も同じ場所を指します
-- **手元**: `mvm memory pull|push|sync` が、Claude Code の自動メモリのフォルダと S3 を同期します。最後に同期した内容 (`.state/memory/`) を基準にした 3 者比較で、競合は `--force` で解きます。`MEMORY.md` は行の和集合でマージします。削除は伝えません
+- **S3 の配置**: `s3://<バケット>/memory/<repo-id>/<名前>.md` と索引 `MEMORY.md`。`<repo-id>` は origin の URL を `host/owner/name` (小文字、`.git` と認証情報なし) にしたもの。同じリポジトリなら、PC も VM も同じ場所を指します。同じ場所に、送るたびの写し `.history/<名前>/<UTC の時刻>-<送ったマシン>-<md5 先頭 8 文字>.md` と、`rm` した削除の印 `.deleted.json` も置きます。同期は直下の `*.md` だけを見るので、この 2 つは同期の対象になりません
+- **手元**: `mvm memory pull|push|sync` が、Claude Code の自動メモリのフォルダと S3 を同期します。最後に同期した内容 (`.state/memory/`) を基準にした 3 者比較で、競合は `--force` で解きます。`MEMORY.md` は行の和集合でマージします。削除は伝えませんが、`mvm memory rm` で消したものだけは印で伝えます (下の「履歴と削除の印」)
 - **VM**: `mvm up` (`MEMORY_SYNC=true` か `--memory`、`--repo` 付き) は `runHookPayload` の `memory` に S3 の場所を入れます。`bootstrap.sh` が `~/.claude/settings.json` の `autoMemoryDirectory` を `~/.claude/pmva-memory` にして、clone の後に `memsync.py pull` します。`snapshot.sh` が、ワークスペースの保存の前に `memsync.py push` します (失敗しても保存は続けます)。あわせて `bootstrap.sh` が Claude Code のフック (`memsync.py hook session-start|prompt|post-tool`) を入れ、会話の開始時と指示のたびに取得し、メモリを書いたらすぐ送ります。共有しない起動では、以前に入れたこのフックを外します。同期の状態ファイルは、メモリと一緒にスナップショットで戻るよう `~/.claude/pmva-memory.state.json` に置き、メモリのフォルダの中には置きません (Claude Code が読んでしまうため)
 - **フック**: `memsync.py hook` はイベントの JSON を標準入力で受け取り、届いたメモリを `hookSpecificOutput.additionalContext` で会話に渡します。経過は標準エラーに出し、失敗しても 0 で終わります (UserPromptSubmit が 2 で終わると、利用者の指示が止まるため)。同じマシンの複数の会話が同時に同期しないよう、状態ファイルの隣のロック (`.lock`) で 1 つにし、指示のたびの取得は `.pulled` の時刻で 60 秒に 1 回までにします。手元は `mvm memory install-hooks` が、同じ処理を呼ぶ `mvm memory hook` をフックに入れます
 - **同時の書き込み**: S3 への書き込みは `s3api put-object --if-match <一覧のときの ETag>` (新しいファイルは `--if-none-match "*"`) です。他のマシンが間に書き換えると 412 で失敗するので、ファイルは競合として飛ばし (基準は進めない)、`MEMORY.md` は取り直してマージし直します
+- **履歴と削除の印**: 誤ったメモリを見つけて戻す・消すための仕組みです (`mvm memory log` / `revert` / `rm`)。
+  - 履歴: `.md` のメモリ (`MEMORY.md` を除く) を S3 に送るのに成功するたびに、条件なしの `put-object` で `.history/` に写しを置きます (`pmva-origin` のメタデータ付き)。書けなくても同期は止めず、警告だけを出します。`log` は `.history/` の一覧 (キー名から時刻・送ったマシン・md5 を取り出します) と削除の印を混ぜて表示し、`revert` は履歴の中身を、今の ETag を条件にした `put-object` で S3 に戻します (戻したことも履歴に残ります)
+  - 削除の印: `rm` は、消すメモリの中身の md5 (手元・S3・最後に同期したときの内容) を `.deleted.json` (`{"files": {"<名前>": [{"md5", "at", "by", "line"}, ...]}}`、名前ごとに新しい順で 20 件まで) に条件付きで書き、その後に S3 のファイル、S3 の `MEMORY.md` の行、手元のファイルと行を消します。印を先に書くので、途中で止まっても、他のマシンが消えたメモリを送り直すことはありません。`line` は消した索引の行で、`revert` が行を戻すのに使います
+  - 他のマシンでの消え方: `pull` は、手元の中身の md5 が印のどれかと同じで、S3 にその名前が無い (または S3 の中身も印と同じ) ファイルを手元から消し、索引の行と状態ファイルからも外します。S3 の中身が印と同じ (印を読まない古い VM が送り直した) ときは取得せず、`push` は印と同じ中身を送りません。手元の中身が印と違う (消された後に書き換えた) ファイルには触りません。md5 で比べるので、消された後に作り直した別の内容は普通に同期されます。印を読めない古いイメージ (8.0 以前) の VM は、`rm` したメモリを送り直すことがあります
 - **実行ロール**: `memory/*` の `s3:GetObject` / `s3:PutObject` と、`s3:ListBucket` (`memory/*`)。`s3:DeleteObject` は付けません (VM のエージェントが共有のメモリを消せないように)。消すのは手元の操作用ポリシー (`memory/*` の `s3:DeleteObject`) だけです
 - 認証情報らしい文字列を含むファイル、`share: false` のファイル、1MB を超えるファイルは送りません
 

@@ -2966,14 +2966,15 @@ def cmd_memory(args):
         def run(action):
             sync = ms.Memsync(memory_dir, uri, state, "local", getattr(args, "dry_run", False), getattr(args, "force", False),
                               memory_aws_runner)
-            return getattr(sync, action)()
+            return sync.run_action(action, args.event, getattr(args, "origin", None), getattr(args, "since", None),
+                                   getattr(args, "json", False), getattr(args, "to", None))
         rc = 0
         for action in ("pull", "push") if args.action == "sync" else (args.action,):
             rc = rc or run(action)
     except ms.MemsyncError as e:
         die(str(e))
     # 案内は、このリポジトリで初めて同期したときだけ出す (毎回出るとうるさい)
-    if args.action != "status" and first_time and state.exists():
+    if args.action in ("pull", "push", "sync") and first_time and state.exists():
         if not as_bool(C["MEMORY_SYNC"]):
             log("mvm up で VM にもメモリを使わせるには、config.env に MEMORY_SYNC=true を書いてください (--memory でも指定できます)")
         log("この PC でも、会話の開始時やメモリを書いたときに自動で同期するには mvm memory install-hooks を実行してください")
@@ -3054,7 +3055,7 @@ def cmd_memory_hook(args):
     ms = load_memsync()
     # Claude Code は UTF-8 で渡す (Windows の既定の文字コードで読むと化ける)
     text = sys.stdin.buffer.read().decode("utf-8", errors="replace")
-    if not args.event:
+    if args.event not in ("session-start", "prompt", "post-tool"):
         die("イベント (session-start / prompt / post-tool) を指定してください")
     try:
         payload = json.loads(text or "{}")
@@ -3215,14 +3216,22 @@ def build_parser():
     x.add_argument("--dry-run", action="store_true", help="push で、送るものを表示するだけにする")
     x.set_defaults(func=cmd_profile)
     x = sub.add_parser("memory", help="Claude Code の自動メモリを S3 経由で MicroVM と共有する "
-                                      "(status / pull / push / sync / install-hooks / uninstall-hooks)")
-    x.add_argument("action", choices=("status", "pull", "push", "sync", "install-hooks", "uninstall-hooks", "hook"))
-    x.add_argument("event", nargs="?", choices=("session-start", "prompt", "post-tool"),
-                   help="hook のときのイベント (install-hooks が入れるフックから呼ばれる)")
+                                      "(status / pull / push / sync / log / revert / rm / install-hooks / uninstall-hooks)")
+    x.add_argument("action", choices=("status", "pull", "push", "sync", "log", "revert", "rm",
+                                      "install-hooks", "uninstall-hooks", "hook"))
+    x.add_argument("event", nargs="?", metavar="名前",
+                   help="log (省略すると全部) / revert / rm のときのメモリの名前 (user_role.md など)。"
+                        "hook のときはイベント (install-hooks が入れるフックから呼ばれる)")
+    x.add_argument("--origin", help="log で、この名前のマシン (local、VM の名前) が書いたものだけに絞る")
+    x.add_argument("--since", help="log で、この期間・日時より後だけ表示する (30m / 2h / 3d、または 2026-11-24T10:00:00Z、2026-11-24)")
+    x.add_argument("--json", action="store_true", help="log を JSON の配列で表示する")
+    x.add_argument("--to", help="revert で戻す版の時刻 (mvm memory log の時刻。20261124T101503Z や 2026-11-24T10:15:03Z。"
+                                "その時刻以前で最新の版。省略すると 1 つ前。続けて revert すると取り消しになるので、2 つ以上前は --to で)")
     x.add_argument("--min-interval", type=float, default=0, help=argparse.SUPPRESS)
     x.add_argument("--dir", help="リポジトリのフォルダ (既定は現在のフォルダ。hook ではフックが渡す cwd)")
-    x.add_argument("--dry-run", action="store_true", help="何も書き換えず、することだけ表示する (status では無視)")
-    x.add_argument("--force", action="store_true", help="競合したとき、pull は S3、push は手元の内容を採用する (status では無視)")
+    x.add_argument("--dry-run", action="store_true", help="何も書き換えず、することだけ表示する (status / log では無視)")
+    x.add_argument("--force", action="store_true", help="競合したとき、pull は S3、push は手元の内容を採用する。"
+                                                       "revert では手元の未同期の変更を捨てて戻す (status / log / rm では無視)")
     x.set_defaults(func=cmd_memory)
     x = sub.add_parser("orchestrator", help="手元の Claude Code / Codex を司令塔にする (MicroVM に作業を任せる skill と設定)")
     x.add_argument("action", choices=("install", "uninstall"))
