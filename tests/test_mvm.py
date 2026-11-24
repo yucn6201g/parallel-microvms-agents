@@ -745,6 +745,64 @@ class CliTest(unittest.TestCase):
         calls = [json.loads(l) for l in (self.stub_dir / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
         self.assertTrue(any(c[:2] == ["s3api", "list-objects-v2"] for c in calls))
 
+    def test_memory_log_revert_rm(self):
+        repo, mem = self.memory_repo()
+        s3 = self.stub_dir / "s3" / "pmva-bucket" / "memory" / "github.com" / "owner" / "repo"
+        (mem / "user_role.md").write_text("v1\n", encoding="utf-8")
+        (mem / "MEMORY.md").write_text("- [Role](user_role.md) - role\n", encoding="utf-8")
+        self.mvm("memory", "push", "--dir", str(repo))
+        (mem / "user_role.md").write_text("v2\n", encoding="utf-8")
+        self.mvm("memory", "push", "--dir", str(repo))
+        # log: 位置引数 (名前)、--origin、--since、--json が渡る
+        rc, out, err = self.mvm("memory", "log", "--json", "--origin", "local", "--since", "1d", "--dir", str(repo))
+        entries = json.loads(out)
+        self.assertEqual([(e["origin"], e["action"], e["name"]) for e in entries], [("local", "write", "user_role.md")] * 2)
+        self.assertIn("s3://pmva-bucket/memory/github.com/owner/repo/", err)
+        rc, out, _ = self.mvm("memory", "log", "user_role.md", "--dir", str(repo))
+        self.assertEqual(len(out.strip().splitlines()), 2)
+        self.assertRegex(out, r"(?m)^\d{4}-\d\d-\d\d \d\d:\d\d:\d\dZ  local +書いた +user_role\.md\r?$")
+        rc, out, _ = self.mvm("memory", "log", "--origin", "vm-9", "--dir", str(repo))
+        self.assertIn("履歴はありません", out)
+        rc, _, err = self.mvm("memory", "log", "--since", "bogus", "--dir", str(repo), check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("--since", err)
+        # revert: --dry-run は何も書き換えず、--to が渡る
+        rc, out, _ = self.mvm("memory", "revert", "user_role.md", "--dry-run", "--dir", str(repo))
+        self.assertIn("[dry-run] 戻す版", out)
+        self.assertEqual((s3 / "user_role.md").read_bytes(), b"v2\n")
+        rc, _, err = self.mvm("memory", "revert", "user_role.md", "--to", "20000101T000000Z", "--dir", str(repo), check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("以前の履歴がありません", err)
+        self.mvm("memory", "revert", "user_role.md", "--dir", str(repo))
+        self.assertEqual((s3 / "user_role.md").read_bytes(), b"v1\n")
+        self.assertEqual((mem / "user_role.md").read_bytes(), b"v1\n")
+        # 手元の未同期の変更で止まり、--force で戻せる
+        (mem / "user_role.md").write_text("unsynced\n", encoding="utf-8")
+        rc, _, err = self.mvm("memory", "revert", "user_role.md", "--dir", str(repo), check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("--force", err)
+        self.mvm("memory", "revert", "user_role.md", "--force", "--dir", str(repo))
+        self.assertEqual((mem / "user_role.md").read_bytes(), b"v2\n")
+        # rm: --dry-run は何も消さない。本番は印を書いて S3 と手元から消す
+        self.mvm("memory", "rm", "user_role.md", "--dry-run", "--dir", str(repo))
+        self.assertTrue((mem / "user_role.md").exists() and (s3 / "user_role.md").exists())
+        self.assertFalse((s3 / ".deleted.json").exists())
+        rc, out, err = self.mvm("memory", "rm", "user_role.md", "--dir", str(repo))
+        self.assertFalse((mem / "user_role.md").exists())
+        self.assertFalse((s3 / "user_role.md").exists())
+        self.assertNotIn("user_role.md", (s3 / "MEMORY.md").read_text(encoding="utf-8"))
+        self.assertNotIn("user_role.md", (mem / "MEMORY.md").read_text(encoding="utf-8"))
+        self.assertIn("user_role.md", json.loads((s3 / ".deleted.json").read_text(encoding="utf-8"))["files"])
+        self.assertNotIn("install-hooks", err, "rm では同期の案内を出さない")
+        rc, out, _ = self.mvm("memory", "log", "--json", "--dir", str(repo))
+        self.assertEqual([e["action"] for e in json.loads(out)].count("delete"), 1)
+        rc, _, err = self.mvm("memory", "rm", "user_role.md", "--dir", str(repo), check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("そのメモリはありません", err)
+        rc, _, err = self.mvm("memory", "rm", "--dir", str(repo), check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn(".md", err)
+
     def test_memory_hooks_install_and_uninstall(self):
         repo, mem = self.memory_repo()
         settings_path = repo / ".claude" / "settings.local.json"
@@ -794,8 +852,12 @@ class CliTest(unittest.TestCase):
         self.assertEqual((rc, out), (0, ""))
         self.assertEqual((s3 / "user_role.md").read_bytes(), b"tester\n")
         calls = [json.loads(l) for l in (self.stub_dir / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
-        (put,) = [c for c in calls if c[:2] == ["s3api", "put-object"]]
+        puts = [c for c in calls if c[:2] == ["s3api", "put-object"]]
+        (put,) = [c for c in puts if "/.history/" not in c[c.index("--key") + 1]]
         self.assertEqual(put[put.index("--if-none-match") + 1], "*")
+        (history,) = [c for c in puts if "/.history/" in c[c.index("--key") + 1]]
+        self.assertRegex(history[history.index("--key") + 1], r"/\.history/user_role\.md/\d{8}T\d{6}Z-local-[0-9a-f]{8}\.md$")
+        self.assertEqual(history[history.index("--metadata") + 1], "pmva-origin=local")
         # 他のマシンが書いたメモリが、会話の開始時に届く
         (s3 / "project_vm.md").write_text("VM で見つけた手順\n", encoding="utf-8")
         start = {"hook_event_name": "SessionStart", "cwd": str(repo), "source": "startup"}

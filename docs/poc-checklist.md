@@ -283,6 +283,19 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 - [x] Windows の手元で、フックが `"<python.exe>" "<mvm.py>" memory hook ...` を動かせること: 2026-11-23 に確認 (Windows 11、Claude Code 2.1.220、Python 3.14)。SessionStart のフックが終了コード 0 で「取得 0、送信 0、…」を返し、上の UserPromptSubmit・PostToolUse も動いた
 - 確認中に見つけた別の不具合: `mvm up --claude-args "--dangerously-skip-permissions"` で起動すると、Claude Code が許可を省くことの確認画面 (既定は「No, exit」) で止まり、`mvm send` の Enter で終了した。#64 で修正済み (実機での確認は C 節の項目)
 
+### J3. 履歴・戻す・消す (段階 3)
+
+- [x] 送るたびの履歴 (`.history/<名前>/<時刻>-<送り元>-<md5 先頭 8 文字>.md` のキー、`pmva-origin` のメタデータ、`MEMORY.md` と送らなかったファイルと `--dry-run` では書かない、書けなくても同期は止まらない): 自動テスト (`tests/test_memsync.py` の `HistoryTest`)
+- [x] `mvm memory log` (表、`--origin`、`--since` の相対・日時指定、`--json`、削除の行、ページング、履歴が無いときの案内)、`revert` (既定の 1 つ前、`--to`、未同期の変更で止まる、`--dry-run`、印を外して索引の行を戻す、他のマシンの書き込みとぶつかったとき)、`rm` (印 → S3 のファイル → S3 の索引 → 手元の順、条件付き書き込みのぶつかり、`--dry-run`、AccessDenied の案内)、`mvm memory` の引数の受け渡し: 自動テスト (`tests/test_memsync.py` の `LogTest` / `RevertTest` / `RmTest` / `AdminCliTest`、`tests/test_mvm.py`)
+- [x] 削除の印の伝わり方 (`pull` が手元のファイルと索引の行を消す、消された後に書き換えたものは消さない、S3 に送り直された中身を取得しない、`push` が送らない、`status` の表示、フックが会話に伝える文、`rm` した PC と別のマシンの往復): 自動テスト (`tests/test_memsync.py` の `DeletedMarkTest` / `RmTest`)
+- [x] 履歴も印も無い (段階 3 より前の) S3 でも、今までどおり同期できること: 自動テスト
+- [ ] 本物の S3 で、`push` のたびに `.history/` に写しが残り (メタデータ付き)、`mvm memory log` / `revert` で見る・戻せること: 未確認
+- [ ] 本物の S3 で `mvm memory rm` が通り (操作用ポリシーの `s3:DeleteObject`)、VM の実行ロールでは AccessDenied になること: 未確認
+- [ ] `rm` したメモリが、VM の会話から消えること (VM の次の指示で「他のマシンで消されたメモリ」が会話に届き、メモリのフォルダと索引から消える): 未確認 (VM のイメージを作り直してから確認する)
+- [ ] 古いイメージ (8.0 以前) の VM の振る舞い (`rm` したメモリを送り直すこと、新しい版の `pull` / `push` がそれを取り込まないこと): 未確認
+- [ ] 本物の S3 で、`list-objects-v2 --delimiter /` が `memory/<repo-id>/` 直下のキーだけを返し、`.history/` を取ってこないこと (同期の一覧が履歴の数で遅くならない): 未確認
+- [ ] VM が `.history/` に書けること (実行ロールの `s3:PutObject` が `memory/*` に効いていること。AccessDenied のときは警告だけで同期が続くこと): 未確認
+
 ## 結果
 
 | 項目 | 結果 / メモ |
