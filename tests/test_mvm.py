@@ -24,6 +24,7 @@ import unittest
 import urllib.parse
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 MVM = ROOT / "bin" / "mvm.py"
@@ -492,6 +493,363 @@ class WebSocketTest(unittest.TestCase):
                     os.environ[k] = v
             server.close()
             proxy.close()
+
+
+# ---------------------------------------------------------------- mvm watch (一覧ボード) の単体テスト
+
+class DisplayWidthTest(unittest.TestCase):
+    def test_width_counts_fullwidth_as_two(self):
+        self.assertEqual(mvm.display_width("abc"), 3)
+        self.assertEqual(mvm.display_width("作業中"), 6)
+        self.assertEqual(mvm.display_width("a作b"), 4)
+        self.assertEqual(mvm.display_width("Ａ１"), 4, "全角の英数 (F)")
+        self.assertEqual(mvm.display_width("é"), 1, "結合文字は幅を持たない")
+        self.assertEqual(mvm.display_width(""), 0)
+
+    def test_cut_width_keeps_within_width_and_never_splits_a_character(self):
+        self.assertEqual(mvm.cut_width("abc", 3), "abc")
+        self.assertEqual(mvm.cut_width("作業中", 6), "作業中")
+        self.assertEqual(mvm.cut_width("作業中abc", 7), "作業中…")
+        self.assertEqual(mvm.cut_width("作業中", 5), "作業…", "全角が半端に入らない所では手前で切る")
+        self.assertEqual(mvm.cut_width("作業中", 4), "作…")
+        self.assertEqual(mvm.cut_width("abcdef", 4), "abc…")
+        self.assertEqual(mvm.cut_width("abcdef", 0), "")
+        for width in range(0, 12):
+            self.assertLessEqual(mvm.display_width(mvm.cut_width("日本語 mixed 文字列 text", width)), width)
+
+    def test_pad_width_aligns_mixed_text(self):
+        for text in ("a1", "作業中", "a作"):
+            self.assertEqual(mvm.display_width(mvm.pad_width(text, 8)), 8)
+        self.assertEqual(mvm.pad_width("作業中", 4), "作業中", "足りているときは切らない")
+
+    def test_format_elapsed(self):
+        cases = [(None, "-"), (0, "0秒"), (45, "45秒"), (60, "1分"), (720, "12分"), (3599, "59分"),
+                 (3900, "1時間5分"), (7200, "2時間"), (-5, "0秒")]
+        for seconds, text in cases:
+            self.assertEqual(mvm.format_elapsed(seconds), text)
+
+
+def watch_row(name, state, **kw):
+    """format_watch に渡す、台ごとの dict。"""
+    row = {"name": name, "vm": "RUNNING", "state": state, "agents": {}, "sinceSeconds": None, "memory": None,
+           "oomKills": 0, "lastEvent": "", "notes": []}
+    row.update(kw)
+    return row
+
+
+class FormatWatchTest(unittest.TestCase):
+    STAMP = "2026-11-24 15:00:12"
+
+    def board_rows(self):
+        mem = lambda used, peak: {"usedMiB": used, "totalMiB": 3891, "peakMiB": peak}   # noqa: E731
+        return [
+            watch_row("a1", "working", sinceSeconds=720, memory=mem(1229, 1536), lastEvent="実行: Bash: pytest -x"),
+            watch_row("a2", "waiting", sinceSeconds=180, memory=mem(900, 900),
+                      agents={"claude": {"state": "waiting", "message": "Bash の実行の許可を求めています"}},
+                      lastEvent="Bash の実行の許可を求めています",
+                      notes=["a2 (claude): 許可・入力待ち: Bash の実行の許可を求めています"]),
+            watch_row("a3", "done", sinceSeconds=60, memory=mem(500, 800), lastEvent="応答: 原因はトークンの期限切れでした"),
+            watch_row("a4", "SUSPENDED", vm="SUSPENDED"),
+        ]
+
+    def test_plain_board_has_header_columns_notes_and_footer(self):
+        text = mvm.format_watch(self.board_rows(), 100, False, self.STAMP, 10)
+        lines = text.splitlines()
+        self.assertEqual(lines[0], "2026-11-24 15:00:12  4 台 (作業中 1 / 要対応 1 / 完了 1)  10 秒ごと / Ctrl-C で終了")
+        self.assertTrue(lines[1].startswith("名前"))
+        self.assertIn("メモリ (使用/全体 最大)", lines[1])
+        self.assertRegex(lines[2], r"^a1 +作業中 +12分 +1\.2/3\.8G 最大1\.5G +実行: Bash: pytest -x$")
+        self.assertRegex(lines[3], r"^a2 +許可・入力待ち +3分 ")
+        self.assertRegex(lines[4], r"^a3 +応答が終わった +1分 ")
+        self.assertRegex(lines[5], r"^a4 +SUSPENDED +- +- +-$")
+        self.assertEqual(lines[6], "")
+        self.assertEqual(lines[7], "!! a2 (claude): 許可・入力待ち: Bash の実行の許可を求めています")
+        self.assertEqual(lines[-1], "(表示中のセッションは自動サスペンドされません)")
+        self.assertNotIn("\x1b", text)
+
+    def test_columns_line_up_by_display_width(self):
+        lines = mvm.format_watch(self.board_rows(), 100, False, self.STAMP, 10).splitlines()[1:6]
+        starts = {mvm.display_width(ln[:ln.index(key)]) for ln, key in
+                  zip(lines[:4], ("メモリ", "1.2/3.8G", "0.9/3.8G", "0.5/3.8G"))}
+        self.assertEqual(len(starts), 1, f"メモリの列の開始位置がそろう: {starts}")
+
+    def test_lines_are_cut_to_terminal_width(self):
+        for width in (40, 60, 80):
+            text = mvm.format_watch(self.board_rows(), width, False, self.STAMP, 10)
+            for line in text.splitlines():
+                self.assertLessEqual(mvm.display_width(line), width, line)
+        wide = mvm.format_watch([watch_row("a1", "working", lastEvent="長い" * 100)], 80, False, self.STAMP, 10)
+        self.assertIn("…", wide)
+
+    def test_oom_is_shown_in_row_and_note(self):
+        rows = [watch_row("a1", "working", oomKills=2, notes=["a1: メモリ不足でプロセスが 2 回強制終了されました"],
+                          memory={"usedMiB": 3800, "totalMiB": 3891, "peakMiB": 3850})]
+        text = mvm.format_watch(rows, 100, False, self.STAMP, 10)
+        self.assertIn("3.7/3.8G 最大3.8G !!OOM×2", text)
+        self.assertIn("!! a1: メモリ不足", text)
+        self.assertIn("要対応 1", text)
+
+    def test_color_only_when_requested(self):
+        rows = self.board_rows() + [watch_row("a5", "error", agents={"claude": {"state": "error"}}, notes=["a5 (claude): エラー"]),
+                                    watch_row("a6", "working", oomKills=1, notes=["a6: OOM"])]
+        plain = mvm.format_watch(rows, 100, False, self.STAMP, 10)
+        self.assertNotIn("\x1b", plain)
+        colored = mvm.format_watch(rows, 100, True, self.STAMP, 10)
+        lines = colored.splitlines()
+        self.assertNotIn("", lines[0] + lines[1] + lines[2], "見出しとふつうの台には色を付けない")
+        for expected in ("[33ma2", "[32ma3", "[31ma5", "[31ma6", "[33m!! a2", "[31m!! a6"):
+            self.assertIn(expected, colored)
+        self.assertTrue(all(ln.endswith("[0m") for ln in lines if "[" in ln), "行ごとに色を戻す")
+
+    def test_control_characters_in_text_are_neutralized(self):
+        rows = [watch_row("a1", "working", lastEvent="結果: \x1b[2J\x07消えない")]
+        text = mvm.format_watch(rows, 100, False, self.STAMP, 10)
+        self.assertNotIn("\x1b", text)
+        self.assertNotIn("\x07", text)
+
+    def test_empty_board(self):
+        text = mvm.format_watch([], 100, False, self.STAMP, 10)
+        self.assertIn("0 台", text)
+        self.assertIn("表示するセッションがありません", text)
+
+
+class FakeFleet:
+    """watch の台数分の AWS (get-microvm) と VM の API の代わり。呼ばれた回数と内容を記録する。"""
+
+    def __init__(self, vms, statuses=None, events=None):
+        self.vms = dict(vms)               # 名前 → get-microvm の状態
+        self.statuses = dict(statuses or {})   # 名前 → /status の応答 (SystemExit なら失敗)
+        self.events = {k: list(v) for k, v in (events or {}).items()}   # (名前, エージェント) → /events の応答
+        self.vm_calls = []
+        self.api_calls = []
+
+    def vm_state(self, name):
+        self.vm_calls.append(name)
+        return self.vms[name]
+
+    def vm_api(self, name, method, path, body=None, timeout=30):
+        self.api_calls.append((name, path))
+        if path.startswith("/status"):
+            st = self.statuses[name]
+            if isinstance(st, SystemExit):
+                raise st
+            return st
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(path).query)
+        queue = self.events.get((name, q["agent"][0]))
+        if not queue:
+            raise SystemExit(f"{name}: HTTP 500")
+        return queue.pop(0)
+
+    def paths(self, prefix):
+        return [p for _, p in self.api_calls if p.startswith(prefix)]
+
+
+class WatchBoardTest(unittest.TestCase):
+    NOW = 1_800_000_000
+
+    def setUp(self):
+        self.board = mvm.WatchBoard()
+
+    def fleet(self, vms, statuses=None, events=None):
+        f = FakeFleet(vms, statuses, events)
+        for target, value in (("session_names", lambda: sorted(f.vms)), ("load_session", lambda n: {"terminated": False}),
+                              ("vm_state", f.vm_state), ("vm_api", f.vm_api)):
+            p = mock.patch.object(mvm, target, value)
+            p.start()
+            self.addCleanup(p.stop)
+        return f
+
+    def status(self, agents=None, **kw):
+        st = {"bootstrap": "ready", "idleSeconds": 1, "oomKills": 0,
+              "memory": {"usedMiB": 1000, "totalMiB": 3891, "availableMiB": 2800, "top": []}}
+        if agents is not None:
+            st["agents"] = agents
+        st.update(kw)
+        return st
+
+    def collect(self, offset=0):
+        return mvm.watch_collect(self.board, self.NOW + offset)
+
+    def test_waiting_agent_gets_note_with_message_and_elapsed(self):
+        self.fleet({"a2": "RUNNING"}, {"a2": self.status({"claude": {
+            "state": "waiting", "since": self.NOW - 180, "message": "Bash の実行の許可を求めています"}})})
+        [row] = self.collect()
+        self.assertEqual((row["state"], row["sinceSeconds"]), ("waiting", 180))
+        self.assertEqual(row["notes"], ["a2 (claude): 許可・入力待ち: Bash の実行の許可を求めています"])
+        self.assertEqual(mvm.watch_level(row), "yellow")
+
+    def test_error_agent_gets_note_with_hint(self):
+        self.fleet({"a3": "RUNNING"}, {"a3": self.status({"claude": {
+            "state": "error", "since": self.NOW - 5, "error": "authentication_failed", "message": "401"}})})
+        [row] = self.collect()
+        self.assertEqual(row["state"], "error")
+        self.assertIn("a3 (claude): エラー authentication_failed: 401", row["notes"][0])
+        self.assertIn(mvm.agent_error_hint("a3", "authentication_failed"), row["notes"][0])
+        self.assertEqual(mvm.watch_level(row), "red")
+
+    def test_suspended_vm_shows_vm_state_and_calls_no_api(self):
+        f = self.fleet({"a4": "SUSPENDED"}, {"a4": self.status({})})
+        [row] = self.collect()
+        self.assertEqual((row["vm"], row["state"], row["memory"], row["lastEvent"]), ("SUSPENDED", "SUSPENDED", None, ""))
+        self.assertEqual(f.api_calls, [], "SUSPENDED の VM に /status も /events も呼ばない (起こして課金されるため)")
+        self.assertEqual(row["notes"], [])
+
+    def test_unknown_vm_shows_reason_and_next_step(self):
+        f = self.fleet({"a5": "UNKNOWN"})
+        with mock.patch.dict(mvm._state_errors, {"a5": "AWS の認証が切れています → aws sso login でログインし直してください"}):
+            [row] = self.collect()
+        self.assertEqual(row["state"], "UNKNOWN")
+        self.assertEqual(row["notes"], ["a5: AWS の認証が切れています → aws sso login でログインし直してください"])
+        self.assertEqual(f.api_calls, [])
+        self.assertEqual(mvm.watch_level(row), "yellow")
+
+    def test_unknown_without_reason_uses_generic_hint(self):
+        self.fleet({"a5": "UNKNOWN"})
+        mvm._state_errors.pop("a5", None)
+        [row] = self.collect()
+        self.assertIn(mvm.aws_error_hint(""), row["notes"][0])
+
+    def test_old_image_without_agents_is_working_and_has_no_events(self):
+        f = self.fleet({"a6": "RUNNING"}, {"a6": self.status()})
+        [row] = self.collect()
+        self.assertEqual((row["state"], row["agents"], row["sinceSeconds"], row["lastEvent"]), ("working", {}, None, ""))
+        self.assertEqual(f.paths("/events"), [])
+
+    def test_stalled_note_has_idle_seconds(self):
+        self.fleet({"a7": "RUNNING"}, {"a7": self.status({"claude": {"state": "working", "since": self.NOW - 900}},
+                                                          idleSeconds=400)})
+        [row] = self.collect()
+        self.assertEqual(row["state"], "stalled")
+        self.assertIn("400 秒", row["notes"][0])
+
+    def test_failed_bootstrap_and_oom_are_noted(self):
+        self.fleet({"a8": "RUNNING"}, {"a8": self.status({}, bootstrap="failed: setup", oomKills=3)})
+        [row] = self.collect()
+        self.assertEqual((row["state"], row["oomKills"]), ("failed", 3))
+        self.assertTrue(any("起動の準備に失敗" in n for n in row["notes"]))
+        self.assertTrue(any("3 回強制終了" in n for n in row["notes"]))
+
+    def test_peak_memory_only_goes_up(self):
+        st = {"a1": self.status({"claude": {"state": "working", "since": self.NOW}})}
+        self.fleet({"a1": "RUNNING"}, st)
+        peaks = []
+        for used in (1000, 1500, 900):
+            st["a1"]["memory"]["usedMiB"] = used
+            [row] = self.collect()
+            peaks.append((row["memory"]["usedMiB"], row["memory"]["peakMiB"]))
+        self.assertEqual(peaks, [(1000, 1000), (1500, 1500), (900, 1500)])
+
+    def test_get_microvm_is_called_once_per_minute_per_vm(self):
+        agents = {"claude": {"state": "working", "since": self.NOW}}
+        f = self.fleet({"a1": "RUNNING", "a2": "RUNNING"}, {"a1": self.status(agents), "a2": self.status(agents)})
+        for t in range(0, 60, 10):
+            self.collect(t)
+        self.assertEqual(sorted(f.vm_calls), ["a1", "a2"], "60 秒の間は 1 台 1 回だけ")
+        self.assertEqual(len(f.paths("/status")), 12, "その間も /status は毎回呼ぶ")
+        self.collect(60)
+        self.assertEqual(len(f.vm_calls), 4, "60 秒たったら呼び直す")
+
+    def test_status_failure_triggers_get_microvm_next_round(self):
+        agents = {"claude": {"state": "working", "since": self.NOW}}
+        f = self.fleet({"a1": "RUNNING"}, {"a1": self.status(agents)})
+        self.collect(0)
+        f.statuses["a1"] = SystemExit("a1: 接続できません")
+        [row] = self.collect(10)
+        self.assertEqual(row["state"], "unreachable")
+        self.assertEqual(len(row["notes"]), 1, "応答しない台は要対応として理由を出す")
+        self.assertIn("接続できません", row["notes"][0])
+        self.assertEqual(mvm.watch_level(row), "yellow")
+        self.assertEqual(len(f.vm_calls), 1)
+        f.statuses["a1"] = self.status(agents)
+        [row] = self.collect(20)
+        self.assertEqual(len(f.vm_calls), 2, "失敗の次の回は get-microvm で確かめ直す")
+        self.assertEqual(row["state"], "working")
+        self.collect(30)
+        self.assertEqual(len(f.vm_calls), 2, "確かめた後はまた 60 秒空ける")
+
+    def test_suspended_state_is_reused_for_a_minute_then_rechecked(self):
+        f = self.fleet({"a1": "SUSPENDED"})
+        for t in (0, 10, 50):
+            self.collect(t)
+        self.assertEqual(len(f.vm_calls), 1)
+        f.vms["a1"] = "RUNNING"
+        f.statuses["a1"] = self.status({"claude": {"state": "working", "since": self.NOW}})
+        [row] = self.collect(60)
+        self.assertEqual((len(f.vm_calls), row["state"]), (2, "working"))
+
+    def test_terminated_sessions_are_skipped(self):
+        self.fleet({"a1": "RUNNING", "a2": "RUNNING"}, {"a1": self.status(), "a2": self.status()})
+        with mock.patch.object(mvm, "load_session", lambda n: {"terminated": n == "a2"}):
+            self.assertEqual([r["name"] for r in self.collect()], ["a1"])
+
+    def test_last_event_is_fetched_as_tail_then_by_offset(self):
+        agents = {"claude": {"state": "working", "since": self.NOW}}
+        f = self.fleet({"a1": "RUNNING"}, {"a1": self.status(agents)}, {("a1", "claude"): [
+            {"file": "/t/1.jsonl", "offset": 10, "events": [{"kind": "tool", "name": "Bash", "text": "pytest -x"}]},
+            {"file": "/t/1.jsonl", "offset": 40, "events": [{"kind": "output", "text": "1 passed\n2 failed"},
+                                                            {"kind": "text", "text": "原因は\nトークンの期限切れでした"}]},
+            {"file": "/t/1.jsonl", "offset": 40, "events": []},
+            {"file": "/t/2.jsonl", "offset": 5, "reset": True, "events": []},
+        ]})
+        texts = [self.collect(t)[0]["lastEvent"] for t in (0, 10, 20, 30)]
+        self.assertEqual(texts, ["実行: Bash: pytest -x", "応答: 原因は トークンの期限切れでした",
+                                 "応答: 原因は トークンの期限切れでした", ""], "新しい会話になったら空に戻す")
+        q = [urllib.parse.parse_qs(urllib.parse.urlparse(p).query, keep_blank_values=True) for p in f.paths("/events")]
+        self.assertEqual((q[0]["file"], q[0]["offset"], q[0]["tail"]), ([""], ["0"], ["1"]))
+        self.assertEqual((q[1]["file"], q[1]["offset"]), (["/t/1.jsonl"], ["10"]))
+        self.assertEqual((q[2]["file"], q[2]["offset"]), (["/t/1.jsonl"], ["40"]))
+
+    def test_events_failure_keeps_previous_event_and_row(self):
+        agents = {"claude": {"state": "working", "since": self.NOW}}
+        self.fleet({"a1": "RUNNING"}, {"a1": self.status(agents)}, {("a1", "claude"): [
+            {"file": "/t/1.jsonl", "offset": 10, "events": [{"kind": "text", "text": "こんにちは"}]}]})
+        self.assertEqual(self.collect(0)[0]["lastEvent"], "応答: こんにちは")
+        self.assertEqual(self.collect(10)[0]["lastEvent"], "応答: こんにちは", "取得に失敗しても前回の出来事を残す")
+
+    def test_both_agents_prefer_the_one_whose_state_changed(self):
+        def both(codex_state):
+            return self.status({"claude": {"state": "working", "since": self.NOW},
+                                "codex": {"state": codex_state, "since": self.NOW}})
+        f = self.fleet({"a1": "RUNNING"}, {"a1": both("working")}, {
+            ("a1", "claude"): [{"file": "/c", "offset": 1, "events": [{"kind": "text", "text": "claude の応答"}]},
+                               {"file": "/c", "offset": 2, "events": []}],
+            ("a1", "codex"): [{"file": "/x", "offset": 1, "events": [{"kind": "text", "text": "codex の応答"}]},
+                              {"file": "/x", "offset": 2, "events": []}]})
+        self.assertEqual(self.collect(0)[0]["lastEvent"], "応答: claude の応答", "分からなければ claude")
+        f.statuses["a1"] = both("done")
+        self.assertEqual(self.collect(10)[0]["lastEvent"], "応答: codex の応答", "状態が変わった方")
+
+
+class WatchLogTest(unittest.TestCase):
+    def test_header_written_once_and_rows_appended(self):
+        with tempfile.TemporaryDirectory() as t:
+            path = Path(t) / "sub" / "mem.csv"
+            mvm.watch_open_log(path)
+            mvm.watch_open_log(path)
+            rows = [watch_row("a1", "working", memory={"usedMiB": 100, "totalMiB": 3891, "peakMiB": 150}, oomKills=1),
+                    watch_row("a2", "SUSPENDED", vm="SUSPENDED")]
+            mvm.watch_append_log(path, rows, 1_800_000_000)
+            mvm.watch_append_log(path, rows[:1], 1_800_000_010)
+            lines = path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(lines[0], "time,name,vm,state,usedMiB,totalMiB,peakMiB,oomKills")
+        self.assertEqual(len(lines), 4)
+        self.assertTrue(lines[1].endswith(",a1,RUNNING,working,100,3891,150,1"))
+        self.assertTrue(lines[2].endswith(",a2,SUSPENDED,SUSPENDED,,,,0"))
+
+    def test_append_writes_header_when_file_vanished(self):
+        with tempfile.TemporaryDirectory() as t:
+            path = Path(t) / "mem.csv"
+            mvm.watch_append_log(path, [watch_row("a1", "working")], 1_800_000_000)
+            self.assertTrue(path.read_text(encoding="utf-8").startswith("time,name,"))
+
+    def test_unwritable_path_stops_with_next_step(self):
+        with tempfile.TemporaryDirectory() as t:
+            with self.assertRaises(SystemExit) as cm:
+                mvm.watch_open_log(Path(t))
+            self.assertIn("別のパス", str(cm.exception))
+            with self.assertRaises(SystemExit) as cm:
+                mvm.watch_append_log(Path(t), [], 0)
+            self.assertIn("閉じてから", str(cm.exception))
 
 
 # ---------------------------------------------------------------- CLI (サブプロセス) のテスト
@@ -1987,7 +2345,7 @@ class CliTest(unittest.TestCase):
         try:
             seen = b""
             deadline = time.time() + 60
-            while b"(1 " not in seen and time.time() < deadline:
+            while "自動サスペンド".encode() not in seen and time.time() < deadline:
                 line = p.stdout.readline()
                 if not line:
                     break
@@ -1996,8 +2354,78 @@ class CliTest(unittest.TestCase):
             p.kill()
             p.communicate()
         text = seen.decode("utf-8", "replace")
-        self.assertIn("[u1] UNKNOWN", text)
+        # 一覧ボードにしたので、表の行 (u1 ... UNKNOWN) と、注意の行 (!! u1: 理由とやること) で確かめる
+        self.assertRegex(text, r"(?m)^u1 +UNKNOWN")
+        self.assertIn("!! u1:", text)
         self.assertIn("aws sso login", text)
+        self.assertNotIn("\x1b", text, "端末でなければ制御文字を出さない")
+
+    def watch_api(self, **status):
+        """mvm watch 用の StatusApi。status は /status の応答に足す項目。"""
+        api = StatusApi()
+        api.statuses = [dict({"bootstrap": "ready", "idleSeconds": 1, "oomKills": 0,
+                              "agents": {"claude": {"state": "working", "since": int(time.time()) - 720}},
+                              "memory": {"usedMiB": 1229, "totalMiB": 3891, "availableMiB": 2600, "top": []}}, **status)]
+        api.events = {"claude": [{"file": "/t/1.jsonl", "offset": 10,
+                                  "events": [{"kind": "tool", "name": "Bash", "text": "pytest -x"}]}]}
+        return api
+
+    def test_watch_once_json(self):
+        api = self.watch_api()
+        try:
+            env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}")
+            self.mvm("up", "w1", env=env)
+            _, out, _ = self.mvm("watch", "--json", env=env)
+        finally:
+            api.shutdown()
+        rows = json.loads(out)
+        self.assertEqual(len(rows), 1)
+        r = rows[0]
+        self.assertEqual((r["name"], r["vm"], r["state"]), ("w1", "RUNNING", "working"))
+        self.assertEqual(r["memory"], {"usedMiB": 1229, "totalMiB": 3891, "peakMiB": 1229})
+        self.assertIn(r["sinceSeconds"], range(720, 740))
+        self.assertEqual((r["oomKills"], r["notes"]), (0, []))
+        self.assertEqual(r["lastEvent"], "実行: Bash: pytest -x")
+        self.assertEqual(r["agents"]["claude"]["state"], "working")
+        self.assertEqual(api.event_queries[0]["tail"], "1")
+
+    def test_watch_once_prints_board_without_control_characters(self):
+        api = self.watch_api()
+        try:
+            env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}")
+            self.mvm("up", "w1", env=env)
+            _, out, _ = self.mvm("watch", "--once", env=env)
+        finally:
+            api.shutdown()
+        out = out.replace("\r\n", "\n")
+        self.assertNotIn("\x1b", out)
+        self.assertIn("1 台 (作業中 1 / 要対応 0 / 完了 0)  10 秒ごと", out)
+        self.assertRegex(out, r"(?m)^w1 +作業中 +12分 +1\.2/3\.8G 最大1\.2G +実行: Bash: pytest -x$")
+        self.assertEqual(api.status_calls, 1, "--once は 1 回だけ取得して終わる")
+
+    def test_watch_log_appends_csv_with_header_once(self):
+        api = self.watch_api(oomKills=2)
+        log = Path(self.tmp.name) / "out" / "mem.csv"
+        try:
+            env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}")
+            self.mvm("up", "w1", env=env)
+            self.mvm("watch", "--once", "--log", str(log), env=env)
+            self.mvm("watch", "--json", "--log", str(log), env=env)
+        finally:
+            api.shutdown()
+        lines = log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(lines[0], "time,name,vm,state,usedMiB,totalMiB,peakMiB,oomKills")
+        self.assertEqual(len(lines), 3, "見出しは 1 回だけで、実行のたびに 1 台 1 行を足す")
+        for line in lines[1:]:
+            cols = line.split(",")
+            self.assertEqual(cols[1:], ["w1", "RUNNING", "working", "1229", "3891", "1229", "2"])
+            self.assertRegex(cols[0], r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$")
+
+    def test_watch_log_unwritable_stops_with_next_step(self):
+        rc, _, err = self.mvm("watch", "--once", "--log", self.tmp.name, check=False)   # フォルダは CSV にできない
+        self.assertNotEqual(rc, 0)
+        self.assertIn("--log", err)
+        self.assertIn("別のパス", err)
 
     def test_renew_keeps_vm_when_save_fails(self):
         api = StatusApi()

@@ -8,7 +8,7 @@
 |---|---|
 | 起動する / 前回の続きから始める | `mvm up <name> --repo <URL>` / `mvm up <name> --repo <URL> --restore latest` |
 | 一覧と状態 | `mvm ls` (`--all` で終了済みも) |
-| 画面の末尾を見る | `mvm peek <name>`、全台をまとめて `mvm watch` |
+| 画面の末尾を見る | `mvm peek <name>` (全台の状態の一覧は `mvm watch`) |
 | 応答が終わるまで待つ / 最後の応答を読む | `mvm wait`、`mvm result <name>` |
 | 指示を送る | `mvm send <name> "指示"` |
 | 画面に入って操作する | `mvm ssh <name>` (抜けるのは Ctrl-b → d) |
@@ -24,7 +24,7 @@
 mvm up api-fix --repo https://github.com/<owner>/<repo>.git --restore latest
 
 # 日中: 様子を見て、必要なら指示を足す
-mvm watch                       # 全台の画面を 60 秒ごとに表示 (Ctrl-C で終了)
+mvm watch                       # 全台を 1 台 1 行の一覧で 10 秒ごとに表示 (Ctrl-C で終了。画面は mvm peek / view)
 mvm send api-fix "テストが通ったら PR を作って"
 
 # 夕方: 保存してから全部止める
