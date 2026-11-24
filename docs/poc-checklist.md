@@ -131,8 +131,9 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
   - VM 内の初期化 (`bootstrap.sh`) が各方式で正しく設定することは、偽の認証情報を使った自動テスト (`tests/test_supervisor.py`) で確認済み: apiKeyHelper、`CLAUDE_CODE_OAUTH_TOKEN`、ゲートウェイの環境変数、Codex の `auth.json` と `codex login --with-api-key`、GitHub トークン、ファイルの権限 (600)、保存 (スナップショット) に認証情報が入らないこと
   - 修正 15: 登録していないシークレットを `oauth-token` に指定すると、空のトークンのまま「準備完了」になっていた → 失敗として扱う (このテストで発見)
 - [x] 起動直後にオンボーディングや「このフォルダを信頼しますか？」の確認で止まらない
-- [ ] `--claude-args "--dangerously-skip-permissions"` で起動しても、許可を省くことへの同意の確認画面で止まらず、`mvm send` の指示で作業する (実機は未確認)
+- [x] `--claude-args "--dangerously-skip-permissions"` で起動しても、許可を省くことへの同意の確認画面で止まらず、`mvm send` の指示で作業する
   - 2026-11-23 にイメージ 8.0 で、確認画面 (既定は「No, exit」) で止まり、`mvm send` の Enter で Claude Code が終了することを確認 → `bootstrap.sh` が `~/.claude/settings.json` に `skipDangerousModePermissionPrompt` を書くよう修正。固定した版の Claude Code で確認画面が出ないことは自動テスト (`tests/test_agents_e2e.py`) で確認済み
+  - 2026-11-24 にイメージ 9.0 (#64 入り、Claude Code 2.1.330) で実機確認。`mvm up j3 --repo ... --memory --claude-args "--dangerously-skip-permissions"` で起動すると、確認画面を出さずに `bypass permissions on` の入力欄で `ready` になり、`mvm send` の 2 回の指示 (メモリを書く、質問に答える) をそのまま実行した
 - [x] `mvm up ... --prompt "..."` の初期指示が入力・実行される
 - [x] `mvm send` で送った指示 (日本語を含む) がエージェントに届き、Enter で送信される
 - [x] `sudo` は**使えない**: コンテナに no_new_privs が付いている (`sudo: The "no new privileges" flag is set`)。イメージから sudo を外し、root が必要な作業は `mvm shell` (root) で行う方針にした
@@ -289,12 +290,12 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 - [x] `mvm memory log` (表、`--origin`、`--since` の相対・日時指定、`--json`、削除の行、ページング、履歴が無いときの案内)、`revert` (既定の 1 つ前、`--to`、未同期の変更で止まる、`--dry-run`、印を外して索引の行を戻す、他のマシンの書き込みとぶつかったとき)、`rm` (印 → S3 のファイル → S3 の索引 → 手元の順、条件付き書き込みのぶつかり、`--dry-run`、AccessDenied の案内)、`mvm memory` の引数の受け渡し: 自動テスト (`tests/test_memsync.py` の `LogTest` / `RevertTest` / `RmTest` / `AdminCliTest`、`tests/test_mvm.py`)
 - [x] 削除の印の伝わり方 (`pull` が手元のファイルと索引の行を消す、消された後に書き換えたものは消さない、S3 に送り直された中身を取得しない、`push` が送らない、`status` の表示、フックが会話に伝える文、`rm` した PC と別のマシンの往復): 自動テスト (`tests/test_memsync.py` の `DeletedMarkTest` / `RmTest`)
 - [x] 履歴も印も無い (段階 3 より前の) S3 でも、今までどおり同期できること: 自動テスト
-- [ ] 本物の S3 で、`push` のたびに `.history/` に写しが残り (メタデータ付き)、`mvm memory log` / `revert` で見る・戻せること: 未確認
-- [ ] 本物の S3 で `mvm memory rm` が通り (操作用ポリシーの `s3:DeleteObject`)、VM の実行ロールでは AccessDenied になること: 未確認
-- [ ] `rm` したメモリが、VM の会話から消えること (VM の次の指示で「他のマシンで消されたメモリ」が会話に届き、メモリのフォルダと索引から消える): 未確認 (VM のイメージを作り直してから確認する)
+- [x] 本物の S3 で、`push` のたびに `.history/` に写しが残り (メタデータ付き)、`mvm memory log` / `revert` で見る・戻せること: 2026-11-24 に確認 (Windows 11、aws-cli 2.37.9、操作用の `pmva-operator`)。試験用のメモリを 2 版 `push` すると `.history/j3-test.md/20261124T125302Z-local-03177d17.md` のようなキーが版ごとにでき、`head-object` のメタデータは `pmva-origin=local`。`log j3-test.md` が 2 行を古い順に出し、`revert` で 1 つ前 (v1) に、続けて `revert` すると v2 に戻った (取り消し)。どちらも手元と S3 の中身がそろい、`status` は「同期済み」
+- [x] 本物の S3 で `mvm memory rm` が通り (操作用ポリシーの `s3:DeleteObject`)、VM の実行ロールでは AccessDenied になること: 2026-11-24 に確認。手元の `rm j3-test.md` で `.deleted.json` に印 (md5、時刻、`by: local`、索引の行) が書かれ、S3 のファイル、S3 と手元の `MEMORY.md` の行、手元のファイルが消えた。`log` には「消した」の行が出た。VM の中で `memsync.py rm` を動かすと、印を書いた後の `DeleteObject` が実行ロール `pmva-microvm-execution-claude` の AccessDenied で止まり、「手元の PC で実行してください」の案内と終了コード 1 を返した。その後、手元で同じ名前を `rm` すると続きから消せた
+- [x] `rm` したメモリが、VM の会話から消えること (VM の次の指示で「他のマシンで消されたメモリ」が会話に届き、メモリのフォルダと索引から消える): 2026-11-24 に確認 (イメージ 9.0、`mvm up --memory`)。VM の Claude が `j3-test.md` の合言葉を読んだ後に手元で `rm` し、60 秒の間引きを越えてから `mvm send` で聞くと、会話に「他のマシンで消されたメモリ: j3-test.md (手元からも消しました。この記憶には頼らないでください)」が届き、Claude は「もう頼ってはいけない記憶」と答えた。VM の `~/.claude/pmva-memory/` からファイルが、`MEMORY.md` から行が消えていた
 - [ ] 古いイメージ (8.0 以前) の VM の振る舞い (`rm` したメモリを送り直すこと、新しい版の `pull` / `push` がそれを取り込まないこと): 未確認
-- [ ] 本物の S3 で、`list-objects-v2 --delimiter /` が `memory/<repo-id>/` 直下のキーだけを返し、`.history/` を取ってこないこと (同期の一覧が履歴の数で遅くならない): 未確認
-- [ ] VM が `.history/` に書けること (実行ロールの `s3:PutObject` が `memory/*` に効いていること。AccessDenied のときは警告だけで同期が続くこと): 未確認
+- [x] 本物の S3 で、`list-objects-v2 --delimiter /` が `memory/<repo-id>/` 直下のキーだけを返し、`.history/` を取ってこないこと (同期の一覧が履歴の数で遅くならない): 2026-11-24 に確認。`Contents` は直下の 12 件だけで `.history/` 配下を含まず、`.history/` は `CommonPrefixes` に 1 件だけ出た (Git Bash から試すときは `MSYS_NO_PATHCONV=1` を付けないと `/` がパスに書き換わり、区切りが効かないように見える)
+- [x] VM が `.history/` に書けること (実行ロールの `s3:PutObject` が `memory/*` に効いていること。AccessDenied のときは警告だけで同期が続くこと): 2026-11-24 に確認。VM の Claude にメモリを 1 件書かせると、フックの送信で `.history/j3-vm.md/20261124T125802Z-j3-e20a9608.md` ができ、手元の `log` に書いたマシン `j3` として出た。AccessDenied のときの振る舞いは自動テストのみ (権限を外した状況を実機で作っていない)
 
 ## 結果
 
