@@ -147,6 +147,7 @@ Claude Code の自動メモリ (auto memory。Claude が `~/.claude/projects/<�
   - 会話の開始時 (SessionStart) と指示のたび (UserPromptSubmit。60 秒に 1 回まで) に `pull` し、他のマシンで書かれた・変わったメモリを本文ごと会話に渡します (合わせて約 9,500 文字まで。入りきらないファイルは名前だけ伝えます)。動いている会話にも、次の指示のときに届きます
   - Claude がメモリのフォルダに書いたら (Write / Edit の後。PostToolUse) すぐ `push` します。会話は待たせません (`async`)
   - 競合したファイルは自動では解かず、会話の開始時に名前を伝えます。`mvm memory status` で確かめて `--force` で解いてください
+  - 同じリポジトリの同期は、フックと手動の `pull` / `push` / `sync` / `rm` / `revert` を合わせて 1 つずつ動きます。手動の同期は、フックの同期が終わるのを最長 60 秒待ち (「待っています」と表示)、それでも終わらなければ何もせずにエラーで止まるので、もう一度実行してください。フックは待ちきれなければその回を飛ばします
   - フックの失敗で会話は止めません。失敗は `.state/memory/<repo-id>.json.log` (VM では `~/.claude/pmva-memory.state.json.log`) に残ります
   - フックは入れたフォルダの Claude Code にだけ効きます。git worktree で作業するときは、その worktree のフォルダでも `install-hooks` を実行してください (メモリのフォルダは worktree でも同じです)。動いている Claude Code には、次に起動した会話から効きます
   - `settings.local.json` にはこの PC の Python と `mvm.py` のパスが入ります。git の管理から外れていなければ、そう表示するので `.gitignore` に足してください

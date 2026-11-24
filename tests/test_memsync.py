@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -1847,6 +1848,137 @@ class WindowsBusyFileTest(MemsyncTestCase):
         self.assertNotIn("消せませんでした", self.text())
 
 
+class CliLockTest(MemsyncTestCase):
+    """手動の同期 (mvm memory、memsync.py pull / push / rm / revert、VM の snapshot.sh) も、
+    会話のフックと同じロックを取る (同じ状態ファイルと一時ファイルを書き換えるため)。"""
+
+    def setUp(self):
+        super().setUp()
+        self.lock = Path(str(self.state) + ".lock")
+
+    def hold_lock(self, age=0):
+        self.lock.parent.mkdir(parents=True, exist_ok=True)
+        self.lock.write_text("other", encoding="utf-8")
+        if age:
+            t = time.time() - age
+            os.utime(str(self.lock), (t, t))
+
+    def main(self, *argv, lock_wait=5):
+        args = list(argv) + ["--dir", str(self.dir), "--uri", URI, "--state", str(self.state)]
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(memsync, "CLI_LOCK_WAIT", lock_wait), \
+                redirect_stdout(out), redirect_stderr(err):
+            rc = memsync.main(args, runner=self.runner, out=lambda m: print(m))
+        return rc, out.getvalue(), err.getvalue()
+
+    def runner(self, args):
+        self.seen_lock.append(self.lock.exists())
+        return self.s3(args)
+
+    seen_lock = None
+
+    def test_writing_actions_hold_the_lock_and_release_it(self):
+        self.write("a.md", "a\n")
+        for argv in (["push"], ["pull"], ["revert", "a.md"], ["rm", "a.md"]):
+            self.seen_lock = []
+            if argv[0] == "revert":
+                self.write("a.md", "b\n")
+                self.main("push")
+                self.seen_lock = []
+            rc, _, err = self.main(*argv)
+            self.assertEqual(rc, 0, (argv, err))
+            self.assertTrue(self.seen_lock and all(self.seen_lock), "%s は S3 を触る間ずっとロックを持つ" % argv)
+            self.assertFalse(self.lock.exists(), "%s の後はロックを外す" % argv)
+
+    def test_waits_for_a_running_hook(self):
+        self.write("a.md", "a\n")
+        self.hold_lock()
+        timer = threading.Timer(0.5, self.lock.unlink)
+        timer.start()
+        self.addCleanup(timer.cancel)
+        self.seen_lock = []
+        rc, out, _ = self.main("push")
+        self.assertEqual(rc, 0)
+        self.assertIn("待っています", out)
+        self.assertEqual(self.s3.get("a.md"), b"a\n")
+
+    def test_gives_up_with_next_step_when_lock_stays(self):
+        self.write("a.md", "a\n")
+        self.hold_lock()
+        self.seen_lock = []
+        rc, _, err = self.main("push", lock_wait=0.3)
+        self.assertEqual(rc, 1)
+        self.assertIn("もう一度", err)
+        self.assertEqual(self.s3.calls, [], "ロックが取れなければ何もしない")
+        self.assertEqual(self.lock.read_text(encoding="utf-8"), "other", "他のロックは消さない")
+
+    def test_lock_wait_option_overrides_the_default(self):
+        self.write("a.md", "a\n")
+        self.hold_lock()
+        self.seen_lock = []
+        start = time.monotonic()
+        rc, _, err = self.main("push", "--lock-wait", "0.3", lock_wait=30)
+        self.assertEqual(rc, 1)
+        self.assertLess(time.monotonic() - start, 5, "--lock-wait の秒数で諦める")
+        self.assertIn("もう一度", err)
+
+    def test_releases_the_lock_when_sync_fails(self):
+        self.write("a.md", "a\n")
+        self.s3.fail = "boom"
+        self.seen_lock = []
+        rc, _, _ = self.main("push")
+        self.assertEqual(rc, 1)
+        self.assertFalse(self.lock.exists())
+
+    def test_read_only_actions_do_not_wait_for_the_lock(self):
+        self.write("a.md", "a\n")
+        self.hold_lock()
+        for argv in (["status"], ["log"], ["push", "--dry-run"], ["pull", "--dry-run"]):
+            self.seen_lock = []
+            start = time.monotonic()
+            rc, _, err = self.main(*argv, lock_wait=30)
+            self.assertEqual(rc, 0, (argv, err))
+            self.assertLess(time.monotonic() - start, 5, "%s はロックを待たない" % argv)
+        self.assertTrue(self.lock.exists())
+
+    def test_long_sync_keeps_its_lock_fresh(self):
+        # Windows の aws CLI は 1 回 1〜2 秒かかり、ファイルが多いと 120 秒 (古いロックとみなす時間) を超える。
+        # 途中で他の同期に奪われないよう、AWS CLI を呼ぶたびにロックの時刻を新しくする
+        for i in range(3):
+            self.write("f%d.md" % i, "x%d\n" % i)
+        ages = []
+
+        def runner(args):
+            if self.lock.exists():
+                ages.append(time.time() - self.lock.stat().st_mtime)
+                t = time.time() - 1000       # 呼び出しの間に長い時間がたったことにする
+                os.utime(str(self.lock), (t, t))
+            return self.s3(args)
+        self.runner = runner
+        rc, _, err = self.main("push")
+        self.assertEqual(rc, 0, err)
+        self.assertGreater(len(ages), 3)
+        self.assertTrue(all(a < 60 for a in ages), ages)
+
+    def test_hook_uses_the_same_lock_and_keeps_it_fresh(self):
+        self.write("a.md", "a\n")
+        ages = []
+
+        def runner(args):
+            ages.append(time.time() - self.lock.stat().st_mtime if self.lock.exists() else None)
+            if self.lock.exists():
+                t = time.time() - 1000
+                os.utime(str(self.lock), (t, t))
+            return self.s3(args)
+        sync = memsync.Memsync(self.dir, URI, self.state, runner=runner, out=self.lines.append)
+        event = json.dumps({"tool_input": {"file_path": str(self.dir / "a.md")}})
+        self.assertEqual(memsync.run_hook("post-tool", sync, event, lock_wait=0.2), "")
+        self.assertEqual(self.s3.get("a.md"), b"a\n")
+        self.assertTrue(ages and all(a is not None and a < 60 for a in ages), ages)
+        self.assertFalse(self.lock.exists())
+        self.assertIs(sync.runner, runner, "ロックを外したら元の実行関数に戻す")
+
+
 class ImageWiringTest(unittest.TestCase):
     """VM に memsync.py を入れる配線 (Dockerfile、zip の実行権限、bootstrap.sh / snapshot.sh からの呼び出し)。"""
 
@@ -1869,6 +2001,17 @@ class ImageWiringTest(unittest.TestCase):
         self.assertIn("memsync.py push", snapshot)
         for script in (bootstrap, snapshot):
             self.assertIn("pmva-memory.state.json", script)
+
+    def test_snapshot_push_waits_for_the_lock_well_within_the_terminate_timeout(self):
+        # 終了時の保存 (supervisor の terminate フック) は snapshot.sh 全体を打ち切る。
+        # メモリの送信がロックを待ちすぎると、後ろのワークスペースの保存まで失われる
+        snapshot = self.read("image/snapshot.sh")
+        push = [l for l in snapshot.splitlines() if "memsync.py push" in l][0]
+        m = re.search(r"--lock-wait (\d+)", push)
+        self.assertIsNotNone(m, "snapshot.sh の送信はロックの待ち時間を短くする")
+        terminate = int(re.search(r'snapshot\("terminate", timeout=(\d+)\)', self.read("image/supervisor.py")).group(1))
+        self.assertLessEqual(int(m.group(1)) * 3, terminate, "待ち時間は打ち切りまでの時間の 1/3 以下")
+        self.assertGreater(memsync.CLI_LOCK_WAIT, int(m.group(1)))
 
     def test_bootstrap_installs_memory_hooks(self):
         bootstrap = self.read("image/bootstrap.sh")

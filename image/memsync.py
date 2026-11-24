@@ -49,6 +49,9 @@ HOOK_LOG_MAX = 256 * 1024
 # 待ってやり直す回数と間隔 (合わせて 1 秒ほど)
 BUSY_RETRIES = 20
 BUSY_DELAY = 0.05
+LOCK_STALE = 120                  # これより長く更新されていないロックは、同期の途中で落ちて残ったものとして奪う
+CLI_LOCK_WAIT = 60                # 手動の同期 (pull / push / rm / revert) が、フックなど他の同期の終わりを待つ秒数
+LOCKED_ACTIONS = ("pull", "push", "rm", "revert")    # 手元のファイルや状態ファイルを書き換える (ロックを取る) 操作
 # フックの名前 (memsync.py hook <名前>) → Claude Code のイベント名
 HOOK_EVENTS = {"session-start": "SessionStart", "prompt": "UserPromptSubmit", "post-tool": "PostToolUse"}
 
@@ -65,6 +68,15 @@ SHARE_FALSE_PATTERN = re.compile(r"^share:\s*[\"']?false[\"']?\s*(#.*)?$", re.IG
 
 class MemsyncError(Exception):
     """利用者に次の行動を伝えて終わるエラー。"""
+
+
+class LockBusy(MemsyncError):
+    """他の同期 (会話のフック、mvm memory、VM の snapshot.sh) がロックを持ったまま、待っても終わらなかった。"""
+
+    def __init__(self, lock, wait):
+        super().__init__("他の同期 (会話のフックなど) が %d 秒たっても終わりません。少し待ってからもう一度実行してください。"
+                         "同期の途中で落ちて残ったロックなら、%d 秒たつと自動で外れます (%s)" % (wait, LOCK_STALE, lock))
+        self.lock = lock
 
 
 # ---------------------------------------------------------------- Windows で使用中のファイル
@@ -903,8 +915,50 @@ class Memsync:
         return 0
 
     # ---- 履歴・削除・戻す
-    def run_action(self, action, name=None, only_origin=None, since=None, as_json=False, to=None):
-        """コマンド名から実行する (bin/mvm.py と main() が使う)。終了コードを返す。"""
+    @property
+    def lock_path(self):
+        return Path(str(self.state_path) + ".lock")
+
+    @contextlib.contextmanager
+    def locked(self, wait, say_waiting=False):
+        """同じ状態ファイルを使う同期 (会話のフック、mvm memory、VM の snapshot.sh) を 1 つずつにする。
+
+        wait 秒待っても取れなければ LockBusy。持っている間は AWS CLI を呼ぶたびにロックの時刻を新しくして、
+        長い同期 (Windows の aws CLI は 1 回 1〜2 秒かかる) が LOCK_STALE 秒を超えても他に奪われないようにする。
+        """
+        lock = self.lock_path
+        if not _acquire_lock(lock, 0):
+            if say_waiting:
+                self.say("他の同期 (会話のフックなど) が終わるのを待っています (最長 %d 秒)" % wait)
+            if not _acquire_lock(lock, wait):
+                raise LockBusy(lock, wait)
+        runner = self.runner
+
+        def touching(args):
+            try:
+                os.utime(str(lock), None)
+            except OSError:
+                pass
+            return runner(args)
+        self.runner = touching
+        try:
+            yield
+        finally:
+            self.runner = runner
+            _release_lock(lock)     # 残ると、LOCK_STALE 秒たつまで他の同期が待たされる
+
+    def run_action(self, action, name=None, only_origin=None, since=None, as_json=False, to=None, lock_wait=None):
+        """コマンド名から実行する (bin/mvm.py と main() が使う)。終了コードを返す。
+
+        書き換える操作は、会話のフックと同じロックを取ってから行う (dry-run は何も書かないので取らない)。
+        lock_wait はロックを待つ秒数 (既定 CLI_LOCK_WAIT)。
+        """
+        if action in LOCKED_ACTIONS and not self.dry_run:
+            with self.locked(CLI_LOCK_WAIT if lock_wait is None else lock_wait, say_waiting=True):
+                return self._run_action(action, name, only_origin, since, as_json, to)
+        return self._run_action(action, name, only_origin, since, as_json, to)
+
+    def _run_action(self, action, name, only_origin, since, as_json, to):
         if action == "log":
             return self.history_log(name, only_origin, since, as_json)
         if action == "revert":
@@ -1129,7 +1183,7 @@ def _same_dir(a, b):
     return os.path.normcase(os.path.realpath(str(a))) == os.path.normcase(os.path.realpath(str(b)))
 
 
-def _acquire_lock(path, wait, stale=120):
+def _acquire_lock(path, wait, stale=LOCK_STALE):
     """同じマシンで同時に動く同期 (複数の会話のフック) を 1 つにする。取れなければ False。
 
     同期の途中で落ちて残ったロックは、stale 秒より古ければ奪う。
@@ -1238,28 +1292,26 @@ def run_hook(event, sync, stdin_text, min_interval=0, now=time.time, lock_wait=1
                 return ""
         except (OSError, ValueError):
             pass
-    lock = Path(str(sync.state_path) + ".lock")
-    # 送信は飛ばすと次に書くまで送られないので長めに待つ (async なので会話は待たせない)
-    if not _acquire_lock(lock, lock_wait * 6 if event == "post-tool" else lock_wait):
-        sync.out("他の同期が動いているので、今回は飛ばします (%s)" % lock)
-        return ""
     try:
-        if event == "post-tool":
-            sync.push()
-            return ""
-        stamp.write_text(str(now()), encoding="utf-8")
-        sync.pull()
-        text = hook_context(sync, with_conflicts=(event == "session-start"))
+        # 送信は飛ばすと次に書くまで送られないので長めに待つ (async なので会話は待たせない)
+        with sync.locked(lock_wait * 6 if event == "post-tool" else lock_wait):
+            if event == "post-tool":
+                sync.push()
+                return ""
+            stamp.write_text(str(now()), encoding="utf-8")
+            sync.pull()
+            text = hook_context(sync, with_conflicts=(event == "session-start"))
         if not text:
             return ""
         # ASCII だけの JSON にする (Windows の標準出力の文字コードに左右されない)
         return json.dumps({"hookSpecificOutput": {"hookEventName": HOOK_EVENTS[event], "additionalContext": text}})
+    except LockBusy as e:
+        sync.out("他の同期が動いているので、今回は飛ばします (%s)" % e.lock)
+        return ""
     except Exception as e:      # フックの失敗で会話を止めない
         sync.out("error: %s" % e)
         _hook_log(sync, event, str(e))
         return ""
-    finally:
-        _release_lock(lock)     # 残ると、stale 秒たつまで他の会話の同期が飛ばされる
 
 
 def main(argv=None, runner=None, out=None, stdin=None):
@@ -1274,6 +1326,9 @@ def main(argv=None, runner=None, out=None, stdin=None):
     p.add_argument("--to", help="revert で、戻す版の時刻 (20261124T101503Z や 2026-11-24T10:15:03Z。その時刻以前で最新の版)")
     p.add_argument("--min-interval", type=float, default=0,
                    help="hook prompt で、前回の pull からこの秒数がたつまでは S3 を見に行かない (既定 0)")
+    p.add_argument("--lock-wait", type=float, default=None,
+                   help="pull / push / rm / revert で、他の同期 (会話のフックなど) が終わるのを待つ秒数 (既定 %d)。"
+                        "VM の終了時の保存は打ち切られるまでの時間が短いので、snapshot.sh は短くする" % CLI_LOCK_WAIT)
     p.add_argument("--region", help="AWS のリージョン (フックの環境に AWS_REGION が無いことがあるため明示する)")
     p.add_argument("--dir", required=True, help="メモリのフォルダ")
     p.add_argument("--uri", required=True, help="s3://<バケット>/memory/<repo-id>/")
@@ -1313,7 +1368,7 @@ def main(argv=None, runner=None, out=None, stdin=None):
     try:
         sync = Memsync(Path(args.dir).expanduser(), args.uri, args.state, (args.origin if args.action != "log" else None) or "local",
                        args.dry_run, args.force, runner, out)
-        return sync.run_action(args.action, args.event, args.origin, args.since, args.json, args.to)
+        return sync.run_action(args.action, args.event, args.origin, args.since, args.json, args.to, args.lock_wait)
     except MemsyncError as e:
         print("error: %s" % e, file=sys.stderr)
         return 1
