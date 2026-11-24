@@ -1728,6 +1728,125 @@ class AdminCliTest(MemsyncTestCase):
         self.assertEqual(self.s3.calls, [])
 
 
+def fail_first(real, times=1, only=None):
+    """最初の times 回だけ PermissionError を投げ、その後は本物を呼ぶ差し替え。
+
+    Windows では、他のプロセスが消している最中 (削除待ち) や開いている最中のファイルへの
+    os.open / os.replace / os.remove が PermissionError になる。それを OS によらず再現する。
+    only (パスか、パスを受け取って真偽を返す関数) を渡すと、それに当たる呼び出しだけを数えて失敗させる
+    (一時フォルダの後始末などは素通し)。
+    """
+    calls = []
+    match = only if callable(only) else (lambda p: str(p) == str(only))
+
+    def fake(*args, **kwargs):
+        if only is not None and not match(args[0]):
+            return real(*args, **kwargs)
+        calls.append(args)
+        if len(calls) <= times:
+            raise PermissionError(13, "Permission denied", args[0])
+        return real(*args, **kwargs)
+    fake.calls = calls
+    return fake
+
+
+class WindowsBusyFileTest(MemsyncTestCase):
+    """Windows で一時的に PermissionError になるファイル操作で、フックや pull を落とさない。"""
+
+    def setUp(self):
+        super().setUp()
+        self.lock = Path(str(self.state) + ".lock")
+
+    def test_acquire_lock_retries_when_lock_is_being_deleted(self):
+        fake = fail_first(os.open)
+        with mock.patch.object(memsync.os, "open", fake):
+            self.assertTrue(memsync._acquire_lock(self.lock, 2))
+        self.assertGreaterEqual(len(fake.calls), 2, "取り直している")
+        self.assertTrue(self.lock.exists())
+
+    def test_acquire_lock_gives_up_at_deadline_when_permission_error_persists(self):
+        fake = fail_first(os.open, times=10 ** 6)
+        start = time.monotonic()
+        with mock.patch.object(memsync.os, "open", fake):
+            self.assertFalse(memsync._acquire_lock(self.lock, 0.3))
+        self.assertLess(time.monotonic() - start, 5, "期限で諦める")
+
+    def test_hook_survives_permission_error_on_lock(self):
+        self.s3.put("a.md", "a\n")
+        with mock.patch.object(memsync.os, "open", fail_first(os.open, only=self.lock)):
+            out = memsync.run_hook("prompt", self.sync(), "{}", now=time.time, lock_wait=2)
+        self.assertIn("a.md", json.loads(out)["hookSpecificOutput"]["additionalContext"])
+        self.assertFalse(self.lock.exists(), "終わったらロックを外す")
+
+    def test_write_local_retries_replace(self):
+        fake = fail_first(os.replace)
+        with mock.patch.object(memsync.os, "replace", fake):
+            self.sync().write_local("a.md", b"new\n")
+        self.assertEqual((self.dir / "a.md").read_bytes(), b"new\n")
+        self.assertEqual(len(fake.calls), 2)
+        self.assertFalse((self.dir / "a.md.pmva-tmp").exists())
+
+    def test_write_local_removes_tmp_when_replace_keeps_failing(self):
+        self.write("a.md", "old\n")
+        with mock.patch.object(memsync, "BUSY_DELAY", 0), \
+                mock.patch.object(memsync.os, "replace", fail_first(os.replace, times=10 ** 6)):
+            with self.assertRaises(PermissionError):
+                self.sync().write_local("a.md", b"new\n")
+        self.assertEqual((self.dir / "a.md").read_bytes(), b"old\n", "手元のファイルは壊さない")
+        self.assertFalse((self.dir / "a.md.pmva-tmp").exists(), "一時ファイルを残さない")
+
+    def test_hook_releases_lock_even_if_first_remove_fails(self):
+        # ロックが残ると、120 秒たつまで他の会話の同期が飛ばされる
+        self.s3.put("a.md", "a\n")
+        fake = fail_first(os.remove, only=self.lock)
+        with mock.patch.object(memsync.os, "remove", fake), mock.patch.object(memsync.os, "unlink", fake):
+            memsync.run_hook("prompt", self.sync(), "{}", now=time.time, lock_wait=2)
+        self.assertGreaterEqual(len(fake.calls), 1, "ロックを外そうとしている")
+        self.assertFalse(self.lock.exists())
+
+    def test_busy_temp_file_does_not_break_pull_and_push(self):
+        # aws.exe やウイルス対策ソフトが一時ファイルをまだ開いていると、一時フォルダの後始末が PermissionError になる
+        self.s3.put("a.md", "a\n")
+        self.write("b.md", "b\n")
+        in_tmp = lambda p: os.path.basename(str(p)) in ("download", "body") and "memory" not in str(p)  # noqa: E731
+        fake = fail_first(os.unlink, times=3, only=in_tmp)
+        with mock.patch.object(memsync, "BUSY_DELAY", 0), \
+                mock.patch.object(memsync.os, "unlink", fake), mock.patch.object(memsync.os, "remove", fake):
+            sync = self.sync()
+            sync.pull()
+            sync.push()
+        self.assertGreaterEqual(len(fake.calls), 3)
+        self.assertEqual((self.dir / "a.md").read_bytes(), b"a\n")
+        self.assertEqual(self.s3.get("b.md"), b"b\n")
+
+    def busy_remove(self, name):
+        fake = fail_first(os.remove, only=self.dir / name)
+        return fake, mock.patch.multiple(memsync.os, remove=fake, unlink=fake)
+
+    def test_pull_deletes_memory_removed_elsewhere_even_if_busy(self):
+        self.write("a.md", "old\n")
+        self.set_state(a=md5(b"old\n"))
+        self.s3.put(".deleted.json", json.dumps(
+            {"files": {"a.md": [{"md5": md5(b"old\n"), "at": "2026-11-24T09:00:00Z", "by": "pc", "line": None}]}}))
+        fake, patch = self.busy_remove("a.md")
+        with patch:
+            sync = self.sync()
+            sync.pull()
+        self.assertEqual(len(fake.calls), 2)
+        self.assertFalse((self.dir / "a.md").exists())
+        self.assertEqual(sync.deleted, ["a.md"])
+
+    def test_rm_deletes_local_file_even_if_busy(self):
+        self.write("a.md", "a\n")
+        self.s3.put("a.md", "a\n")
+        fake, patch = self.busy_remove("a.md")
+        with patch:
+            self.assertEqual(self.sync().rm("a.md"), 0)
+        self.assertEqual(len(fake.calls), 2)
+        self.assertFalse((self.dir / "a.md").exists())
+        self.assertNotIn("消せませんでした", self.text())
+
+
 class ImageWiringTest(unittest.TestCase):
     """VM に memsync.py を入れる配線 (Dockerfile、zip の実行権限、bootstrap.sh / snapshot.sh からの呼び出し)。"""
 
