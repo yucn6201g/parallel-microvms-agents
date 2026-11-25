@@ -213,6 +213,34 @@ mvm up cmp-codex  --agent codex  --repo <URL> --prompt "<同じ指示>"
 
 `pmva/cmp-claude` と `pmva/cmp-codex` のブランチに結果が残るので、GitHub 上で差分を比べられます。1 台で両方を動かすこともできます (`--agent both`。tmux のウィンドウが `claude` と `codex` に分かれます)。
 
+## Remote Control (スマホや claude.ai/code から操作する)
+
+VM の Claude Code を、claude.ai/code やスマホの Claude アプリから操作できます (Claude Code の Remote Control)。
+
+要件:
+
+- claude.ai のサブスクリプション (Pro / Max など) のフル権限のログイン。Team / Enterprise は、管理者が Remote Control を有効にしている必要があります
+- `--claude-auth oauth-token` (`claude setup-token` のトークンは推論専用)、API キー、Bedrock、gateway、custom では使えません
+- Codex では使えません (`--agent claude` か `both`)
+
+手順:
+
+```bash
+mvm up <name> --remote-control --repo <URL>
+mvm login <name>
+```
+
+1. `--remote-control` を付けると、`--claude-auth interactive` で起動します (他の `--claude-auth` を指定するとエラーになります)。`claude` のウィンドウは「`mvm login <name>` を実行してください」と表示して待ちます
+2. `mvm login <name>` で表示される URL を手元のブラウザで開き、表示されたコードを貼り付けます。ログインすると、待っていた Claude Code が `claude --remote-control pmva-<name>` で自動で起動します
+3. claude.ai/code か、スマホの Claude アプリのセッション一覧で `pmva-<name>` を開きます
+
+注意:
+
+- VM が作業を終えれば、これまでどおりサスペンドされます。Remote Control の接続は VM から外向きなので、アイドルの判定を妨げません (実機で確認)
+- ログインは保存されません。`mvm renew` や `--restore` で起動した VM では、`mvm login <name>` でログインし直します
+- この VM では、テレメトリなどを `DISABLE_TELEMETRY`、`DISABLE_ERROR_REPORTING`、`DISABLE_BUG_COMMAND` の個別の変数で止めています。非必須の通信をまとめて止める `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` (と `CLAUDE_CODE_DISABLE_FEATURE_FLAGS`、`DISABLE_GROWTHBOOK`) は、Remote Control が使えなくなるので外しています。ほかの VM では、これまでどおり入っています
+- サスペンドから再開したあとに、Remote Control がつなぎ直すかは未確認です。つながらないときは、`mvm shell <name>` で `claude` のウィンドウに入り、`/remote-control` を実行してください
+
 ## 手元の設定を VM でも使う
 
 リポジトリに入っている設定 (`CLAUDE.md`、`AGENTS.md`、`.claude/skills/` など) は、clone すればそのまま使われます。手元の自分用の設定 (`~/.claude/CLAUDE.md`、skill、サブエージェントなど) は、次のように送ります。

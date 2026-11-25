@@ -203,6 +203,7 @@ MicroVM を 1 台起動し、エージェントを tmux の中で開始します
 | `--no-setup` | | リポジトリの `.pmva/setup.sh` を実行しない ([usage.md](usage.md#リポジトリごとの準備-pmvasetupsh)) |
 | `--profile <名前>` / `--no-profile` | `PROFILE` | 手元から送った設定のまとまり ([profile](#profile)) を使う / 使わない |
 | `--memory` / `--no-memory` | `MEMORY_SYNC` | Claude Code の自動メモリを手元と共有する ([memory](#memory))。`--repo` が無いときは共有しない |
+| `--remote-control` | | Claude Code を Remote Control (claude.ai/code、スマホの Claude アプリ) から操作できるようにする ([usage.md](usage.md#remote-control-スマホや-claudeaicode-から操作する))。`--claude-auth interactive` で起動し、`mvm login <name>` でログインすると自動で起動する。`--agent claude` か `both` だけで、他の `--claude-auth` とは一緒に使えない |
 
 注意:
 
@@ -456,7 +457,9 @@ VM の中のエージェントに、手元のブラウザを使ってログイ�
 | (なし) | Codex: VM の中で `codex login` を動かし、手元の 1455 番ポートをつないで、ログインの URL を手元のブラウザで開く |
 | `--device` | Codex: コードを入力する方式 (`codex login --device-auth`) |
 | `--no-browser` | Codex: ブラウザを自動で開かない (表示された URL を自分で開く) |
-| `--console` | Claude Code: Anthropic Console (API の従量課金) でログインする |
+| `--console` | Claude Code: Anthropic Console (API の従量課金) でログインする。`--remote-control` の VM では使えない |
+
+`--remote-control` で起動した VM では、Claude Code は `claude auth login --claudeai` (claude.ai のサブスクリプション) でログインします。ログインすると、`claude` のウィンドウで待っていた Claude Code が `--remote-control` つきで自動で起動します ([usage.md](usage.md#remote-control-スマホや-claudeaicode-から操作する))。
 
 `mvm ssh` と同じ経路を使うので、SSH 公開鍵を付けて起動したセッションが対象です。
 
