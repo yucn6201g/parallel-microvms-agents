@@ -488,6 +488,64 @@ class SupervisorTest(unittest.TestCase):
         settings = json.loads((self.home / ".claude" / "settings.json").read_text(encoding="utf-8"))
         self.assertIs(settings.get("skipDangerousModePermissionPrompt"), True, settings)
 
+    def claude_screen(self):
+        _, st = self.get("/status?lines=40")
+        return next(w.get("screen", "") for w in st["windows"] if w["name"] == "claude")
+
+    def test_remote_control_waits_for_login_then_starts_claude(self):
+        payload = {"name": "rc1", "agent": "claude", "claudeAuth": "interactive", "remoteControl": "true",
+                   "claudeArgs": "--dangerously-skip-permissions", "prompt": "README を読んで",
+                   "snapshotIntervalSeconds": 0}
+        self.hook("run", {"microvmId": "m", "runHookPayload": json.dumps(payload)})
+        self.wait_ready()
+        env_sh = (self.home / ".pmva" / "env.sh").read_text(encoding="utf-8")
+        self.assertIn("unset CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC CLAUDE_CODE_DISABLE_FEATURE_FLAGS DISABLE_GROWTHBOOK", env_sh)
+        for var in ("DISABLE_TELEMETRY", "DISABLE_ERROR_REPORTING", "DISABLE_BUG_COMMAND"):
+            self.assertIn(f"export {var}=1", env_sh)
+        # ログインするまでは、案内を出して待つ (claude はまだ起動しない)
+        time.sleep(2)
+        screen = self.claude_screen()
+        compact = "".join(screen.split())
+        # 入力した命令の文字列と、それが表示した案内の 2 回出る
+        self.assertGreaterEqual(compact.count("mvmloginrc1を実行してください"), 2, screen)
+        self.assertNotIn("claude started:", screen)
+        # ログイン (認証情報のファイルができる) すると、Remote Control つきで起動する
+        creds = self.home / ".claude" / ".credentials.json"
+        creds.write_text('{"claudeAiOauth": {}}', encoding="utf-8")
+        for _ in range(100):
+            screen = self.claude_screen()
+            if "claudestarted:" in "".join(screen.split()):
+                break
+            time.sleep(0.2)
+        # 画面の幅で折り返されるので、空白と改行を除いて比べる
+        self.assertIn("claudestarted:--remote-controlpmva-rc1--dangerously-skip-permissionsREADMEを読んで",
+                      "".join(screen.split()))
+
+    def test_remote_control_starts_without_waiting_when_already_logged_in(self):
+        (self.home / ".claude").mkdir(exist_ok=True)
+        (self.home / ".claude" / ".credentials.json").write_text('{"claudeAiOauth": {}}', encoding="utf-8")
+        payload = {"name": "rc2", "agent": "claude", "claudeAuth": "interactive", "remoteControl": "true",
+                   "snapshotIntervalSeconds": 0}
+        self.hook("run", {"microvmId": "m", "runHookPayload": json.dumps(payload)})
+        self.wait_ready()
+        for _ in range(50):
+            screen = self.claude_screen()
+            if "claudestarted:" in "".join(screen.split()):
+                break
+            time.sleep(0.2)
+        self.assertIn("claude started: --remote-control pmva-rc2", screen)
+
+    def test_without_remote_control_env_sh_keeps_image_settings(self):
+        payload = {"name": "norc", "agent": "claude", "claudeAuth": "none", "snapshotIntervalSeconds": 0}
+        self.hook("run", {"microvmId": "m", "runHookPayload": json.dumps(payload)})
+        self.wait_ready()
+        env_sh = (self.home / ".pmva" / "env.sh").read_text(encoding="utf-8")
+        self.assertNotIn("unset ", env_sh)
+        self.assertNotIn("DISABLE_TELEMETRY", env_sh)
+        time.sleep(1)
+        self.assertIn("claude started:", self.claude_screen())
+        self.assertNotIn("--remote-control", self.claude_screen())
+
     def test_send_keys_to_window(self):
         self.hook("run", {"microvmId": "m", "runHookPayload": json.dumps({"name": "t2", "agent": "none"})})
         self.wait_ready()

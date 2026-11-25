@@ -320,6 +320,8 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 
 分かったこと: Remote Control を正式に足すには、(1) その VM だけ `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` を外す、(2) Claude Code の認証を完全な権限のログインにする、の 2 つが要る。`oauth-token` のままでは使えない。(2) は `--claude-auth interactive` と `mvm login` で足りる見込みだが、その組み合わせでは試していない。
 
+`mvm up --remote-control` で正式に足した。実機での確認は未。
+
 ## 結果
 
 | 項目 | 結果 / メモ |

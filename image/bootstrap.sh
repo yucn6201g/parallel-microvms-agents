@@ -75,6 +75,16 @@ mkdir -p "$PMVA" "$SECRETS_DIR" "$HOME/.claude" "$HOME/.codex" "$HOME/work"
 : > "$ENV_FILE"
 addenv PMVA_SESSION "$NAME"
 
+# mvm up --remote-control: Remote Control は、非必須通信をまとめて止める変数があると使えない。
+# イメージ (Dockerfile の ENV) 側の設定はそのままにして、この VM のシェルだけで外し、テレメトリなどは個別の変数で止める
+REMOTE_CONTROL="$(j .remoteControl)"
+if [ "$REMOTE_CONTROL" = true ]; then
+  echo 'unset CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC CLAUDE_CODE_DISABLE_FEATURE_FLAGS DISABLE_GROWTHBOOK' >> "$ENV_FILE"
+  addenv DISABLE_TELEMETRY 1
+  addenv DISABLE_ERROR_REPORTING 1
+  addenv DISABLE_BUG_COMMAND 1
+fi
+
 # ---------------------------------------------------------------- Claude Code
 CLAUDE_AUTH="$(j .claudeAuth)"; CLAUDE_AUTH="${CLAUDE_AUTH:-none}"
 CLAUDE_SECRET="$(j .claudeSecret)"
@@ -504,6 +514,16 @@ start_agent() {
 
 claude_cmd="claude${CLAUDE_ARGS:+ $CLAUDE_ARGS}"
 codex_cmd="codex${CODEX_ARGS:+ $CODEX_ARGS}"
+if [ "$REMOTE_CONTROL" = true ]; then
+  # ログインしていない claude --remote-control は、Remote Control なしの普通の対話セッションになる。
+  # そこで、ログイン (mvm login が ~/.claude/.credentials.json を作る) を待ってから起動する
+  # 名前は英小文字・数字・ハイフンだけのはずだが、案内を単一引用符で包むので、念のため他の文字は除く
+  rc_name="${NAME//[^A-Za-z0-9._-]/}"
+  rc_msg="Remote Control を使うには、手元の PC で mvm login $rc_name を実行してください (ログインすると自動で起動します)"
+  claude_cmd='cred=$HOME/.claude/.credentials.json; if [ ! -s "$cred" ]; then echo '"'$rc_msg'"
+  claude_cmd="$claude_cmd"'; until [ -s "$cred" ]; do sleep 2; done; fi; claude --remote-control '"pmva-$rc_name"
+  claude_cmd="$claude_cmd${CLAUDE_ARGS:+ $CLAUDE_ARGS}"
+fi
 if [ -n "$PROMPT_TEXT" ]; then
   claude_cmd="$claude_cmd $(printf '%q' "$PROMPT_TEXT")"
   codex_cmd="$codex_cmd $(printf '%q' "$PROMPT_TEXT")"

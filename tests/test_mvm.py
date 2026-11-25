@@ -1812,6 +1812,60 @@ class CliTest(unittest.TestCase):
         self.assertNotEqual(rc, 0)
         self.assertIn("1455", err)
 
+    def test_up_remote_control_forces_interactive_auth(self):
+        _, _, err = self.mvm("up", "rc1", "--remote-control")
+        p = self.payloads()[-1]
+        self.assertEqual((p["remoteControl"], p["claudeAuth"]), ("true", "interactive"))
+        self.assertNotIn("claudeSecret", p)
+        self.assertIn("claude-auth interactive", err)
+        self.assertIn("mvm login rc1", err)
+        # --claude-auth interactive の明示は、そのまま通る。--agent both でも使える
+        self.mvm("up", "rc2", "--remote-control", "--claude-auth", "interactive", "--agent", "both")
+        self.assertEqual(self.payloads()[-1]["remoteControl"], "true")
+
+    def test_up_remote_control_rejects_other_auth_and_codex(self):
+        for auth in ("oauth-token", "api-key", "bedrock"):
+            rc, _, err = self.mvm("up", "rc3", "--remote-control", "--claude-auth", auth, check=False)
+            self.assertNotEqual(rc, 0, auth)
+            self.assertIn("--claude-auth interactive", err)
+            self.assertIn("mvm login rc3", err)
+            self.assertIn("claude.ai", err)
+        rc, _, err = self.mvm("up", "rc4", "--remote-control", "--agent", "codex", check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("--agent claude か both", err)
+        self.assertEqual(self.payloads(), [], "止まったときは VM を起動しない")
+
+    def test_up_without_remote_control_has_no_remote_control_key(self):
+        self.mvm("up", "rc5")
+        p = self.payloads()[-1]
+        self.assertNotIn("remoteControl", p)
+        self.assertEqual(p["claudeAuth"], "oauth-token")
+
+    def test_renew_keeps_remote_control(self):
+        self.mvm("up", "rc6", "--remote-control")
+        self.mvm("stop", "rc6", "--no-save")
+        self.mvm("renew", "rc6")
+        renewed = self.payloads()[-1]
+        self.assertEqual((renewed["remoteControl"], renewed["claudeAuth"]), ("true", "interactive"))
+
+    def test_login_uses_claudeai_for_remote_control_vm(self):
+        env, record = self.fake_ssh()
+        self.mvm("up", "rc7", "--remote-control", env=env)
+        _, _, err = self.mvm("login", "rc7", env=env)
+        args = json.loads(record.read_text(encoding="utf-8"))
+        self.assertIn("claude auth login --claudeai", args[-1])
+        self.assertNotIn("--console", args[-1])
+        self.assertIn("Remote Control つきの Claude Code が自動で起動します", err)
+        self.assertIn("pmva-rc7", err)
+        rc, _, err = self.mvm("login", "rc7", "--console", env=env, check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("--console は使えません", err)
+        # Remote Control でない VM は、これまでどおり
+        self.mvm("up", "rc8", env=env)
+        self.mvm("login", "rc8", env=env)
+        args = json.loads(record.read_text(encoding="utf-8"))
+        self.assertTrue(args[-1].endswith("claude auth login"), args[-1])
+
     def test_codex_access_token_and_gateway(self):
         self.mvm("up", "t1", "--agent", "codex", "--codex-auth", "access-token")
         self.mvm("up", "g1", "--agent", "codex", "--codex-auth", "gateway")

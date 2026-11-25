@@ -1722,8 +1722,20 @@ def build_payload(name, a):
     agent = a.agent or C["DEFAULT_AGENT"]
     if agent not in AGENTS:
         die(f"--agent は {' | '.join(AGENTS)} のいずれかを指定してください")
+    remote_control = bool(getattr(a, "remote_control", False))
+    if remote_control and agent not in ("claude", "both"):
+        die("--remote-control は Claude Code 用です。--agent claude か both を指定してください")
+    if remote_control and a.claude_auth and a.claude_auth != "interactive":
+        die(f"--remote-control は --claude-auth {a.claude_auth} と一緒に使えません。"
+            "Remote Control は claude.ai のサブスクリプションのフル権限のログインが必要で、"
+            "setup-token (oauth-token)・API キー・Bedrock・gateway・custom などでは使えません。"
+            f"--claude-auth interactive で起動し、mvm login {name} でログインしてください")
+    if remote_control and not a.claude_auth:
+        log("--remote-control なので --claude-auth interactive で起動します "
+            f"(起動後に mvm login {name} でログインしてください)")
     # 使わないエージェントの認証は (明示されない限り) 行わない
-    claude_auth = a.claude_auth or (C["DEFAULT_CLAUDE_AUTH"] if agent in ("claude", "both") else "none")
+    claude_auth = "interactive" if remote_control else \
+        (a.claude_auth or (C["DEFAULT_CLAUDE_AUTH"] if agent in ("claude", "both") else "none"))
     codex_auth = a.codex_auth or (C["DEFAULT_CODEX_AUTH"] if agent in ("codex", "both") else "none")
     if claude_auth not in CLAUDE_AUTHS:
         die(f"--claude-auth は {' | '.join(CLAUDE_AUTHS)} のいずれかを指定してください")
@@ -1789,6 +1801,7 @@ def build_payload(name, a):
         "setupTimeoutSeconds": int(C["SETUP_TIMEOUT_SECONDS"]),
         "skipSetup": "true" if a.no_setup else "",
         "profile": profile_uri, "memory": memory_uri,
+        "remoteControl": "true" if remote_control else "",
         **anthropic_aws,
     }
     return {k: v for k, v in payload.items() if v != ""}
@@ -1858,6 +1871,8 @@ def launch(name, payload, idle, max_duration):
         pass
     log(f"起動しました: {name} ({resp['microvmId']})")
     log(f"  様子を見る: mvm peek {name}   接続: mvm ssh {name} (または mvm shell {name})")
+    if payload.get("remoteControl"):
+        log(f"  次に mvm login {name} でログインすると Remote Control で起動します")
 
 
 def cmd_up(args):
@@ -3039,17 +3054,27 @@ def port_free(port):
 def cmd_login(args):
     """VM の中のエージェントに、手元のブラウザでログインする。"""
     ssh = ssh_binary(args.name)
-    agent = args.agent or {"claude": "claude", "codex": "codex"}.get(load_session(args.name)["payload"].get("agent"))
+    session_payload = load_session(args.name)["payload"]
+    agent = args.agent or {"claude": "claude", "codex": "codex"}.get(session_payload.get("agent"))
     if not agent:
         die("ログインするエージェント (claude か codex) を指定してください。例: mvm login " + args.name + " codex")
     host = f"agent@pmva-{args.name}"
     if agent == "claude":
+        remote_control = bool(session_payload.get("remoteControl"))
+        if remote_control and args.console:
+            die("--remote-control の VM では --console は使えません。Remote Control は claude.ai のサブスクリプションの"
+                f"ログインが必要です。--console を外して mvm login {args.name} を実行してください")
         # Claude Code は URL を表示し、ブラウザに表示されたコードを貼り付ける方式 (端末が要る)
         log("表示される URL を手元のブラウザで開き、ログイン後に表示されるコードを貼り付けてください")
+        login_option = " --claudeai" if remote_control else (" --console" if args.console else "")
         rc = subprocess.call([ssh, *ssh_options(args.name), "-t", host,
-                              VM_SHELL + "exec claude auth login" + (" --console" if args.console else "")])
+                              VM_SHELL + "exec claude auth login" + login_option])
         if rc == 0:
-            log("ログインしました。claude のウィンドウで動いている Claude Code は、起動し直すと新しいログインを使います")
+            if remote_control:
+                log("ログインしました。claude のウィンドウで Remote Control つきの Claude Code が自動で起動します。"
+                    f"claude.ai/code かスマホの Claude アプリの一覧に pmva-{args.name} として出ます")
+            else:
+                log("ログインしました。claude のウィンドウで動いている Claude Code は、起動し直すと新しいログインを使います")
         return rc
     forwards = []
     if args.device:
@@ -3398,6 +3423,9 @@ def add_up_options(p):
     p.add_argument("--memory", dest="memory", action="store_true", default=None,
                    help="Claude Code の自動メモリを手元と共有する (--repo が必要。mvm memory)")
     p.add_argument("--no-memory", dest="memory", action="store_false", help="メモリを共有しない")
+    p.add_argument("--remote-control", action="store_true",
+                   help="Claude Code を Remote Control (claude.ai/code、スマホのアプリ) から操作できるようにする "
+                        "(--claude-auth interactive で起動し、mvm login でログインする)")
 
 
 def build_parser():
