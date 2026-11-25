@@ -1177,6 +1177,15 @@ class DeletedMarkTest(MemsyncTestCase):
         self.assertRegex(self.text(), r"(?m)^a\.md +消された \(mvm memory rm\)")
         self.assertRegex(self.text(), r"(?m)^b\.md +手元だけ")
 
+    def test_status_shows_deleted_content_sent_again(self):
+        self.s3.put("a.md", "old\n")            # 印を読まない古い VM が送り直した
+        self.s3.put("b.md", "b\n")
+        self.mark("a.md", "old\n")
+        self.sync().status()
+        self.assertRegex(self.text(), r"(?m)^a\.md +.*mvm memory rm で消された内容")
+        self.assertIn("mvm memory rm a.md", self.text(), "S3 から消す方法を案内する")
+        self.assertRegex(self.text(), r"(?m)^b\.md +S3 だけ$")
+
     def test_hook_tells_the_conversation_about_deleted_memories(self):
         self.write("a.md", "old\n")
         self.set_state(a=md5(b"old\n"))
