@@ -914,10 +914,16 @@ class Memsync:
             self.out("メモリのファイルはありません (手元: %s)" % self.dir)
         for name in names:
             l = local[name][0] if name in local else None
-            kind = classify(l, remote.get(name), state.get(name))
+            r = remote.get(name)
+            kind = classify(l, r, state.get(name))
             label = STATUS_LABELS[kind]
-            if l is not None and l in self.deleted_marks().get(name, ()):
+            marks = self.deleted_marks().get(name, ())
+            if l is not None and l in marks:
                 label = "消された (mvm memory rm)。pull で手元から消えます"
+            elif l is None and r is not None and r in marks:
+                # 印を読まない古い VM (イメージ 8.0 以前) が送り直したもの。pull は取得しない
+                label = ("S3 だけ (mvm memory rm で消された内容が送り直されたもの。取得しません。"
+                         "手元の PC で mvm memory rm %s を実行すると S3 から消せます)" % name)
             elif name in local and kind in ("local-only", "local-newer", "conflict"):
                 reasons = self.local_reasons(local[name][1])
                 if reasons:
