@@ -320,7 +320,12 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 
 分かったこと: Remote Control を正式に足すには、(1) その VM だけ `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` を外す、(2) Claude Code の認証を完全な権限のログインにする、の 2 つが要る。`oauth-token` のままでは使えない。(2) は `--claude-auth interactive` と `mvm login` で足りる見込みだが、その組み合わせでは試していない。
 
-`mvm up --remote-control` で正式に足した。実機での確認は未。
+`mvm up --remote-control` で正式に足した (#75)。実機の確認 (2026-11-25):
+
+- [x] `mvm up <名前> --remote-control` → `mvm login <名前>` だけで、claude のウィンドウが `claude --remote-control pmva-<名前>` で起動し、claude.ai/code とスマホのアプリの一覧に `pmva-<名前>` が出て、指示を送ると返事が来ること: イメージ 13.0 の `rc2` で確認。`/remote-control` を手で送る必要はなかった
+- [x] claude のプロセスの環境変数: `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` が無く、`DISABLE_TELEMETRY` / `DISABLE_ERROR_REPORTING` / `DISABLE_BUG_COMMAND` / `DISABLE_AUTOUPDATER` が 1 (`/proc/<pid>/environ` で確認)。この 3 つを付けたままでも Remote Control は使えた
+- 確認中に見つけた不具合: 最初の版 (イメージ 12.0) は認証情報のファイルができた時点で claude を起動していた。`claude auth login` は `~/.claude.json` の `oauthAccount` を後で書くため、その前に起動した claude は画面に「Claude Pro」と出るのに Remote Control が黙って無効になり、一覧に出なかった (`oauthAccount` を消して起動すると再現)。`oauthAccount` もそろうまで待つよう直した。`remoteDialogSeen` / `hasUsedRemoteControl` / `remoteControlMachineId` の有無は関係なかった
+- [ ] サスペンド中に指示を送ったときの振る舞い、レジューム後に Remote Control がつなぎ直すか: 未確認
 
 ## 結果
 
