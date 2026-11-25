@@ -1273,6 +1273,42 @@ class CliTest(unittest.TestCase):
         self.assertNotEqual(rc, 0)
         self.assertIn("あと 0 台", err)
 
+    def test_memory_quota_error_gives_concrete_advice(self):
+        rc, _, err = self.mvm("fleet", "3", check=False)   # 4096MiB x 3 = 12GB、上限は 8GB
+        self.assertNotEqual(rc, 0)
+        self.assertIn("MEMORY_MIB=2048 にすれば同じクォータで 4 台", err)
+        self.assertIn("mvm renew", err)
+        self.assertIn("希望値: 12 GB", err)
+        self.assertIn("ap-northeast-1", err)
+        self.assertIn("AWS サポート", err)
+        self.assertIn("docs/setup.md#前提の確認とクォータ", err)
+        self.assertIn("あと 2 台まで", err)
+        self.assertIn("mvm ls", err)
+
+    def test_memory_quota_error_omits_2048_line_when_already_small(self):
+        cfg = Path(self.env["PMVA_CONFIG"])
+        cfg.write_text(cfg.read_text(encoding="utf-8").replace("MEMORY_MIB=4096", "MEMORY_MIB=2048"), encoding="utf-8")
+        rc, _, err = self.mvm("fleet", "5", "--no-github", check=False)   # 2GB x 5 = 10GB、上限は 8GB
+        self.assertNotEqual(rc, 0)
+        self.assertNotIn("MEMORY_MIB=2048 にすれば", err)
+        self.assertIn("希望値: 10 GB", err)
+
+    def test_doctor_gives_quota_request_text_when_short(self):
+        _, out, _ = self.mvm("doctor", check=False)   # MAX_AGENTS=10 x 4GB = 40GB に対し上限 8GB
+        self.assertIn("MEMORY_MIB=2048 にすれば同じクォータで 4 台", out)
+        self.assertIn("希望値: 40 GB", out)
+        self.assertIn("ap-northeast-1", out)
+
+    def test_service_quota_exceeded_points_to_list_microvms(self):
+        env = dict(self.env, PMVA_STUB_ERROR="An error occurred (ServiceQuotaExceededException) when calling the RunMicrovm operation",
+                   PMVA_STUB_ERROR_CMDS="lambda-microvms run-microvm", PMVA_STUB_QUOTA_GB="100")
+        rc, _, err = self.mvm("up", "q1", env=env, check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("AWS のクォータを超えました", err)
+        self.assertIn("ServiceQuotaExceededException", err)
+        self.assertIn("aws lambda-microvms list-microvms", err)
+        self.assertIn("mvm ls", err)
+
     def test_fleet_prompts_and_max_agents(self):
         env = dict(self.env, PMVA_STUB_QUOTA_GB="100")
         prompts = Path(self.tmp.name) / "prompts.txt"
