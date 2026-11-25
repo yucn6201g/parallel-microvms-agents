@@ -516,12 +516,16 @@ claude_cmd="claude${CLAUDE_ARGS:+ $CLAUDE_ARGS}"
 codex_cmd="codex${CODEX_ARGS:+ $CODEX_ARGS}"
 if [ "$REMOTE_CONTROL" = true ]; then
   # ログインしていない claude --remote-control は、Remote Control なしの普通の対話セッションになる。
-  # そこで、ログイン (mvm login が ~/.claude/.credentials.json を作る) を待ってから起動する
+  # そこで、ログイン (mvm login が ~/.claude/.credentials.json を作る) を待ってから起動する。
+  # claude auth login は認証情報のファイルを先に作り、アカウントの情報 (~/.claude.json の oauthAccount) を後で書く。
+  # アカウントの情報が無いうちに起動すると、画面は「Claude Pro」なのに Remote Control が黙って無効になる
+  # (2026-11-25 に実機で確認)。だから両方がそろうまで待つ
   # 名前は英小文字・数字・ハイフンだけのはずだが、案内を単一引用符で包むので、念のため他の文字は除く
   rc_name="${NAME//[^A-Za-z0-9._-]/}"
   rc_msg="Remote Control を使うには、手元の PC で mvm login $rc_name を実行してください (ログインすると自動で起動します)"
-  claude_cmd='cred=$HOME/.claude/.credentials.json; if [ ! -s "$cred" ]; then echo '"'$rc_msg'"
-  claude_cmd="$claude_cmd"'; until [ -s "$cred" ]; do sleep 2; done; fi; claude --remote-control '"pmva-$rc_name"
+  rc_ready='[ -s "$HOME/.claude/.credentials.json" ] && jq -e .oauthAccount "$HOME/.claude.json" >/dev/null 2>&1'
+  claude_cmd="if ! { $rc_ready; }; then echo '$rc_msg'"
+  claude_cmd="$claude_cmd; until $rc_ready; do sleep 2; done; fi; claude --remote-control pmva-$rc_name"
   claude_cmd="$claude_cmd${CLAUDE_ARGS:+ $CLAUDE_ARGS}"
 fi
 if [ -n "$PROMPT_TEXT" ]; then
