@@ -995,6 +995,22 @@ class HistoryTest(MemsyncTestCase):
         self.assertEqual(self.get_state(), {"a.md": md5(b"a\n"), "b.md": md5(b"b\n")})
         self.assertIn("警告: a.md の履歴を残せませんでした", self.text())
         self.assertIn("送信 2", self.text())
+        # 本体は書けているので、スタックの更新 (mvm infra deploy) では直らない。履歴だけを拒否しているものを探すよう案内する
+        self.assertNotIn("mvm infra deploy", self.text())
+        self.assertIn(".history/", self.text())
+        self.assertIn("AccessDenied", self.text(), "AWS の応答も見せる")
+
+    def test_history_network_failure_is_warned(self):
+        def runner(args):
+            if ".history/" in " ".join(args):
+                return 255, "", "Could not connect to the endpoint URL"
+            return self.s3(args)
+        self.write("a.md", "a\n")
+        memsync.Memsync(self.dir, URI, self.state, runner=runner, out=self.lines.append).push()
+        self.assertEqual(self.s3.get("a.md"), b"a\n")
+        self.assertIn("警告: a.md の履歴を残せませんでした", self.text())
+        self.assertIn("Could not connect", self.text())
+        self.assertIn("送信 1", self.text())
 
     def test_parse_history_key_with_dashes_in_origin(self):
         e = memsync.parse_history_key(".history/日本語.md/20261124T101503Z-vm-agent-01-abcd1234.md")
