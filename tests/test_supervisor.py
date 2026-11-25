@@ -509,9 +509,17 @@ class SupervisorTest(unittest.TestCase):
         # 入力した命令の文字列と、それが表示した案内の 2 回出る
         self.assertGreaterEqual(compact.count("mvmloginrc1を実行してください"), 2, screen)
         self.assertNotIn("claude started:", screen)
-        # ログイン (認証情報のファイルができる) すると、Remote Control つきで起動する
+        # claude auth login は認証情報のファイルを先に作り、アカウントの情報 (~/.claude.json の oauthAccount) を後で書く。
+        # アカウントの情報が無いうちに起動すると、Remote Control が黙って無効になる (2026-11-25 に実機で確認) ので、まだ起動しない
         creds = self.home / ".claude" / ".credentials.json"
         creds.write_text('{"claudeAiOauth": {}}', encoding="utf-8")
+        time.sleep(3)
+        self.assertNotIn("claudestarted:", "".join(self.claude_screen().split()))
+        # アカウントの情報まで書かれたら、Remote Control つきで起動する
+        claude_json = self.home / ".claude.json"
+        data = json.loads(claude_json.read_text(encoding="utf-8"))
+        data["oauthAccount"] = {"emailAddress": "test@example.com"}
+        claude_json.write_text(json.dumps(data), encoding="utf-8")
         for _ in range(100):
             screen = self.claude_screen()
             if "claudestarted:" in "".join(screen.split()):
@@ -524,6 +532,7 @@ class SupervisorTest(unittest.TestCase):
     def test_remote_control_starts_without_waiting_when_already_logged_in(self):
         (self.home / ".claude").mkdir(exist_ok=True)
         (self.home / ".claude" / ".credentials.json").write_text('{"claudeAiOauth": {}}', encoding="utf-8")
+        (self.home / ".claude.json").write_text('{"oauthAccount": {"emailAddress": "test@example.com"}}', encoding="utf-8")
         payload = {"name": "rc2", "agent": "claude", "claudeAuth": "interactive", "remoteControl": "true",
                    "snapshotIntervalSeconds": 0}
         self.hook("run", {"microvmId": "m", "runHookPayload": json.dumps(payload)})
