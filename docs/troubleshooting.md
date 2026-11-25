@@ -19,7 +19,7 @@
 | 症状 | 確認すること |
 |---|---|
 | `mvm image build` が FAILED | `mvm logs` を見る。`CONTAINER_BUILD_FAILED` なら Dockerfile (や `IMAGE_EXTRA_PACKAGES`) の問題。手元で `docker build --platform linux/arm64 image/` を試す |
-| `mvm up` で「メモリ上限を超えます」 | `mvm doctor` でクォータと起動できる台数を確かめる。使っていない VM を止めるか、[引き上げを申請](setup.md#前提の確認とクォータ)する |
+| `mvm up` で「メモリ上限を超えます」 | `mvm doctor` でクォータと起動できる台数を確かめる。使っていない VM を止めるか、表示される「`MEMORY_MIB=2048` にした場合の台数」と申請文で、[引き上げを申請](setup.md#前提の確認とクォータ)する。AWS が `ServiceQuotaExceededException` で拒否したときは、別の PC や別のイメージの VM も数に入るので `aws lambda-microvms list-microvms` で確かめる |
 | `mvm up` で AccessDenied | 操作者に `pmva-operator` ポリシーが付いているか (`lambda:PassNetworkConnector`、`iam:PassRole` が要る)。足りない操作は [setup.md](setup.md#操作用の-iam-ユーザー) の手順で足す |
 | bootstrap が `failed` | シークレットを登録したか (`mvm secret ls`)、名前が既定と違うなら `--claude-secret` などで指定したか。ログは `bootstrap.log` |
 | `ready (warnings: setup.sh failed ...)` | リポジトリの `.pmva/setup.sh` が失敗した。エージェントは動いているので、「~/.pmva/setup.log を見て直して」と頼める |

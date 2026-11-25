@@ -73,7 +73,7 @@ mvm doctor
 | Max allocated ARM_64 MicroVM memory (L-CD1C0CC4) | 8GB | 同時に起動している VM のメモリの合計。8GB なら 4GB の VM が 2 台 (2GB なら 4 台) |
 | Rate of RunMicrovm API requests (L-535CA9B6) | 1 回/秒 | そのままでよい (`mvm fleet` は 1 台ずつ順に起動する) |
 
-**台数を増やしたいとき**: クォータの引き上げを申請します。現在の値が AWS の既定値より低く抑えられているアカウントでは、Service Quotas からの申請が「既定値より大きい値を指定してください」と拒否されます。その場合は AWS サポートセンターで「Service limit increase」のケースを作り、次のように依頼します (ベーシックサポートでも作れます)。
+**台数を増やしたいとき**: クォータの引き上げを申請します。上限で止まったときや `mvm doctor` で足りないときは、希望値入りの申請文が表示されます。現在の値が AWS の既定値より低く抑えられているアカウントでは、Service Quotas からの申請が「既定値より大きい値を指定してください」と拒否されます。その場合は AWS サポートセンターで「Service limit increase」のケースを作り、次のように依頼します (ベーシックサポートでも作れます)。
 
 > サービス: AWS Lambda (Lambda MicroVMs) / リージョン: アジアパシフィック (東京) / クォータ: Max allocated ARM_64 MicroVM memory (L-CD1C0CC4) / 希望値: <台数 × 1 台のメモリ> GB / 用途: AI コーディングエージェントを MicroVM で並列実行するため
 

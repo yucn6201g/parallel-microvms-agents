@@ -241,7 +241,10 @@ def aws(*args, check=True, output="json", retries=5):
         if check:
             if "ServiceQuotaExceededException" in p.stderr:
                 die(f"AWS のクォータを超えました: {p.stderr.strip()}\n"
-                    "  MicroVM のメモリ上限は mvm doctor で確認できます。並列数を増やすには Service Quotas で引き上げを申請してください")
+                    "  この PC の mvm ls に出ない VM (別の PC や別のイメージで起動したもの) もクォータを使います。\n"
+                    "  aws lambda-microvms list-microvms で起動中の VM を確認し、不要なものを止めてください。\n"
+                    "  MicroVM のメモリ上限と、動かせる台数は mvm doctor で確認できます。並列数を増やすには引き上げを申請してください\n"
+                    "  (手順は docs/setup.md#前提の確認とクォータ)")
             die(f"aws {' '.join(args[:2])} に失敗しました: {p.stderr.strip()}")
         return None
     out = p.stdout.strip()
@@ -287,6 +290,24 @@ def memory_quota_mib():
     return _memory_quota[0]
 
 
+def quota_advice(quota_mib, want_agents):
+    """クォータで足りないときの案内の行。MEMORY_MIB を下げる案と、引き上げの申請文を返す。"""
+    mem = int(C["MEMORY_MIB"])
+    lines = []
+    if mem > 2048:
+        lines.append(f"  MEMORY_MIB=2048 にすれば同じクォータで {quota_mib // 2048} 台 動かせます "
+                     "(mvm image build をやり直し、mvm renew <名前> で移ります)")
+    want_gb = -(-want_agents * mem // 1024)
+    lines += [
+        f"  引き上げを申請するとき: Service Quotas で「既定値より大きい値を指定してください」と拒否されたら、"
+        f"AWS サポートの「Service limit increase」のケースに次の文を貼ってください (詳しくは docs/setup.md#前提の確認とクォータ)",
+        f"  > サービス: AWS Lambda (Lambda MicroVMs) / リージョン: {C['AWS_REGION']} / "
+        f"クォータ: Max allocated ARM_64 MicroVM memory ({MEMORY_QUOTA_CODE}) / 希望値: {want_gb} GB / "
+        "用途: AI コーディングエージェントを MicroVM で並列実行するため",
+    ]
+    return lines
+
+
 def check_memory_quota(running, adding):
     """running 台が起動中のところへ adding 台を足しても上限内かを確かめる。"""
     quota = memory_quota_mib()
@@ -295,8 +316,8 @@ def check_memory_quota(running, adding):
         fit = max(quota // int(C["MEMORY_MIB"]) - running, 0)
         die(f"MicroVM のメモリ上限を超えます (上限 {quota // 1024}GB、必要 {need // 1024}GB = "
             f"{running + adding} 台 x {int(C['MEMORY_MIB']) // 1024}GB)。今は あと {fit} 台まで起動できます。\n"
-            f"  起動中のセッションを止めるか (mvm ls → mvm stop)、もっと同時に動かしたい場合は Service Quotas で\n"
-            f"  「Max allocated ARM_64 MicroVM memory」({MEMORY_QUOTA_CODE}) の引き上げを申請してください")
+            f"  起動中のセッションを止める (mvm ls → mvm stop) か、次のどちらかで台数を増やせます\n"
+            + "\n".join(quota_advice(quota, running + adding)))
 
 
 def find_image_arn():
@@ -860,8 +881,10 @@ def cmd_doctor(_args):
               f"{limit}")
         if fit < max(max_agents, 1):
             want = max(max_agents, 1)
-            print(f"         {want} 台を動かすには、MEMORY_MIB を小さくするか、Service Quotas で {MEMORY_QUOTA_CODE} を"
-                  f" {want * int(C['MEMORY_MIB']) // 1024}GB 以上に引き上げてください")
+            print(f"         {want} 台を動かすには {want * int(C['MEMORY_MIB']) // 1024}GB 必要です。"
+                  f"MEMORY_MIB を小さくするか、{MEMORY_QUOTA_CODE} を引き上げてください")
+            for line in quota_advice(quota, want):
+                print("       " + line)   # 上の行の字下げ (9 文字) にそろえる
     key = expand_path(C["SSH_PUBLIC_KEY_FILE"])
     if key and key.exists():
         print(f"  ok   SSH 公開鍵: {key}")
