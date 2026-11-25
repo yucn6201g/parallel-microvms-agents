@@ -305,6 +305,21 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 - [x] 本物の S3 で、`list-objects-v2 --delimiter /` が `memory/<repo-id>/` 直下のキーだけを返し、`.history/` を取ってこないこと (同期の一覧が履歴の数で遅くならない): 2026-11-24 に確認。`Contents` は直下の 12 件だけで `.history/` 配下を含まず、`.history/` は `CommonPrefixes` に 1 件だけ出た (Git Bash から試すときは `MSYS_NO_PATHCONV=1` を付けないと `/` がパスに書き換わり、区切りが効かないように見える)
 - [x] VM が `.history/` に書けること (実行ロールの `s3:PutObject` が `memory/*` に効いていること。AccessDenied のときは警告だけで同期が続くこと): 2026-11-24 に確認。VM の Claude にメモリを 1 件書かせると、フックの送信で `.history/j3-vm.md/20261124T125802Z-j3-e20a9608.md` ができ、手元の `log` に書いたマシン `j3` として出た。AccessDenied のときの振る舞いは自動テストのみ (権限を外した状況を実機で作っていない)
 
+## K. 少ない RAM での並列と Remote Control の下見 (2026-11-25)
+
+`MEMORY_MIB=2048` でイメージ 11.0 を作り、1 台 (`rc-probe`、`--claude-auth oauth-token`、`--claude-args "--remote-control"`) を約 1 時間動かした。Claude Code は 2.1.330。
+
+- [x] `MEMORY_MIB=2048` のイメージで起動できること: `mvm up` が `2048MiB` で起動し、bootstrap は ready になった。VM の中から見える全体のメモリは約 7.8GiB (4096 のときは約 15.7GiB)。設定値の約 4 倍で、設定値に比例する
+- [x] `--claude-args "--remote-control"` だけでは Remote Control が有効にならないこと: 画面に何も出ず、`/remote-control` を打つと「`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` が設定されている間は使えない」と出た。この変数は `image/Dockerfile` の `ENV` で入れている
+- [x] setup-token のトークン (`CLAUDE_CODE_OAUTH_TOKEN`) では Remote Control が使えないこと: 上の変数を外した claude で `/remote-control` を打つと「Remote Control requires a full-scope login token. Long-lived tokens (from claude setup-token or CLAUDE_CODE_OAUTH_TOKEN) are limited to inference-only」と出た
+- [x] VM の中で `claude auth login --claudeai` (URL を手元のブラウザで開き、表示されたコードを VM に貼る) でログインし直せば Remote Control が有効になること: `CLAUDE_CODE_OAUTH_TOKEN` と `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` を外して `claude --remote-control pmva-rc-probe` で起動すると、「/remote-control is active」と `https://claude.ai/code/session_...` が出た。ログインの認証情報 (`.claude/.credentials.json`) は `snapshot.sh` が保存から外している
+- [x] claude.ai/code とスマホの Claude アプリの両方にセッションが出て、claude.ai/code から送った指示が VM で動き、返事が戻ること
+- [x] Remote Control の接続があっても、作業が終わればサスペンドされること: VM の最後の作業 (`lastActivity`) は 00:00:38 JST。keepalive が起こし続ける 15 分 (`KEEPALIVE_ACTIVE_SECONDS=900`) と、外からの通信が無い 30 分 (`IDLE_MAX_SECONDS=1800`) を経て、00:43:56 JST に `SUSPENDED` になった。Remote Control の接続は VM から外向きなので、アイドルの判定を妨げない。状態は `mvm ls` (AWS の API だけで VM に通信しない) で 2 分ごとに見た
+- [ ] サスペンド中に claude.ai/code やスマホから指示を送ったときの振る舞い (外向きの接続なので VM は起きないはず)、レジューム後に Remote Control がつなぎ直すか: 未確認
+- [ ] 2GB × 4 台 × 8 時間で、典型的な作業 (テスト、ブラウザ) が終わるか (`mvm watch --log` の `peakMiB` と `oomKills`)、料金が `MEMORY_MIB` に従うか: 未確認 (本番の測定)
+
+分かったこと: Remote Control を正式に足すには、(1) その VM だけ `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` を外す、(2) Claude Code の認証を完全な権限のログインにする、の 2 つが要る。`oauth-token` のままでは使えない。(2) は `--claude-auth interactive` と `mvm login` で足りる見込みだが、その組み合わせでは試していない。
+
 ## 結果
 
 | 項目 | 結果 / メモ |
