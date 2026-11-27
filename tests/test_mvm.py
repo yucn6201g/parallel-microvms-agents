@@ -2341,6 +2341,70 @@ class CliTest(unittest.TestCase):
         self.assertNotEqual(rc, 0)
         self.assertIn("stop-all", err)
 
+    def calls(self):
+        return [json.loads(x) for x in (self.stub_dir / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
+
+    def test_infra_operator_creates_user_and_profile(self):
+        """mvm infra operator: 操作用の IAM ユーザーとアクセスキーを作り、AWS CLI のプロファイルと config.env を切り替える。
+
+        quickstart の手順 5 (ARN のコピー、aws iam を 3 回、aws configure、config.env の書き換え) を 1 回にする。
+        """
+        cfg = Path(self.env["PMVA_CONFIG"])
+        cfg.write_text(cfg.read_text(encoding="utf-8") + "# 管理者で deploy する\nAWS_PROFILE=admin\n", encoding="utf-8")
+        env = {k: v for k, v in self.env.items() if k not in ("AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE")}
+        _, out, err = self.mvm("infra", "operator", env=env)
+        iam = [c[1] for c in self.calls() if c[0] == "iam"]
+        self.assertEqual(iam, ["get-user", "create-user", "attach-user-policy", "create-access-key"])
+        attach = next(c for c in self.calls() if c[:2] == ["iam", "attach-user-policy"])
+        self.assertIn("arn:aws:iam::123456789012:policy/pmva-operator", attach)
+        self.assertIn("pmva-operator", attach)
+        creds = (self.home / ".aws" / "credentials").read_text(encoding="utf-8")
+        self.assertIn("[pmva]", creds)
+        self.assertIn("aws_access_key_id = AKIASTUBNEWKEY", creds)
+        self.assertIn("aws_secret_access_key = stub/secret+KEY", creds)
+        conf = (self.home / ".aws" / "config").read_text(encoding="utf-8")
+        self.assertIn("[profile pmva]\nregion = ap-northeast-1", conf)
+        # 秘密のキーは画面にもコマンドライン引数にも出さない
+        self.assertNotIn("stub/secret+KEY", out + err)
+        self.assertNotIn("stub/secret+KEY", (self.stub_dir / "calls.jsonl").read_text(encoding="utf-8"))
+        text = cfg.read_text(encoding="utf-8")
+        self.assertIn("AWS_PROFILE=pmva", text)
+        self.assertNotIn("AWS_PROFILE=admin", text)
+        self.assertIn("# 管理者で deploy する", text)
+        self.assertIn("mvm doctor", err)
+        # もう一度実行しても、既にあるプロファイルを上書きせず、キーも作らない
+        rc, _, err = self.mvm("infra", "operator", env=env, check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("pmva", err)
+        self.assertEqual(sum(c[:2] == ["iam", "create-access-key"] for c in self.calls()), 1)
+        self.assertEqual((self.home / ".aws" / "credentials").read_text(encoding="utf-8"), creds)
+
+    def test_infra_operator_existing_user_and_failures(self):
+        t = Path(self.tmp.name)
+        env = dict(self.env, AWS_SHARED_CREDENTIALS_FILE=str(t / "creds"), AWS_CONFIG_FILE=str(t / "awsconfig"))
+        cfg = Path(self.env["PMVA_CONFIG"])
+        before = cfg.read_text(encoding="utf-8")
+        # 今のプロファイルと同じ名前は使わない (管理者のプロファイルを上書きしてしまう)
+        rc, _, err = self.mvm("infra", "operator", "--profile", "admin",
+                              env=dict(env, AWS_PROFILE="admin"), check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("--profile", err)
+        # キーの上限 (1 ユーザー 2 個) なら、何も書かずに古いキーの消し方を案内する
+        self.stub_dir.mkdir(exist_ok=True)
+        (self.stub_dir / "iam-user-ops").write_text("", encoding="utf-8")
+        rc, _, err = self.mvm("infra", "operator", "--user", "ops", "--profile", "ops",
+                              env=dict(env, PMVA_STUB_KEY_LIMIT="1"), check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("delete-access-key", err)
+        self.assertFalse((t / "creds").exists())
+        self.assertEqual(cfg.read_text(encoding="utf-8"), before)
+        # 既にあるユーザーは作り直さず、ポリシーを付けてキーを足す
+        self.mvm("infra", "operator", "--user", "ops", "--profile", "ops", env=env)
+        self.assertNotIn(["iam", "create-user"], [c[:2] for c in self.calls()])
+        self.assertIn("[ops]", (t / "creds").read_text(encoding="utf-8"))
+        self.assertIn("[profile ops]", (t / "awsconfig").read_text(encoding="utf-8"))
+        self.assertIn("AWS_PROFILE=ops", cfg.read_text(encoding="utf-8"))
+
     SSO_EXPIRED = ("Error when retrieving token from sso: Token has expired and refresh failed\n")
 
     ACCESS_DENIED = ("\nAn error occurred (AccessDeniedException) when calling the DescribeSecret operation: User: "

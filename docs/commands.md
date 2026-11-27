@@ -44,10 +44,12 @@ mvm doctor
 ```bash
 mvm infra deploy     # スタックを作成・更新する (管理者の権限で実行)
 mvm infra outputs    # スタックの出力 (バケット名、ロールの ARN、OperatorPolicyArn など) を表示する
+mvm infra operator [--user <IAM ユーザー名>] [--profile <プロファイル名>]   # 普段使う IAM ユーザーを作る (管理者の権限で実行)
 mvm infra delete     # スタックと S3 バケットの中身を削除する (確認あり)
 ```
 
 - `deploy`: CloudFormation のテンプレート (`INFRA_TEMPLATE=full` なら `infra/cloudformation.yaml`、`minimal` なら `infra/cloudformation-minimal.yaml`) を `config.env` の値で作成・更新します。予算アラート・キープアライブ・毎晩の自動停止などの設定は、変更後に `deploy` し直すと反映されます ([config.md](config.md))。前回の削除で残った Lambda 関数があると、先に知らせて止まります
+- `operator`: `pmva-operator` ポリシー (`OperatorPolicyArn`) だけを付けた IAM ユーザー (既定 `pmva-operator`。既にあればそのまま使う) とアクセスキーを作り、AWS CLI のプロファイル (既定 `pmva`) として `~/.aws/credentials` と `~/.aws/config` (`AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE` があればそこ) に書き足して、`config.env` の `AWS_PROFILE` をそのプロファイルに書き換えます。秘密のアクセスキーは画面にもコマンドライン引数にも出しません。同じ名前のプロファイルが既にあるときと、今使っているプロファイルと同じ名前のときは、何も作らずに止まります。ユーザーのアクセスキーが上限 (2 個) のときは、古いキーの消し方を表示して止まります
 - `delete`: 起動中のセッションがあると止まります (先に `mvm stop-all`)。終了処理中の VM を待ってからバケットを空にします。権限の拒否などで消せないリソースがあれば、そのリソースだけを残して残りを削除し、残したものと削除コマンドを表示します
 
 ### secret

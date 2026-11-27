@@ -380,7 +380,7 @@ def aws_error_hint(err):
 
 
 # 「その名前のものは無い」ことを表すエラー文 (Secrets Manager / Lambda、CloudFormation、S3 の head-object)
-AWS_NOT_FOUND = ("ResourceNotFound", "does not exist", "(404)", "NoSuchKey", "NoSuchBucket")
+AWS_NOT_FOUND = ("ResourceNotFound", "does not exist", "(404)", "NoSuchKey", "NoSuchBucket", "(NoSuchEntity)")
 
 
 def aws_not_found(err):
@@ -1076,7 +1076,10 @@ def cmd_infra(args):
             return rc
         (STATE_DIR / "stack-outputs.json").unlink(missing_ok=True)
         cmd_infra(argparse.Namespace(action="outputs"))
-        log("ローカルで mvm を使う IAM ユーザー/ロールに OperatorPolicyArn のポリシーをアタッチしてください")
+        log("普段使う IAM ユーザーは mvm infra operator で作れます "
+            "(既にあるユーザー / ロールを使うなら、OperatorPolicyArn のポリシーをアタッチしてください)")
+    elif args.action == "operator":
+        return infra_operator(args.user, args.profile)
     elif args.action == "outputs":
         (STATE_DIR / "stack-outputs.json").unlink(missing_ok=True)
         stack_output("ArtifactBucketName")
@@ -1110,6 +1113,89 @@ def cmd_infra(args):
             report_retained(retained)
         (STATE_DIR / "stack-outputs.json").unlink(missing_ok=True)
         log("削除しました。イメージは mvm image delete、シークレットは Secrets Manager で個別に削除してください")
+    return 0
+
+
+def aws_profile_files():
+    """AWS CLI の認証情報ファイルと設定ファイル (AWS_SHARED_CREDENTIALS_FILE / AWS_CONFIG_FILE が優先)。"""
+    return (expand_path(os.environ.get("AWS_SHARED_CREDENTIALS_FILE") or "~/.aws/credentials"),
+            expand_path(os.environ.get("AWS_CONFIG_FILE") or "~/.aws/config"))
+
+
+def aws_profile_exists(name):
+    pat = re.compile(rf"^\s*\[\s*(profile\s+)?{re.escape(name)}\s*\]")
+    return any(p.exists() and any(pat.match(x) for x in p.read_text(encoding="utf-8", errors="replace").splitlines())
+               for p in aws_profile_files())
+
+
+def append_ini_section(path, header, items):
+    """ファイルの末尾にセクションを足す (既存の中身やコメントは書き換えない)。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    old = path.read_text(encoding="utf-8") if path.exists() else ""
+    sep = "\n" if old and not old.endswith("\n") else ""
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(sep + ("\n" if old else "") + f"[{header}]\n" + "".join(f"{k} = {v}\n" for k, v in items))
+    if not old:
+        os.chmod(path, 0o600)
+
+
+def set_config_value(key, value):
+    """config.env の KEY= の行を書き換える (無ければ末尾に足す)。ほかの行とコメント、改行コードはそのまま。"""
+    lines = CONFIG_FILE.read_text(encoding="utf-8").splitlines(keepends=True)
+    pat = re.compile(rf"^\s*(export\s+)?{re.escape(key)}\s*=")
+    found = False
+    for i, line in enumerate(lines):
+        if pat.match(line):
+            lines[i] = f"{key}={value}" + line[len(line.rstrip("\r\n")):]
+            found = True
+    if not found:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.append(f"{key}={value}\n")
+    with open(CONFIG_FILE, "w", encoding="utf-8", newline="") as f:
+        f.write("".join(lines))
+
+
+def infra_operator(user, profile):
+    """普段使う IAM ユーザー (OperatorPolicy だけを付ける) とアクセスキーを作り、AWS CLI のプロファイルに書いて
+    config.env の AWS_PROFILE を切り替える。管理者のプロファイルで実行する。
+    秘密のアクセスキーは画面にもコマンドライン引数にも出さず、AWS CLI の認証情報ファイルにだけ書く。"""
+    current = C["AWS_PROFILE"] or os.environ.get("AWS_PROFILE", "")
+    if profile == current:
+        die(f"プロファイル {profile} は今使っている (管理者の) プロファイルです。--profile で別の名前を指定してください")
+    if aws_profile_exists(profile):
+        die(f"AWS CLI のプロファイル {profile} は既にあります ({' / '.join(str(p) for p in aws_profile_files())})。"
+            f"--profile で別の名前を指定するか、そのプロファイルを使うなら config.env に AWS_PROFILE={profile} を書いてください")
+    policy = stack_output("OperatorPolicyArn")
+    if aws("iam", "get-user", "--user-name", user, check=False) is None:
+        die_unless_not_found(f"IAM ユーザー {user} ")
+        aws("iam", "create-user", "--user-name", user)
+        log(f"IAM ユーザー {user} を作りました")
+    else:
+        log(f"IAM ユーザー {user} は既にあるので、そのまま使います")
+    aws("iam", "attach-user-policy", "--user-name", user, "--policy-arn", policy)
+    r = aws("iam", "create-access-key", "--user-name", user, check=False)
+    if r is None:
+        if "LimitExceeded" in last_aws_error():
+            die(f"{user} のアクセスキーが上限 (2 個) に達しています。使っていないキーを "
+                f"aws iam list-access-keys --user-name {user} で確かめ、"
+                f"aws iam delete-access-key --user-name {user} --access-key-id <キーの ID> で消してから、もう一度実行してください")
+        die(f"アクセスキーを作れませんでした: {aws_error_hint(last_aws_error())}")
+    key = r["AccessKey"]
+    creds, conf = aws_profile_files()
+    try:
+        append_ini_section(creds, profile, [("aws_access_key_id", key["AccessKeyId"]),
+                                            ("aws_secret_access_key", key["SecretAccessKey"])])
+        append_ini_section(conf, f"profile {profile}", [("region", C["AWS_REGION"])])
+    except OSError as e:
+        die(f"{creds} に書けませんでした ({e.strerror})。作ったアクセスキーは使えないので、"
+            f"aws iam delete-access-key --user-name {user} --access-key-id {key['AccessKeyId']} で消してください")
+    set_config_value("AWS_PROFILE", profile)
+    log(f"アクセスキー {key['AccessKeyId']} を AWS CLI のプロファイル {profile} に保存し、"
+        f"config.env を AWS_PROFILE={profile} に切り替えました")
+    log("10 秒ほど待ってから mvm doctor で確かめてください (新しいキーが使えるまで少しかかります)")
+    log("管理者のアクセスキーをこのために作った場合は、IAM コンソールから削除してください。"
+        "infra deploy をやり直すときは config.env の AWS_PROFILE を管理者のものに戻します")
     return 0
 
 
@@ -3434,7 +3520,9 @@ def build_parser():
 
     sub.add_parser("doctor", help="前提ツール・認証・リージョン対応を確認").set_defaults(func=cmd_doctor)
     x = sub.add_parser("infra", help="CloudFormation で S3 / IAM ロール / ログを作成・確認・削除")
-    x.add_argument("action", choices=("deploy", "outputs", "delete"))
+    x.add_argument("action", choices=("deploy", "outputs", "delete", "operator"))
+    x.add_argument("--user", default="pmva-operator", help="operator: 作る IAM ユーザー名 (既定 pmva-operator)")
+    x.add_argument("--profile", default="pmva", help="operator: 書き込む AWS CLI のプロファイル名 (既定 pmva)")
     x.set_defaults(func=cmd_infra)
     x = sub.add_parser("secret", help="認証情報を Secrets Manager に登録 (set) / 一覧 (ls)")
     x.add_argument("action", choices=("set", "ls"))
