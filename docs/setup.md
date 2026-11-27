@@ -178,7 +178,7 @@ MicroVM は、受信通信が `IDLE_MAX_SECONDS` (既定 30 分) 無いと一時
 
 ### 毎晩の自動停止
 
-`NIGHTLY_STOP_TIME=23:00` (タイムゾーンは `NIGHTLY_STOP_TIMEZONE`、既定 `Asia/Tokyo`) を設定すると、毎日その時刻に全台のワークスペースを保存してから終了します。翌日は `mvm up <name> --restore latest ...` で続きから始められます。
+`NIGHTLY_STOP_TIME=23:00` (タイムゾーンは `NIGHTLY_STOP_TIMEZONE`、既定 `Asia/Tokyo`) を設定すると、毎日その時刻に全台のワークスペースを保存してから終了します。翌日は `mvm up <name>` だけで続きから始められます。
 
 - 一時停止中の VM も、保存のために一度再開してから終了する
 - 保存に失敗した VM も終了する (終了時のフックがもう一度保存を試みる)

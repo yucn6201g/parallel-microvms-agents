@@ -191,7 +191,9 @@ MicroVM を 1 台起動し、エージェントを tmux の中で開始します
 | `--codex-auth api-key\|chatgpt\|access-token\|bedrock\|bedrock-api-key\|gateway\|custom\|interactive\|none` | `DEFAULT_CODEX_AUTH` | Codex の認証方式 |
 | `--claude-secret` / `--codex-secret` / `--github-secret <名前>` | 認証方式から決まる | 既定と別名で登録したシークレットを使う |
 | `--no-github` | | GitHub トークンを使わない |
-| `--repo <URL>` | | clone するリポジトリ |
+| `--repo <URL>` | 下の「`--repo` を省いたとき」 | clone するリポジトリ |
+| `--no-repo` | | リポジトリを clone しない |
+| `--fresh` | | 前回の同じ名前のセッションを引き継がず、保存したワークスペースも復元しない (`up` だけ) |
 | `--branch <ブランチ>` | `pmva/<name>` | 作業ブランチ。リモートにあれば追跡し、なければ作る |
 | `--base-branch <ブランチ>` | リポジトリの既定ブランチ | 作業ブランチを新しく作るときの起点 |
 | `--prompt "<指示>"` | | 起動時にエージェントへ渡す最初の指示 |
@@ -207,6 +209,13 @@ MicroVM を 1 台起動し、エージェントを tmux の中で開始します
 | `--memory` / `--no-memory` | `MEMORY_SYNC` | Claude Code の自動メモリを手元と共有する ([memory](#memory))。`--repo` が無いときは共有しない |
 | `--remote-control` | | Claude Code を Remote Control (claude.ai/code、スマホの Claude アプリ) から操作できるようにする ([usage.md](usage.md#remote-control-スマホや-claudeaicode-から操作する))。`--claude-auth interactive` で起動し、`mvm login <name>` でログインすると自動で起動する。`--agent claude` か `both` だけで、他の `--claude-auth` とは一緒に使えない |
 
+`--repo` を省いたとき:
+
+1. **同じ名前で前に起動したセッションがあれば、その続きから始めます。** 前回の `--repo`、`--branch`、`--base-branch` を引き継ぎ、そのセッション名で保存したワークスペース (`mvm stop` や毎晩の自動停止で保存したもの) があれば `--restore latest` と同じく復元します。保存が無ければ clone から始めます。引き継ぐのはこの 3 つと復元だけで、`--agent` や `--remote-control` などは毎回指定します。新しく始めるなら `--fresh` を付けます
+2. **前のセッションが無いとき (または `--fresh` のとき) は、今いるフォルダの git の `origin` を clone します。** `git@github.com:...` や `ssh://` の URL は `https://` に直し、URL に入っているトークンは取り除きます。VM から clone できない `origin` (手元のフォルダなど) と、`mvm` 自身のフォルダで打ったときは、リポジトリなしで起動します
+
+`--repo` を明示したときは、これまでどおり前回を引き継がずに新しく始めます (続きから始めるなら `--restore latest` を付けます)。前回のセッションの記録は、この PC の `.state/sessions/` にあります。別の PC で続きから始めるときは `--repo <URL> --restore latest` を指定してください。
+
 注意:
 
 - 起動時の設定 (指示文を含む) は 4KB までです。長い指示は起動後に `mvm send` で送ってください
@@ -221,6 +230,7 @@ mvm fleet <台数> [--prefix <接頭辞>] [--prompts-file <ファイル>] [up �
 
 `<接頭辞>-01` 〜 `<接頭辞>-NN` (既定の接頭辞は `agent`) をまとめて起動します。起動済みの名前は飛ばします。1 台目を起動する前に、全台が MicroVM メモリのクォータに収まるかを確かめ、収まらなければ 1 台も起動せず、`mvm up` と同じ案内 (あと何台か、`MEMORY_MIB` を下げた場合の台数、引き上げの申請文) を表示します。
 `--prompts-file` には 1 行に 1 つずつ指示を書きます。n 行目が n 台目の最初の指示になります (空行の台は `--prompt` の指示か、指示なし)。
+`--repo` を省くと今いるフォルダの `origin` を clone します。`up` と違い、前回の同じ名前のセッションは引き継ぎません (毎回新しいタスクとして始めます)。
 
 ---
 

@@ -6,7 +6,7 @@
 
 | やりたいこと | コマンド |
 |---|---|
-| 起動する / 前回の続きから始める | `mvm up <name> --repo <URL>` / `mvm up <name> --repo <URL> --restore latest` |
+| 起動する / 前回の続きから始める | リポジトリのフォルダで `mvm up <name>` / 2 回目からはどこでも `mvm up <name>` |
 | 一覧と状態 | `mvm ls` (`--all` で終了済みも) |
 | 画面の末尾を見る | `mvm peek <name>` (全台の状態の一覧は `mvm watch`) |
 | 応答が終わるまで待つ / 最後の応答を読む | `mvm wait`、`mvm result <name>` |
@@ -20,8 +20,12 @@
 ## 1 日の流れ
 
 ```bash
-# 朝: 前回の続きから始める (保存したワークスペースを復元)
-mvm up api-fix --repo https://github.com/<owner>/<repo>.git --restore latest
+# 初日: リポジトリのフォルダで起動する (今のフォルダの origin を clone する)
+cd ~/src/<repo>
+mvm up api-fix
+
+# 次の日の朝: 名前だけで前回の続きから始める (repo とブランチを引き継ぎ、保存したワークスペースを復元)
+mvm up api-fix
 
 # 日中: 様子を見て、必要なら指示を足す
 mvm watch                       # 全台を 1 台 1 行の一覧で 10 秒ごとに表示 (Ctrl-C で終了。画面は mvm peek / view)
@@ -31,7 +35,7 @@ mvm send api-fix "テストが通ったら PR を作って"
 mvm stop-all
 ```
 
-`--restore latest` は、そのセッション名で最後に保存したワークスペースを戻します。作業ブランチ (`pmva/<name>`) も同じものを使い続けます。
+同じ名前で前に起動していれば、`mvm up <name>` だけで前回の repo と作業ブランチ (`pmva/<name>`) を引き継ぎ、そのセッション名で最後に保存したワークスペースを戻します。同じ名前でまっさらから始めたいときは `--fresh` を付けます。`--repo` を明示したときは引き継がないので、続きから始めるなら `--restore latest` も付けます ([commands.md](commands.md#up))。
 止め忘れが心配なら、毎晩決まった時刻に全台を保存して止める設定にしておきます ([setup.md](setup.md#毎晩の自動停止))。
 
 ## 別々のタスクを並列に進める

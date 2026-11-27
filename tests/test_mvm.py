@@ -880,6 +880,8 @@ class CliTest(unittest.TestCase):
             "PATH": str(bindir) + os.pathsep + os.environ.get("PATH", ""),
             "PMVA_CONFIG": str(cfg), "PMVA_STATE_DIR": str(t / "state"), "PMVA_STUB_DIR": str(self.stub_dir),
             "HOME": str(self.home), "USERPROFILE": str(self.home), "PYTHONIOENCODING": "utf-8",
+            # mvm up は --repo を省くと今のフォルダの origin を使うので、一時フォルダの外の git を見せない
+            "GIT_CEILING_DIRECTORIES": str(t.parent),
         })
         for k in ("HTTPS_PROXY", "https_proxy", "PMVA_API_BASE_URL", "PMVA_WS_BASE_URL"):
             self.env.pop(k, None)
@@ -894,9 +896,9 @@ class CliTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def mvm(self, *args, input=None, env=None, check=True):
+    def mvm(self, *args, input=None, env=None, check=True, cwd=None):
         p = subprocess.run([sys.executable, str(MVM), *args], input=input, capture_output=True,
-                           env=env or self.env, timeout=120)
+                           env=env or self.env, timeout=120, cwd=cwd or self.tmp.name)
         out, err = p.stdout.decode("utf-8", "replace"), p.stderr.decode("utf-8", "replace")
         if check and p.returncode != 0:
             self.fail(f"mvm {' '.join(args)} failed ({p.returncode}):\n{out}\n{err}")
@@ -925,6 +927,70 @@ class CliTest(unittest.TestCase):
         self.assertTrue(args[args.index("--run-hook-payload") + 1].startswith("file://"))
         self.assertEqual(list(Path(self.env["PMVA_STATE_DIR"]).glob("payload-*")), [], "一時ファイルが残っていない")
         self.assertEqual(json.loads(args[args.index("--idle-policy") + 1])["maxIdleDurationSeconds"], 1800)
+
+    def previous_session(self, name, saved, **payload):
+        """前に起動して終了した name のセッションを .state に置く。saved なら S3 に保存したワークスペースも置く。"""
+        sessions = Path(self.env["PMVA_STATE_DIR"]) / "sessions"
+        sessions.mkdir(parents=True, exist_ok=True)
+        (sessions / f"{name}.json").write_text(json.dumps({
+            "name": name, "microvmId": f"old-{name}", "endpoint": "x", "terminated": True,
+            "payload": dict({"name": name, "agent": "claude"}, **payload)}), encoding="utf-8")
+        if saved:
+            obj = self.stub_dir / "s3" / "pmva-bucket" / "workspaces" / name / "latest.tar.gz"
+            obj.parent.mkdir(parents=True, exist_ok=True)
+            obj.write_bytes(b"tar")
+
+    def test_up_continues_previous_session(self):
+        self.previous_session("a1", True, repo="https://github.com/o/r.git", branch="feature/x", baseBranch="dev")
+        self.previous_session("a2", False, repo="https://github.com/o/r2.git", branch="pmva/a2")
+        _, _, err = self.mvm("up", "a1")
+        self.mvm("up", "a2")
+        a1, a2 = self.payloads()
+        self.assertEqual((a1["repo"], a1["branch"], a1["baseBranch"]), ("https://github.com/o/r.git", "feature/x", "dev"))
+        self.assertEqual(a1["restore"], "s3://pmva-bucket/workspaces/a1/latest.tar.gz")
+        self.assertIn("--fresh", err)
+        self.assertEqual((a2["repo"], a2["branch"]), ("https://github.com/o/r2.git", "pmva/a2"))
+        self.assertNotIn("restore", a2, "保存が無ければ復元しない")
+
+    def test_up_fresh_or_explicit_repo_does_not_continue(self):
+        self.previous_session("f1", True, repo="https://github.com/o/r.git", branch="feature/x")
+        self.previous_session("e1", True, repo="https://github.com/o/r.git", branch="feature/x")
+        self.mvm("up", "f1", "--fresh")
+        self.mvm("up", "e1", "--repo", "https://github.com/o/r.git")
+        f1, e1 = self.payloads()
+        self.assertNotIn("repo", f1)
+        self.assertNotIn("restore", f1)
+        self.assertEqual(e1["branch"], "pmva/e1", "--repo を明示したら、これまでどおり新しく始める")
+        self.assertNotIn("restore", e1)
+
+    def test_up_uses_origin_of_current_folder(self):
+        def repo_with_origin(name, url):
+            d = Path(self.tmp.name) / name
+            d.mkdir()
+            for cmd in (["init", "-q"], ["remote", "add", "origin", url]):
+                subprocess.run(["git", "-C", str(d), *cmd], check=True, capture_output=True)
+            return d
+        ssh = repo_with_origin("ssh", "git@github.com:Owner/Repo.git")
+        token = repo_with_origin("token", "https://x-access-token:secret@123@github.com/o/r.git")
+        local = repo_with_origin("local", "C:/repos/r")
+        self.env["PMVA_STUB_QUOTA_GB"] = "100"
+        self.mvm("up", "g1", cwd=ssh)
+        _, out, err = self.mvm("up", "g2", cwd=token)
+        self.mvm("up", "g3", "--no-repo", cwd=ssh)
+        _, _, err4 = self.mvm("up", "g4", cwd=local)
+        self.mvm("up", "g5", cwd=ROOT)
+        g1, g2, g3, g4, g5 = self.payloads()
+        self.assertNotIn("repo", g5, "mvm 自身のフォルダで打ったときは mvm のリポジトリを clone しない")
+        self.assertEqual((g1["repo"], g1["branch"]), ("https://github.com/Owner/Repo.git", "pmva/g1"))
+        self.assertEqual(g2["repo"], "https://github.com/o/r.git", "URL のトークンは送らない")
+        self.assertNotIn("123@", out + err, "パスワードに @ があっても最後の @ まで消す")
+        self.assertNotIn("secret", (Path(self.env["PMVA_STATE_DIR"]) / "sessions" / "g2.json").read_text(encoding="utf-8"))
+        self.assertNotIn("repo", g3)
+        self.assertNotIn("repo", g4)
+        self.assertIn("--repo", err4)
+        rc, _, err = self.mvm("up", "g6", "--no-repo", "--repo", "https://github.com/o/r.git", check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("一緒に使えません", err)
 
     def test_agent_and_auth_selection(self):
         self.mvm("up", "c1", "--agent", "codex", "--codex-auth", "chatgpt", "--no-github")
