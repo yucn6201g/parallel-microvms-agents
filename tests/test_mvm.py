@@ -6,10 +6,12 @@ AWS CLI はスタブ (tests/aws_stub.py) に差し替え、MicroVM 側の WebSoc
 
 import base64
 import hashlib
+import http.client
 import http.server
 import importlib.util
 import json
 import os
+import re
 import shlex
 import shutil
 import socket
@@ -21,7 +23,9 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.parse
+import urllib.request
 import zipfile
 from pathlib import Path
 from unittest import mock
@@ -857,6 +861,7 @@ class WatchLogTest(unittest.TestCase):
 class CliTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)   # 最後に消す (テスト中に起動した mvm ui の終了を待ってから)
         t = Path(self.tmp.name)
         self.stub_dir = t / "stub"
         bindir = t / "bin"
@@ -892,9 +897,6 @@ class CliTest(unittest.TestCase):
         recorder.write_text(f"import sys\nopen({str(self.opened_url)!r}, 'w', encoding='utf-8').write(sys.argv[1])\n",
                             encoding="utf-8")
         self.env["BROWSER"] = " ".join(shlex.quote(Path(p).as_posix()) for p in (sys.executable, recorder)) + " %s"
-
-    def tearDown(self):
-        self.tmp.cleanup()
 
     def mvm(self, *args, input=None, env=None, check=True, cwd=None):
         p = subprocess.run([sys.executable, str(MVM), *args], input=input, capture_output=True,
@@ -1499,6 +1501,92 @@ class CliTest(unittest.TestCase):
             self.assertEqual(api.received[-1][1]["text"], "-h")
         finally:
             api.shutdown()
+
+    def start_ui(self, env):
+        """mvm ui を起動し、(プロセス, ベース URL, 合言葉) を返す。"""
+        proc = subprocess.Popen([sys.executable, str(MVM), "ui", "--no-open"], env=env, cwd=self.tmp.name,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        self.addCleanup(proc.stderr.close)
+        self.addCleanup(proc.wait, 10)
+        self.addCleanup(proc.kill)
+        line = b""
+        while b"http://127.0.0.1:" not in line:
+            line = proc.stderr.readline()
+            self.assertTrue(line, "mvm ui が URL を表示しない")
+        url = re.search(r"(http://127\.0\.0\.1:\d+)/\?t=([A-Za-z0-9_-]+)", line.decode("utf-8")).groups()
+        return proc, url[0], url[1]
+
+    def ui_call(self, base, path, token=None, body=None, host=None):
+        headers = {"X-PMVA-Token": token} if token else {}
+        if host:
+            headers["Host"] = host
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(base + path, data=data, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return r.status, r.read().decode("utf-8")
+        except urllib.error.HTTPError as e:
+            with e:
+                return e.code, e.read().decode("utf-8")
+
+    def test_ui_shows_rows_and_operates(self):
+        api = StatusApi()
+        self.addCleanup(api.shutdown)
+        api.results = {"claude": {"agent": "claude", "state": "done", "text": "終わりました"}}
+        self.mvm("up", "a1")
+        env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}")
+        _, base, token = self.start_ui(env)
+        # 合言葉が無い・違う、別の Host (DNS リバインディング) は断る
+        self.assertEqual(self.ui_call(base, "/?t=wrong")[0], 403)
+        self.assertEqual(self.ui_call(base, "/api/rows")[0], 403)
+        self.assertEqual(self.ui_call(base, "/api/rows", token, host="evil.example:80")[0], 403)
+        code, html = self.ui_call(base, f"/?t={token}")
+        self.assertEqual(code, 200)
+        self.assertIn("mvm", html)
+        code, text = self.ui_call(base, "/api/rows", token)
+        self.assertEqual(code, 200)
+        rows = json.loads(text)["rows"]
+        self.assertEqual([r["name"] for r in rows], ["a1"])
+        self.assertEqual(len(rows[0]["cells"]), 5)
+        code, text = self.ui_call(base, "/api/detail?name=a1", token)
+        self.assertEqual(code, 200, text)
+        detail = json.loads(text)
+        self.assertIn("こんにちは", detail["screen"])
+        self.assertEqual(detail["results"][0]["text"], "終わりました")
+        code, _ = self.ui_call(base, "/api/send", token, {"name": "a1", "text": "テストを実行して"})
+        self.assertEqual(code, 200)
+        self.assertEqual(api.received[-1], ("/send", {"window": "claude", "text": "テストを実行して", "enter": True}))
+        self.assertEqual(self.ui_call(base, "/api/send", token, {"name": "../x", "text": "a"})[0], 404)
+        self.assertEqual(self.ui_call(base, "/api/send", token, {"name": "a1", "text": "  "})[0], 400)
+        # 負の Content-Length で読み込みが終わらなくならない
+        port = int(base.rsplit(":", 1)[1])
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        self.addCleanup(conn.close)
+        conn.putrequest("POST", "/api/send", skip_host=True)
+        for k, v in (("Host", f"127.0.0.1:{port}"), ("X-PMVA-Token", token), ("Content-Length", "-1")):
+            conn.putheader(k, v)
+        conn.endheaders()
+        self.assertEqual(conn.getresponse().status, 413)
+        # 保存して停止は裏で進め、終わったら jobs に結果が出る
+        code, _ = self.ui_call(base, "/api/stop", token, {"name": "a1"})
+        self.assertEqual(code, 202)
+        deadline = time.time() + 60
+        while True:
+            jobs = json.loads(self.ui_call(base, "/api/rows", token)[1])["jobs"]
+            if jobs.get("a1", {}).get("state") != "running" or time.time() > deadline:
+                break
+            time.sleep(0.2)
+        self.assertEqual(jobs["a1"]["state"], "done", jobs)
+        self.assertIn("/snapshot", [p for p, _ in api.received])
+        self.assertTrue(list(self.stub_dir.glob("*.term")), "VM を終了した")
+
+    def test_ui_rejects_bad_port(self):
+        rc, _, err = self.mvm("ui", "--no-open", "--port", "70000", check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("0〜65535", err)
 
     def status(self, name="a1", idle=5, **agents):
         return {"name": name, "agent": "both" if len(agents) > 1 else "claude", "bootstrap": "ready",

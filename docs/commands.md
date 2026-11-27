@@ -7,7 +7,7 @@
 |---|---|
 | 準備 | [`doctor`](#doctor) / [`infra`](#infra) / [`secret`](#secret) / [`image`](#image) / [`profile`](#profile) / [`memory`](#memory) |
 | 起動 | [`up`](#up) / [`fleet`](#fleet) |
-| 確認・指示 | [`ls`](#ls) / [`peek`](#peek) / [`follow`](#follow) / [`view`](#view) / [`top`](#top) / [`send`](#send) / [`wait`](#wait) / [`result`](#result) / [`watch`](#watch) / [`logs`](#logs) |
+| 確認・指示 | [`ls`](#ls) / [`peek`](#peek) / [`follow`](#follow) / [`view`](#view) / [`top`](#top) / [`send`](#send) / [`wait`](#wait) / [`result`](#result) / [`watch`](#watch) / [`ui`](#ui) / [`logs`](#logs) |
 | 接続 | [`ssh`](#ssh) / [`forward`](#forward) / [`ssh-config`](#ssh-config) / [`shell`](#shell) / [`token`](#token) |
 | 保存・停止 | [`save`](#save) / [`suspend` / `resume`](#suspend--resume) / [`stop`](#stop) / [`stop-all`](#stop-all) / [`renew`](#renew) |
 | 司令塔 | [`orchestrator`](#orchestrator) |
@@ -418,6 +418,31 @@ a4    SUSPENDED       -     -                        -
 - 表示している間は、`RUNNING` の台に定期的に通信するので、その台は自動でサスペンドされません。見終わったら Ctrl-C で終了してください
 
 `--log` は、MicroVM のメモリ (`MEMORY_MIB`) が足りるかを測るのに使えます。台数を増やした状態で `mvm watch --log mem.csv` を動かしたままにすると、台ごとの使用量と最大 (`peakMiB`)、OOM の回数が時系列で残ります。たとえば 2GB の VM で足りるかは、実際の作業を一通り流した後の `peakMiB` の最大値と `oomKills` で判断できます。
+
+### ui
+
+```bash
+mvm ui [--port <番号>] [--no-open]
+```
+
+手元のブラウザで管理画面を開きます。コマンドを覚えなくても、全セッションの様子を見て操作できます。終わるときは、`mvm ui` を動かしている端末で Ctrl-C を押します。
+
+| オプション | 内容 |
+|---|---|
+| `--port <番号>` | 待ち受けるポート。既定は空いている番号 |
+| `--no-open` | ブラウザを開かず、URL を表示するだけにする |
+
+画面でできること:
+
+- **一覧**: [watch](#watch) と同じ表 (状態、経過、メモリ、最後の出来事) を 10 秒ごとに更新します。要対応は黄、エラーと OOM は赤、完了は緑で示し、表の下に対応が要ることを出します
+- **詳細**: 行をクリックすると、画面の末尾 ([peek](#peek)) と最後の応答 ([result](#result)) を出します。一時停止中の VM は、見る前に確認します (見ると VM が再開して課金されるため)
+- **操作**: 指示を送る ([send](#send)、Ctrl+Enter でも送れる)、再開 ([resume](#suspend--resume))、作り直す ([renew](#renew))、保存して停止 ([stop](#stop))。renew と停止は確認してから裏で進め、終わったら「裏で進めている操作」に結果を出します
+
+注意:
+
+- 127.0.0.1 でだけ待ち受けます。URL の `?t=` は起動のたびに作り直す合言葉で、これが無いと画面も API も開けません。他の人に URL を渡さないでください
+- タブを表示している間は、`RUNNING` の台に定期的に通信するので、その台は自動でサスペンドされません (タブが裏にあるときは更新を止めます)。見終わったらタブを閉じるか、`mvm ui` を終了してください
+- 画面の中でのターミナル操作はできません。一緒に操作するなら [ssh](#ssh) か VS Code ([ssh-config](#ssh-config)) を使います。起動 (`mvm up`) も、今はコマンドで行います
 
 ### logs
 
