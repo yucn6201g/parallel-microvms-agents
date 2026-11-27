@@ -59,6 +59,24 @@ if a[:1] == ["iam"]:  # PMVA_STUB_IAM=admin で管理者、denied で権限な�
     if a[1] == "list-access-keys":
         out({"AccessKeyMetadata": [{"AccessKeyId": "AKIAOLDKEY", "Status": "Active",
                                     "CreateDate": os.environ.get("PMVA_STUB_KEY_CREATED", "2099-01-01T00:00:00+00:00")}]})
+    # mvm infra operator。作った IAM ユーザーは iam-user-<名前> の印で覚える
+    user_mark = D / f"iam-user-{opt('--user-name')}"
+    if a[1] == "get-user":
+        if user_mark.exists():
+            out({"User": {"UserName": opt("--user-name")}})
+        fail(f"An error occurred (NoSuchEntity) when calling the GetUser operation: "
+             f"The user with name {opt('--user-name')} cannot be found.")
+    if a[1] == "create-user":
+        user_mark.write_text("", encoding="utf-8")
+        out({"User": {"UserName": opt("--user-name")}})
+    if a[1] == "attach-user-policy":
+        sys.exit(0)
+    if a[1] == "create-access-key":  # PMVA_STUB_KEY_LIMIT=1 でキーの上限 (1 ユーザー 2 個) に達している
+        if os.environ.get("PMVA_STUB_KEY_LIMIT"):
+            fail("An error occurred (LimitExceeded) when calling the CreateAccessKey operation: "
+                 "Cannot exceed quota for AccessKeysPerUser: 2")
+        out({"AccessKey": {"UserName": opt("--user-name"), "AccessKeyId": "AKIASTUBNEWKEY",
+                           "SecretAccessKey": "stub/secret+KEY", "Status": "Active"}})
 if cmd == "lambda get-function":  # PMVA_STUB_LAMBDA=exists / denied
     mode = os.environ.get("PMVA_STUB_LAMBDA", "")
     if mode == "exists":
@@ -83,6 +101,7 @@ if cmd == "cloudformation describe-stacks":
         "ExecutionRoleCodexArn": "arn:aws:iam::123456789012:role/exec-codex",
         "ExecutionRoleNoneArn": "arn:aws:iam::123456789012:role/exec-none",
         "LogGroupName": "/aws/lambda-microvms/pmva",
+        "OperatorPolicyArn": "arn:aws:iam::123456789012:policy/pmva-operator",
     }.items()]}]})
 if cmd == "service-quotas get-service-quota":
     out({"Quota": {"QuotaCode": opt("--quota-code"), "Value": float(os.environ.get("PMVA_STUB_QUOTA_GB", "8"))}})

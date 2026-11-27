@@ -108,18 +108,16 @@ mvm infra deploy     # S3・IAM ロール・ログなどを作る (数分)
 普段の操作は、`pmva-operator` ポリシーだけを付けた専用ユーザーで行います。続けて管理者のプロファイルのまま実行します。
 
 ```bash
-mvm infra outputs                                     # OperatorPolicyArn の行の値をコピーしておく
-aws iam create-user --user-name pmva-operator --profile admin
-aws iam attach-user-policy --user-name pmva-operator --policy-arn <コピーした OperatorPolicyArn> --profile admin
-aws iam create-access-key --user-name pmva-operator --profile admin
-aws configure --profile pmva                          # 直前に表示された AccessKeyId と SecretAccessKey を入力。リージョンは ap-northeast-1
+mvm infra operator   # IAM ユーザー pmva-operator とアクセスキーを作り、プロファイル pmva に保存して config.env を切り替える
 ```
 
-`config.env` の `AWS_PROFILE=admin` を `AWS_PROFILE=pmva` に書き換え、確認します。
+キーは画面に表示されず、AWS CLI の認証情報ファイル (`~/.aws/credentials`) にだけ書かれます。`config.env` の `AWS_PROFILE` も `pmva` に書き換わります。10 秒ほど待ってから確認します。
 
 ```bash
 mvm doctor           # 「権限の確認は省略しました」または「管理者権限ではありません」と出れば切り替え完了
 ```
+
+IAM Identity Center (SSO) の権限セットで使う場合は、このコマンドは使わず [setup.md](setup.md#操作用の-iam-ユーザー) の手順に従います。
 
 手順 4 で管理者のアクセスキーを作った場合は、ここで IAM コンソールから削除します (`mvm infra deploy` をやり直すときは、その都度作って使い終わったら削除します)。
 
