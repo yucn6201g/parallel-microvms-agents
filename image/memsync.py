@@ -377,6 +377,18 @@ def classify(local, remote, base):
     return "conflict"
 
 
+def sync_kind(local, remote, base, marks):
+    """classify に削除の印を加えたもの。marks はその名前の消された中身の md5 の集合。
+
+    S3 にあるのが消された内容 (印を読まない古い VM が送り直したもの) で、手元に別の内容があるときは、
+    pull はそれを取得しないので、手元が新しいものとして扱う (push が手元の内容で上書きする)。
+    こうしないと、push は「競合」や「先に pull」で飛ばし、pull は何もせず、どちらでも直らない。
+    """
+    if local is not None and remote is not None and remote in marks and local not in marks:
+        return "local-newer"
+    return classify(local, remote, base)
+
+
 STATUS_LABELS = {
     "same": "同期済み", "local-only": "手元だけ", "remote-only": "S3 だけ", "local-deleted": "S3 だけ (手元で消した)",
     "remote-updated-after-delete": "S3 が新しい (手元で消した後に更新)", "local-newer": "手元が新しい",
@@ -862,7 +874,7 @@ class Memsync:
                 self.say("%s: mvm memory rm で消されたメモリなので送りません (手元のファイルは pull で消えます)" % name)
                 self.counts["skipped"] += 1
                 continue
-            kind = classify(l, r, base)
+            kind = sync_kind(l, r, base, marks.get(name, ()))
             if kind == "same":
                 if l is None:
                     new_state.pop(name, None)
@@ -915,9 +927,11 @@ class Memsync:
         for name in names:
             l = local[name][0] if name in local else None
             r = remote.get(name)
-            kind = classify(l, r, state.get(name))
-            label = STATUS_LABELS[kind]
             marks = self.deleted_marks().get(name, ())
+            kind = sync_kind(l, r, state.get(name), marks)
+            label = STATUS_LABELS[kind]
+            if kind != classify(l, r, state.get(name)):
+                label = "手元が新しい (S3 にあるのは mvm memory rm で消された内容が送り直されたもの。push で手元の内容に置き換えます)"
             if l is not None and l in marks:
                 label = "消された (mvm memory rm)。pull で手元から消えます"
             elif l is None and r is not None and r in marks:

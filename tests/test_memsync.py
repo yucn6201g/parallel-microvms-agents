@@ -1179,6 +1179,40 @@ class DeletedMarkTest(MemsyncTestCase):
         self.assertIsNone(self.s3.get("a.md"))
         self.assertIn("飛ばした 1", self.text())
 
+    def test_push_overwrites_deleted_content_sent_again_with_a_rewritten_file(self):
+        # rm の後に手元で作り直したところへ、印を読まない古い VM が消された内容を送り直した。
+        # pull はそれを取得しないので、push が手元の内容で上書きしないと、どちらでも直らなくなる
+        for base in (None, "rewritten\n"):
+            with self.subTest(base=base):
+                self.s3.objects.clear()
+                self.lines.clear()
+                self.write("a.md", "rewritten\n")
+                self.s3.put("a.md", "old\n")
+                self.mark("a.md", "old\n")
+                self.set_state(**({"a": md5(base.encode())} if base else {}))
+                self.sync().push()
+                self.assertEqual(self.s3.get("a.md"), b"rewritten\n")
+                self.assertIn("送信 1", self.text())
+                self.assertEqual(self.get_state(), {"a.md": md5(b"rewritten\n")})
+                self.assertEqual(len(history_keys(self.s3, "a.md")), 1)
+
+    def test_push_does_not_overwrite_deleted_content_sent_again_with_a_private_file(self):
+        data = "---\nshare: false\n---\nmine\n"
+        self.write("a.md", data)
+        self.s3.put("a.md", "old\n")
+        self.mark("a.md", "old\n")
+        self.sync().push()
+        self.assertEqual(self.s3.get("a.md"), b"old\n")
+        self.assertIn("送りません", self.text())
+
+    def test_status_shows_rewritten_file_over_deleted_content_sent_again(self):
+        self.write("a.md", "rewritten\n")
+        self.set_state(a=md5(b"rewritten\n"))
+        self.s3.put("a.md", "old\n")
+        self.mark("a.md", "old\n")
+        self.sync().status()
+        self.assertRegex(self.text(), r"(?m)^a\.md +手元が新しい \(S3 にあるのは mvm memory rm で消された内容")
+
     def test_push_sends_a_rewritten_file(self):
         self.write("a.md", "rewritten\n")
         self.mark("a.md", "old\n")
