@@ -46,7 +46,7 @@ mvm infra deploy                  # (管理者で 1 回だけ) S3・IAM ロー�
 mvm secret set claude-oauth-token # エージェントの認証情報を登録
 mvm image build                   # Claude Code / Codex 入りのイメージを作る
 mvm up test-01 --repo https://github.com/<owner>/<repo>.git --prompt "README を読んで概要を説明して"
-mvm peek test-01                  # 画面を確認
+mvm peek test-01                  # 画面を確認 (ブラウザで全台を見て操作するなら mvm ui)
 mvm stop test-01                  # 保存してから止める
 ```
 

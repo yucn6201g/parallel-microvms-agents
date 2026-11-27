@@ -15,11 +15,14 @@ import csv
 import errno
 import getpass
 import hashlib
+import hmac
+import http.server
 import importlib.util
 import io
 import json
 import os
 import re
+import secrets
 import select
 import shlex
 import shutil
@@ -215,11 +218,13 @@ def aws_env():
 
 
 THROTTLE_MARKERS = ("ThrottlingException", "TooManyRequestsException", "Rate exceeded")
-_last_aws_error = [""]  # check=False で失敗したときの stderr (「存在しない」と「一時的な失敗」を区別するため)
+# check=False で失敗したときの stderr (「存在しない」と「一時的な失敗」を区別するため)。
+# スレッドごとに持つ (mvm ui は裏の停止・renew と一覧の更新が同時に AWS CLI を呼ぶので、取り違えると終了扱いにしてしまう)
+_last_aws_error = threading.local()
 
 
 def last_aws_error():
-    return _last_aws_error[0]
+    return getattr(_last_aws_error, "text", "")
 
 
 def aws(*args, check=True, output="json", retries=5):
@@ -236,7 +241,7 @@ def aws(*args, check=True, output="json", retries=5):
         if p.returncode == 0 or attempt == retries or not any(m in p.stderr for m in THROTTLE_MARKERS):
             break
         time.sleep(min(2 ** attempt, 16))
-    _last_aws_error[0] = p.stderr if p.returncode != 0 else ""
+    _last_aws_error.text = p.stderr if p.returncode != 0 else ""
     if p.returncode != 0:
         if check:
             if "ServiceQuotaExceededException" in p.stderr:
@@ -1610,7 +1615,7 @@ def cmd_image_prune(args):
 
     vms = lmv("list-microvms", "--image-identifier", arn, check=False)
     if vms is None:
-        die(f"起動中の VM の一覧を取得できませんでした: {_last_aws_error[0].strip()}\n"
+        die(f"起動中の VM の一覧を取得できませんでした: {last_aws_error().strip()}\n"
             "  消してよいバージョンか確かめられないので中止しました。AWS の認証 (mvm doctor) を確かめてから、"
             "もう一度実行してください")
     names = {}
@@ -1653,7 +1658,7 @@ def cmd_image_prune(args):
         ver = v["imageVersion"]
         if lmv("delete-microvm-image-version", "--image-identifier", arn, "--image-version", ver, check=False) is None:
             failed.append(ver)
-            log(f"バージョン {ver} を削除できませんでした: {_last_aws_error[0].strip()}")
+            log(f"バージョン {ver} を削除できませんでした: {last_aws_error().strip()}")
         else:
             log(f"バージョン {ver} の削除を開始しました")
     if failed:
@@ -3071,6 +3076,353 @@ def cmd_watch(args):
         return 0
 
 
+# ---------------------------------------------------------------- ブラウザの画面 (mvm ui)
+
+UI_LONG_ACTIONS = {"stop": "保存して停止", "renew": "作り直し (renew)"}
+UI_MAX_BODY = 64 * 1024
+
+
+class UiState:
+    def __init__(self):
+        self.board = WatchBoard()
+        # VM と AWS への短い問い合わせは 1 つずつ (トークンのキャッシュや .state を同時に書かない)
+        self.lock = threading.Lock()
+        self.jobs = {}   # 名前 → {"action", "state": running / done / error, "message"} (停止と renew は裏で進める)
+        self.threads = []   # 裏の停止・renew。Ctrl-C で終えるときに終わるまで待つ
+
+    def busy(self, name):
+        return self.jobs.get(name, {}).get("state") == "running"
+
+
+def ui_rows(ui):
+    rows, now = [], time.time()
+    for name in session_names():
+        if ui.busy(name):   # 停止・renew の途中は .state を書き換えているので読まない
+            job = ui.jobs[name]
+            rows.append({"name": name, "vm": "", "level": "yellow", "notes": [],
+                         "cells": [name, job["message"], "-", "-", "-"]})
+            continue
+        if load_session(name).get("terminated"):
+            continue
+        row = watch_row(ui.board, name, now)
+        rows.append({"name": name, "vm": row["vm"], "level": watch_level(row), "notes": row["notes"],
+                     "cells": list(watch_cells(row))})
+    return rows
+
+
+def ui_detail(name):
+    detail = {"screen": format_status(vm_api(name, "GET", "/status?lines=60")), "results": []}
+    for agent in session_agents(name):
+        r = vm_api(name, "GET", f"/result?agent={agent}")
+        if "agent" not in r:
+            r = {"agent": agent, "error": f"最後の応答を取得できません ({r.get('error') or r})"}
+        elif r.get("state") == "error":
+            r["hint"] = agent_error_hint(name, r.get("error"))
+        detail["results"].append(r)
+    return detail
+
+
+def ui_send(name, text):
+    window = "codex" if load_session(name)["payload"].get("agent") == "codex" else "claude"
+    r = vm_api(name, "POST", "/send", {"window": window, "text": text, "enter": True})
+    if not r.get("ok"):
+        die(f"送信できませんでした: {r.get('error')}")
+    return {"message": f"{name} に送信しました"}
+
+
+def ui_resume(name):
+    cmd_resume(argparse.Namespace(name=name))
+    return {"message": f"{name} を再開しました"}
+
+
+def ui_run_job(ui, name, action):
+    try:
+        if action == "stop":
+            stop(name, save=True)
+        else:
+            cmd_renew(argparse.Namespace(name=name))
+        ui.jobs[name].update(state="done", message=f"{name}: {UI_LONG_ACTIONS[action]}が終わりました")
+    except SystemExit as e:
+        ui.jobs[name].update(state="error", message=f"{name}: {e.code}")
+    except Exception as e:   # 裏の処理の失敗で画面を止めない。内容は画面に出す
+        ui.jobs[name].update(state="error", message=f"{name}: {UI_LONG_ACTIONS[action]}に失敗しました ({e!r})")
+
+
+def ui_handler(ui, token):
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def reply(self, code, body, ctype="application/json; charset=utf-8"):
+            data = body if isinstance(body, bytes) else json.dumps(body, ensure_ascii=False).encode("utf-8")
+            self.send_response(code)
+            for k, v in (("Content-Type", ctype), ("Content-Length", str(len(data))), ("Cache-Control", "no-store"),
+                         ("X-Content-Type-Options", "nosniff"), ("X-Frame-Options", "DENY"),
+                         ("Referrer-Policy", "no-referrer")):
+                self.send_header(k, v)
+            self.end_headers()
+            self.wfile.write(data)
+
+        def allowed(self, given):
+            # Host を確かめる: 他のサイトが DNS リバインディングで 127.0.0.1 を自分の名前に見せても通さない
+            port = self.server.server_address[1]
+            host_ok = self.headers.get("Host") in (f"127.0.0.1:{port}", f"localhost:{port}")
+            return host_ok and hmac.compare_digest((given or "").encode("utf-8"), token.encode("utf-8"))
+
+        def run(self, fn, name=None, code=200):
+            try:
+                with ui.lock:
+                    if name and ui.busy(name):   # target() の確認の後に停止・renew が始まったとき
+                        return self.reply(409, {"error": f"{name} は {ui.jobs[name]['message']} です"})
+                    body = fn()
+            except SystemExit as e:
+                return self.reply(502, {"error": str(e.code)})
+            except Exception as e:   # 1 回の失敗で画面ごと止めない
+                return self.reply(500, {"error": repr(e)})
+            self.reply(code, body)
+
+        def target(self, name):
+            """操作してよい名前か。だめなら応答を返して None。"""
+            if not isinstance(name, str) or name not in session_names():
+                self.reply(404, {"error": f"セッション {name} がありません"})
+                return None
+            if ui.busy(name):
+                self.reply(409, {"error": f"{name} は {ui.jobs[name]['message']} です。終わってから操作してください"})
+                return None
+            return name
+
+        def do_GET(self):
+            url = urllib.parse.urlparse(self.path)
+            q = {k: v[0] for k, v in urllib.parse.parse_qs(url.query).items()}
+            if url.path == "/":
+                if not self.allowed(q.get("t")):
+                    return self.reply(403, "mvm ui を起動したときに表示された URL を開いてください".encode("utf-8"),
+                                      "text/plain; charset=utf-8")
+                return self.reply(200, UI_HTML.encode("utf-8"), "text/html; charset=utf-8")
+            if not self.allowed(self.headers.get("X-PMVA-Token")):
+                return self.reply(403, {"error": "合言葉が違います。mvm ui を起動したときの URL を開き直してください"})
+            if url.path == "/api/rows":
+                return self.run(lambda: {"rows": ui_rows(ui), "jobs": {k: dict(v) for k, v in ui.jobs.items()},
+                                         "time": time.strftime("%H:%M:%S")})
+            if url.path == "/api/detail":
+                name = self.target(q.get("name"))
+                return name and self.run(lambda: ui_detail(name), name)
+            self.reply(404, {"error": "not found"})
+
+        def do_POST(self):
+            if not self.allowed(self.headers.get("X-PMVA-Token")):
+                return self.reply(403, {"error": "合言葉が違います。mvm ui を起動したときの URL を開き直してください"})
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = -1
+            if not 0 <= length <= UI_MAX_BODY:   # 負の値で read が終わらなくなるのも防ぐ
+                return self.reply(413, {"error": "送る内容が大きすぎるか、Content-Length が正しくありません"})
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except ValueError:
+                return self.reply(400, {"error": "JSON で送ってください"})
+            action = self.path.rsplit("/", 1)[-1]
+            if not self.path.startswith("/api/") or action not in ("send", "resume", *UI_LONG_ACTIONS):
+                return self.reply(404, {"error": "not found"})
+            name = self.target(body.get("name") if isinstance(body, dict) else None)
+            if not name:
+                return None
+            if action == "send":
+                text = body.get("text")
+                if not isinstance(text, str) or not text.strip():
+                    return self.reply(400, {"error": "送る指示を書いてください"})
+                return self.run(lambda: ui_send(name, text), name)
+            if action == "resume":
+                return self.run(lambda: ui_resume(name), name)
+            with ui.lock:   # 2 回押されても 1 回だけ始める
+                if ui.busy(name):
+                    return self.reply(409, {"error": f"{name} は {ui.jobs[name]['message']} です"})
+                ui.jobs[name] = {"action": action, "state": "running", "message": f"{UI_LONG_ACTIONS[action]}の途中"}
+            job = threading.Thread(target=ui_run_job, args=(ui, name, action), daemon=True)
+            ui.threads.append(job)
+            job.start()
+            self.reply(202, {"message": f"{name} の{UI_LONG_ACTIONS[action]}を始めました (数分かかります)"})
+
+    return Handler
+
+
+def ui_wait_jobs(ui):
+    """途中の停止・renew を待つ。途中で止めると、VM が残って課金が続いたり .state が中途半端になったりする。"""
+    running = [t for t in ui.threads if t.is_alive()]
+    if not running:
+        return
+    names = ", ".join(n for n, j in ui.jobs.items() if j["state"] == "running")
+    log(f"{names} の保存して停止・作り直しが途中なので、終わるまで待ちます (もう一度 Ctrl-C で中断)")
+    try:
+        for t in running:
+            while t.is_alive():
+                t.join(0.5)   # 時間を区切って待つ (Windows でも Ctrl-C を受け取れるように)
+    except KeyboardInterrupt:
+        log(f"中断しました。mvm ls で {names} の状態を確かめてください")
+
+
+def cmd_ui(args):
+    if not 0 <= args.port <= 65535:
+        die("--port には 0〜65535 を指定してください (0 は空いている番号)")
+    token = secrets.token_urlsafe(24)
+    ui = UiState()
+    try:
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", args.port), ui_handler(ui, token))
+    except OSError as e:
+        die(f"127.0.0.1:{args.port} で待ち受けられません ({e})。--port で別の番号を指定してください")
+    server.daemon_threads = True
+    url = f"http://127.0.0.1:{server.server_address[1]}/?t={token}"
+    # 合言葉は起動のたびに作り直す使い捨てで、この PC の画面を開くためだけに使う
+    log(f"ブラウザの画面: {url}")
+    log("この PC からだけ開けます。終わるときは Ctrl-C")
+    if not args.no_open:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    ui_wait_jobs(ui)
+    return 0
+
+
+# VM から来る文字列 (画面、応答、出来事) は必ず textContent で入れる (innerHTML に入れると画面の中身がスクリプトとして動く)
+UI_HTML = """<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>mvm</title>
+<style>
+:root{--bg:#f6f7f9;--panel:#fff;--text:#1d2129;--muted:#5f6673;--line:#dfe2e7;--accent:#2557d6;
+--red:#c62828;--red-bg:#fdecea;--yellow:#8a5a00;--yellow-bg:#fff4d6;--green:#1b7a3a;--green-bg:#e6f4ea;--sel:#eaf0fd}
+@media (prefers-color-scheme:dark){:root{--bg:#15171b;--panel:#1e2127;--text:#e6e8eb;--muted:#9aa1ad;--line:#33373f;
+--accent:#7aa2ff;--red:#ff8a80;--red-bg:#3b1f1f;--yellow:#ffd36b;--yellow-bg:#3a3018;--green:#7fd69b;--green-bg:#1c3324;--sel:#243150}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI","Hiragino Sans","Yu Gothic UI",sans-serif}
+header{display:flex;gap:12px;align-items:baseline;padding:14px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+h1{font-size:17px;margin:0}h2{font-size:15px;margin:0 0 8px}
+.muted{color:var(--muted);font-size:12px}
+main{padding:16px;display:grid;gap:16px;max-width:1200px;margin:0 auto}
+section{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 14px;min-width:0}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-weight:600;color:var(--muted);font-size:12px}
+tbody tr{cursor:pointer}tbody tr:hover,tbody tr:focus{background:var(--sel);outline:none}tr.sel{background:var(--sel)}
+td:first-child{white-space:nowrap;font-weight:600}td.last{max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;white-space:nowrap}
+.lv-red{background:var(--red-bg);color:var(--red)}.lv-yellow{background:var(--yellow-bg);color:var(--yellow)}
+.lv-green{background:var(--green-bg);color:var(--green)}.lv-{background:var(--sel);color:var(--text)}
+ul{margin:6px 0 0;padding-left:18px}li{margin:2px 0}
+.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
+button{font:inherit;padding:6px 12px;border-radius:6px;border:1px solid var(--line);background:var(--panel);color:var(--text);cursor:pointer}
+button:hover{border-color:var(--accent)}button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button.danger{color:var(--red)}button:disabled{opacity:.5;cursor:default}
+pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;margin:6px 0 0;max-height:420px;overflow:auto;
+white-space:pre-wrap;word-break:break-all;font:12px/1.45 ui-monospace,Consolas,"Cascadia Mono",monospace}
+textarea{width:100%;min-height:72px;font:inherit;padding:8px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--text)}
+#msg{min-height:20px}#msg.err{color:var(--red)}
+.grid2{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+</style></head><body>
+<header><h1>mvm</h1><span class="muted" id="stamp">読み込み中…</span><span class="muted">10 秒ごとに更新 (このタブを表示している間だけ)</span></header>
+<main>
+<section><h2>セッション</h2><div class="scroll"><table><thead><tr><th>名前</th><th>状態</th><th>経過</th><th>メモリ</th><th>最後の出来事</th></tr></thead>
+<tbody id="rows"></tbody></table></div><p class="muted" id="empty" hidden>動いているセッションはありません。起動は mvm up &lt;名前&gt; です。</p>
+<div id="notes"></div><div id="jobs"></div></section>
+<section id="detail" hidden><h2 id="dname"></h2>
+<div class="bar"><button id="b-load">画面と結果を見る</button><button id="b-resume">再開</button>
+<button id="b-renew">作り直す (renew)</button><button id="b-stop" class="danger">保存して停止</button></div>
+<div id="msg" role="status"></div>
+<div class="bar" style="margin-top:8px"><textarea id="text" placeholder="エージェントへの指示 (Ctrl+Enter で送信)"></textarea>
+<button id="b-send" class="primary">送信</button></div>
+<div class="grid2"><div><h2>画面の末尾</h2><pre id="screen">(まだ読み込んでいません)</pre></div>
+<div><h2>最後の応答</h2><pre id="result">(まだ読み込んでいません)</pre></div></div></section>
+</main>
+<script>
+const T = new URLSearchParams(location.search).get("t");
+let selected = null, rowsByName = {};
+const $ = id => document.getElementById(id);
+function el(tag, text, cls) { const e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; }
+async function api(path, body) {
+  const opt = {headers: {"X-PMVA-Token": T}};
+  if (body) { opt.method = "POST"; opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
+  const r = await fetch(path, opt);
+  const j = await r.json().catch(() => ({error: "HTTP " + r.status}));
+  if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+  return j;
+}
+function say(text, err) {
+  $("msg").textContent = text ? new Date().toLocaleTimeString() + "  " + text : ""; $("msg").className = err ? "err" : "";
+}
+function list(id, title, items) {
+  const box = $(id); box.replaceChildren();
+  if (!items.length) return;
+  box.append(el("h2", title)); const ul = el("ul"); items.forEach(t => ul.append(el("li", t))); box.append(ul);
+}
+async function refresh() {
+  try {
+    const d = await api("/api/rows");
+    rowsByName = {};
+    const tb = $("rows"); tb.replaceChildren();
+    for (const r of d.rows) {
+      rowsByName[r.name] = r;
+      const tr = el("tr"); tr.tabIndex = 0; if (r.name === selected) tr.className = "sel";
+      const c = r.cells, st = el("td"); st.append(el("span", c[1], "badge lv-" + r.level));
+      tr.append(el("td", c[0]), st, el("td", c[2]), el("td", c[3]), el("td", c[4], "last"));
+      tr.title = c[4]; tr.onclick = () => select(r.name);
+      tr.onkeydown = e => { if (e.key === "Enter") select(r.name); };
+      tb.append(tr);
+    }
+    $("empty").hidden = d.rows.length > 0;
+    if (selected && !rowsByName[selected]) { selected = null; $("detail").hidden = true; }   // 停止した台の詳細は閉じる
+    list("notes", "対応が要ること", d.rows.flatMap(r => r.notes));
+    list("jobs", "裏で進めている操作", Object.values(d.jobs).map(j => j.message));
+    $("stamp").textContent = "最終更新 " + d.time;
+  } catch (e) { $("stamp").textContent = "更新できません: " + e.message; }
+}
+function select(name) {
+  selected = name; $("detail").hidden = false; $("dname").textContent = name;
+  $("screen").textContent = $("result").textContent = "(まだ読み込んでいません)"; say("");
+  refresh();
+  if ((rowsByName[name] || {}).vm === "RUNNING") load(false);
+}
+async function load(ask) {
+  const r = rowsByName[selected] || {};
+  if (ask && r.vm === "SUSPENDED" && !confirm(selected + " は一時停止中です。画面を見ると VM が再開し、その間は課金されます。続けますか？")) return;
+  say("読み込み中…");
+  try {
+    const d = await api("/api/detail?name=" + encodeURIComponent(selected));
+    $("screen").textContent = d.screen;
+    $("result").textContent = d.results.map(x => (d.results.length > 1 ? "--- " + x.agent + " ---\\n" : "") +
+      (x.error && !x.text ? x.error : (x.state === "error" ? "(エラーで止まりました: " + x.error + ")\\n" : "") + (x.text || "(まだ応答がありません)")) +
+      (x.hint ? "\\n→ " + x.hint : "")).join("\\n\\n") || "(エージェントを起動していません)";
+    say("");
+  } catch (e) { say(e.message, true); }
+}
+async function act(action, label) {
+  if (action !== "resume" && !confirm(selected + " を" + label + "します。よろしいですか？")) return;
+  try { say((await api("/api/" + action, {name: selected})).message); refresh(); } catch (e) { say(e.message, true); }
+}
+async function send() {
+  const text = $("text").value;
+  if (!text.trim()) return;
+  $("b-send").disabled = true;
+  try { say((await api("/api/send", {name: selected, text})).message); $("text").value = ""; }
+  catch (e) { say(e.message, true); } finally { $("b-send").disabled = false; }
+}
+$("b-load").onclick = () => load(true);
+$("b-resume").onclick = () => act("resume", "再開");
+$("b-renew").onclick = () => act("renew", "作り直し (保存してから新しい VM で復元)");
+$("b-stop").onclick = () => act("stop", "保存して停止");
+$("b-send").onclick = send;
+$("text").onkeydown = e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) send(); };
+// タブが裏にある間は問い合わせない (問い合わせている VM は自動でサスペンドされず、課金が続くため)
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+refresh(); setInterval(() => { if (!document.hidden) refresh(); }, 10000);
+</script></body></html>
+"""
+
+
 def cmd_shell(args):
     s = load_session(args.name)
     r = lmv("create-microvm-shell-auth-token", "--microvm-identifier", s["microvmId"], "--expiration-in-minutes", "15")
@@ -3723,6 +4075,10 @@ def build_parser():
     x.add_argument("--json", action="store_true", help="台ごとの状態を JSON で 1 回出力する (--once を含む)")
     x.add_argument("--log", metavar="CSV", help="毎回、台ごとの状態とメモリを CSV に追記する")
     x.set_defaults(func=cmd_watch)
+    x = sub.add_parser("ui", help="手元のブラウザで全セッションの状態を見て操作する (送信、再開、renew、停止)")
+    x.add_argument("--port", type=int, default=0, help="待ち受けるポート (既定は空いている番号)")
+    x.add_argument("--no-open", action="store_true", help="ブラウザを開かず、URL を表示するだけにする")
+    x.set_defaults(func=cmd_ui)
     x = sub.add_parser("ssh", help="SSH over WebSocket で接続 (既定で tmux にアタッチ。切れたら自動で再接続)")
     x.add_argument("name")
     x.add_argument("--no-reconnect", action="store_true", help="接続が切れても再接続しない")

@@ -6,6 +6,7 @@
 
 ### 追加
 
+- `mvm ui [--port <番号>] [--no-open]`: 手元のブラウザで管理画面を開く。`mvm watch` と同じ一覧を 10 秒ごとに更新し (タブを表示している間だけ)、行をクリックすると画面の末尾と最後の応答を出す。指示の送信、再開、renew、保存して停止もボタンでできる (renew と停止は確認してから裏で進める)。127.0.0.1 でだけ待ち受け、起動のたびに作る合言葉と Host ヘッダーを確かめる。Python の標準ライブラリだけで動く
 - `mvm up <name>` だけで前回の続きから始める。`--repo` を省くと、同じ名前で前に起動したセッションの repo・ブランチ・起点のブランチを引き継ぎ、保存したワークスペースがあれば復元する (`--fresh` で引き継がない)。前のセッションが無ければ、今いるフォルダの git の `origin` を clone する (`ssh` の URL は `https` に直し、URL のトークンは取り除く。`mvm` 自身のフォルダでは使わない)。`mvm fleet` も `--repo` を省くと `origin` を使う。clone しないときは `--no-repo`。`--repo` を明示したときの動きは変わらない
 - `mvm infra operator [--user <名前>] [--profile <名前>]`: 普段使う IAM ユーザー (`pmva-operator` ポリシーだけを付ける) とアクセスキーを作り、AWS CLI のプロファイル (既定 `pmva`) に保存して `config.env` の `AWS_PROFILE` を切り替える。quickstart の手順 5 (ARN のコピー、`aws iam` を 3 回、`aws configure`、`config.env` の書き換え) が 1 回のコマンドになる。秘密のアクセスキーは画面にもコマンドライン引数にも出さない。管理者のプロファイルで実行する。実機では未確認
 - `mvm up --remote-control`: VM の Claude Code を、claude.ai/code やスマホの Claude アプリ (Remote Control) から操作できるようにする。`--claude-auth interactive` で起動し、`mvm login <name>` (この VM では `claude auth login --claudeai`) でログインすると、待っていた `claude` のウィンドウが `claude --remote-control pmva-<name>` で自動で起動する。claude.ai のサブスクリプションのフル権限のログインが要り、`oauth-token`・API キー・Bedrock・Codex では使えない (エラーで案内する)。この VM だけ、非必須通信をまとめて止める `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` などを外し、テレメトリなどは個別の変数で止める。`mvm renew` / `--restore` ではログインし直し。`image/` を変えたので `mvm image build` が要る。実機では未確認 ([docs/poc-checklist.md](docs/poc-checklist.md) の K)
