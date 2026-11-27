@@ -553,22 +553,33 @@ class Memsync:
             return True
 
     def put_plain(self, rel, data):
-        """条件なしで送る (履歴用)。失敗は MemsyncError。"""
+        """条件なしで送る (履歴用)。(終了コード, 標準エラー) を返す。"""
         with _temp_dir() as tmp:
             src = Path(tmp) / "body"
             src.write_bytes(data)
-            self.aws("s3api", "put-object", "--bucket", self.bucket, "--key", self.prefix + rel, "--body", str(src),
-                     "--metadata", "pmva-origin=" + self.origin, "--output", "json")
+            rc, _, err = self.runner(["s3api", "put-object", "--bucket", self.bucket, "--key", self.prefix + rel,
+                                      "--body", str(src), "--metadata", "pmva-origin=" + self.origin, "--output", "json"])
+            return rc, err
 
     def record_history(self, name, data):
-        """送った中身の写しを .history/<名前>/ に置く。失敗しても同期は止めない (警告だけ)。dry-run では書かない。"""
+        """送った中身の写しを .history/<名前>/ に置く。失敗しても同期は止めない (警告だけ)。dry-run では書かない。
+
+        本体を送れた後に呼ぶ。ここで AccessDenied なら、memory/* の権限はあって .history/ だけが拒否されている
+        (スタックの外の拒否。スタックを更新しても直らない) ので、aws_failed の「mvm infra deploy」の案内は使わない。
+        """
         if self.dry_run:
             return
         rel = "%s%s/%s-%s-%s.md" % (HISTORY_DIR, name, stamp_of(self.now()), self.origin, md5_of(data)[:8])
-        try:
-            self.put_plain(rel, data)
-        except MemsyncError as e:
-            self.warn("%s の履歴を残せませんでした (%s)。同期は続けます" % (name, e))
+        rc, err = self.put_plain(rel, data)
+        if rc == 0:
+            return
+        if "AccessDenied" in err or "Access Denied" in err:
+            reason = ("メモリ本体は送れましたが、%s%s への書き込みだけが拒否されました。スタックの更新では直りません。"
+                      "実行ロール (手元なら操作用のポリシー) に後から付けたポリシー、バケットポリシー、SCP などが "
+                      "s3:PutObject を拒否していないか確かめてください: %s" % (self.prefix, HISTORY_DIR, err.strip()))
+        else:
+            reason = "ネットワークと AWS の認証を確かめてください: %s" % err.strip()
+        self.warn("%s の履歴を残せませんでした。同期は続けます (%s)" % (name, reason))
 
     def write_local(self, name, data):
         self.dir.mkdir(parents=True, exist_ok=True)
