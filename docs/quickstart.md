@@ -155,7 +155,7 @@ mvm image build      # 「ビルド成功」と出れば完了
 mvm up test-01 --repo https://github.com/<owner>/<repo>.git --prompt "README を読んで概要を説明して"
 ```
 
-GitHub を使わない場合は `--repo` を付けずに `mvm up test-01 --no-github --prompt "..."` とします。10 秒ほどで起動します。
+clone したいリポジトリのフォルダで打つなら、`--repo` は省けます (そのフォルダの `origin` を使います)。GitHub を使わない場合は `mvm up test-01 --no-repo --no-github --prompt "..."` とします。10 秒ほどで起動します。
 
 ```bash
 mvm peek test-01                         # エージェントの画面の最後を表示する (接続せずに確認)
@@ -172,7 +172,7 @@ mvm ssh test-01                          # 画面に入って直接操作する�
 mvm stop test-01     # ワークスペースを保存してから終了する (全部まとめて止めるなら mvm stop-all)
 ```
 
-次回は `mvm up test-01 --restore latest ...` で続きから始められます。
+次回は `mvm up test-01` だけで続きから始められます (前回の repo とブランチを引き継ぎ、保存したワークスペースを戻します)。
 止め忘れが心配なら、`config.env` に `NIGHTLY_STOP_TIME=23:00` を書き足し、管理者のプロファイルで `mvm infra deploy` をやり直すと、毎晩その時刻に全台を保存してから止めます。
 
 使った金額は、翌日以降に次のコマンドで確認できます (Cost Explorer への反映は最大 24 時間ほど遅れます)。

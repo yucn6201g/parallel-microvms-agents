@@ -1961,8 +1961,66 @@ def launch(name, payload, idle, max_duration):
         log(f"  次に mvm login {name} でログインすると Remote Control で起動します")
 
 
+def continue_previous(a):
+    """前回の同じ名前のセッションの repo とブランチを引き継ぎ、保存したワークスペースがあれば復元する。
+
+    前回のセッションが無い (または起動中の) ときは False。起動中なら launch が「既に起動しています」で止める。
+    """
+    if not session_path(a.name).exists() or is_active(a.name):
+        return False
+    prev = load_session(a.name).get("payload", {})
+    if prev.get("repo"):
+        a.repo = prev["repo"]
+        a.branch = a.branch or prev.get("branch")
+        a.base_branch = a.base_branch or prev.get("baseBranch")
+    if a.restore is None:
+        bucket = stack_output("ArtifactBucketName")
+        if aws("s3api", "head-object", "--bucket", bucket, "--key", f"workspaces/{a.name}/latest.tar.gz", check=False):
+            a.restore = "latest"
+        else:
+            die_unless_not_found("保存したワークスペース")
+    what = "保存したワークスペースを復元" if a.restore == "latest" else "保存は無いので clone から"
+    log(f"前回の {a.name} の続きから始めます (repo={a.repo or 'なし'}、{what})。新しく始めるなら --fresh を付けてください")
+    return True
+
+
+def cwd_repo_url():
+    """今いるフォルダの git の origin を、VM が clone できる https の URL にする。使えなければ空文字。"""
+    if Path.cwd().resolve().is_relative_to(ROOT):
+        return ""   # mvm 自身のフォルダ (config.env の置き場所) で打ったときに、mvm のリポジトリを clone しない
+    try:
+        p = subprocess.run(["git", "remote", "get-url", "origin"], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    url = p.stdout.strip() if p.returncode == 0 else ""
+    if not url:
+        return ""
+    if re.match(r"^https?://", url):
+        url = re.sub(r"^(https?://)[^/]*@", r"\1", url)   # URL に入ったトークンは VM にも .state にも送らない
+    else:
+        m = re.match(r"^ssh://(?:[^/@]*@)?([^/:@]+)(?::\d+)?/(.+)$", url) or \
+            re.match(r"^(?:[^@/\s]+@)?([^:/\s@]{2,}):(?!//)(.+)$", url)   # {2,}: C:/... は Windows のパス
+        if not m:
+            log("今のフォルダの origin は VM から clone できる URL ではないので、リポジトリなしで起動します "
+                "(clone するなら --repo <URL> を付けてください)")
+            return ""
+        url = f"https://{m.group(1)}/{m.group(2).lstrip('/')}"
+    log(f"--repo を省いたので、今のフォルダの origin を使います: {url} (使わないなら --no-repo)")
+    return url
+
+
 def cmd_up(args):
     valid_name(args.name)
+    if args.no_repo:
+        if args.repo:
+            die("--no-repo と --repo は一緒に使えません。どちらかを外してください")
+        args.repo = None
+    elif args.repo is None:
+        # fleet (fresh の属性が無い) は毎回新しいタスクなので引き継がない
+        continued = not getattr(args, "fresh", True) and continue_previous(args)
+        if not continued:
+            args.repo = cwd_repo_url() or None
     payload = build_payload(args.name, args)
     launch(args.name, payload, args.idle or C["IDLE_MAX_SECONDS"], args.max_duration or C["MAX_DURATION_SECONDS"])
     return 0
@@ -3489,7 +3547,9 @@ def add_up_options(p):
     p.add_argument("--codex-secret")
     p.add_argument("--github-secret")
     p.add_argument("--no-github", action="store_true", help="GitHub トークンを使わない")
-    p.add_argument("--repo", help="clone する git リポジトリ URL")
+    p.add_argument("--repo", help="clone する git リポジトリ URL (省略時は今のフォルダの origin。"
+                                  "up では前回の同じ名前のセッションがあればそれを引き継ぐ)")
+    p.add_argument("--no-repo", action="store_true", help="リポジトリを clone しない")
     p.add_argument("--branch", help="作業ブランチ (既定 pmva/<name>)")
     p.add_argument("--base-branch", help="作業ブランチの起点")
     p.add_argument("--prompt", help="起動時にエージェントへ渡す最初の指示")
@@ -3544,6 +3604,8 @@ def build_parser():
     x = sub.add_parser("up", help="MicroVM を 1 台起動してエージェントを開始")
     x.add_argument("name")
     add_up_options(x)
+    x.add_argument("--fresh", action="store_true",
+                   help="前回の同じ名前のセッションを引き継がず、保存したワークスペースも復元しない")
     x.set_defaults(func=cmd_up)
     x = sub.add_parser("fleet", help="<prefix>-01..NN をまとめて起動 (MicroVM メモリのクォータの範囲内で)")
     x.add_argument("count", type=int)
