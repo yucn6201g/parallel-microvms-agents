@@ -121,8 +121,8 @@ mvm setup --profile admin
 
 | 順番 | やること | 聞かれたときに用意するもの |
 |---|---|---|
-| 1 | AWS の土台 (S3・IAM ロール・ログなど) を作る (`mvm infra deploy`、約 2 分) | なし |
-| 2 | 普段使う IAM ユーザー `pmva-operator` (`pmva-operator` ポリシーだけを付ける) を作り、プロファイル `pmva` に切り替える (`mvm infra operator`) | なし (キーは画面に出ず、`~/.aws/credentials` にだけ書かれる) |
+| 1 | AWS の土台 (S3・IAM ロール・ログなど) を作る (`mvm infra deploy`、約 2 分)。先に月の予算アラートを作るか聞かれる | なし。予算アラートが要るなら、月の金額 (USD) と通知先のメール。要らなければ Enter |
+| 2 | 普段使う IAM ユーザー `pmva-operator` (`pmva-operator` ポリシーだけを付ける) を作り、プロファイル `pmva` に切り替える (`mvm infra operator`)。SSO の管理者には聞かず、権限セットを作る案内を出す | なし (キーは画面に出ず、`~/.aws/credentials` にだけ書かれる) |
 | 3 | エージェントの認証情報を Secrets Manager に登録する (`mvm secret set`) | 既定の Claude Pro / Max なら、手元に Claude Code を入れて `claude setup-token` を実行し、表示されたトークン。GitHub のリポジトリで作業させるなら、対象リポジトリに絞った Fine-grained personal access token (Contents と Pull requests を Read and write)。GitHub を使わないなら `n` と答える |
 | 4 | SSH 鍵が無ければ作る (`ssh-keygen`) | なし (質問はすべて Enter で構いません) |
 | 5 | Claude Code / Codex 入りのイメージをビルドする (`mvm image build`、10〜20 分) | なし。待つだけ |
@@ -132,8 +132,9 @@ mvm setup --profile admin
 `mvm doctor` の「同時に何台まで」の行も見ておきます。この台数まで並列に動かせます。足りなければ引き上げを申請します (審査に数日かかることがあります。[setup.md](setup.md#前提の確認とクォータ))。
 
 - 値の入力は画面に表示されず、AWS Secrets Manager にだけ保存されます
-- Anthropic API キー、Amazon Bedrock、Codex などで使う場合は、先に `config.env` の `DEFAULT_AGENT` / `DEFAULT_CLAUDE_AUTH` / `DEFAULT_CODEX_AUTH` を書き換えてから `mvm setup` を実行します。その方式に要る認証情報を聞かれます ([auth.md](auth.md))
-- IAM Identity Center (SSO) の権限セットで普段の操作をする場合は、2 番目で `n` と答え、[setup.md](setup.md#操作用の-iam-ユーザー) の手順に従います
+- 最初に認証方式を番号で聞かれます (1 Pro/Max、2 Anthropic の API キー、3 Amazon Bedrock、4 Codex の ChatGPT)。選んだ結果は `config.env` の `DEFAULT_AGENT` / `DEFAULT_CLAUDE_AUTH` / `DEFAULT_CODEX_AUTH` に書かれ、その方式に要る認証情報を聞かれます ([auth.md](auth.md))。それ以外の方式 (Mantle、ゲートウェイなど) は、先に `config.env` を書き換えておくと聞かれません
+- IAM Identity Center (SSO) で管理者になっている場合、2 番目は聞かれません。[setup.md](setup.md#操作用の-iam-ユーザー) の手順で `pmva-operator` ポリシーだけを付けた権限セットを作り、そのプロファイルを `config.env` の `AWS_PROFILE` に書いてください
+- 管理者で `mvm infra deploy` をやり直すときは `mvm infra deploy --admin-profile admin` のように付けます。`config.env` の `AWS_PROFILE` は環境変数 `AWS_PROFILE` より優先されるので、`$env:AWS_PROFILE` を設定しても切り替わりません
 - 手順 4 で管理者のアクセスキーを作った場合は、ここで IAM コンソールから削除します (`mvm infra deploy` をやり直すときは、その都度作って使い終わったら削除します)
 
 1 つずつ自分で実行したいときは、上の表のかっこの中のコマンドを順に実行しても同じです ([setup.md](setup.md))。
