@@ -1221,6 +1221,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual((w3["anthropicAwsRegion"], w3["claudeSecret"]), ("us-east-1", "pmva/anthropic-aws-api-key"))
 
     def test_bedrock_api_key_secrets_follow_role_prefixes(self):
+        self.remove_secrets()   # create-secret が呼ばれること (新規作成) を確かめる
         rc, _, _ = self.mvm("secret", "set", "codex-bedrock-api-key", "--name", "pmva/claude-x", input=b"k", check=False)
         self.assertNotEqual(rc, 0)
         self.mvm("secret", "set", "codex-bedrock-api-key", input=b"k")
@@ -1246,6 +1247,7 @@ class CliTest(unittest.TestCase):
         rc, _, err = self.mvm("up", "x1", "--claude-secret", "pmva/openai-api-key", check=False)
         self.assertNotEqual(rc, 0)
         self.assertIn("pmva/anthropic-", err)
+        (self.stub_dir / "secret-pmva_claude-oauth-token-team").write_text("x", encoding="utf-8")
         self.mvm("up", "x2", "--claude-secret", "pmva/claude-oauth-token-team")
         rc, _, _ = self.mvm("secret", "set", "openai-api-key", "--name", "pmva/claude-x", input=b"k", check=False)
         self.assertNotEqual(rc, 0)
@@ -2870,7 +2872,7 @@ class CliTest(unittest.TestCase):
             (fake / "claude").write_text("#!/bin/sh\n", encoding="utf-8")
             (fake / "claude").chmod(0o755)
         env["PATH"] = str(fake) + os.pathsep + env["PATH"]
-        self.stub_dir.mkdir()
+        self.remove_secrets()   # setUp が登録したシークレットを消し、setup が登録を聞くところから始める
         for kind in ("claude-oauth-token", "github-token"):
             (self.stub_dir / f"secret-pmva_{kind}").write_text("x", encoding="utf-8")
         skill = self.home / ".claude" / "skills" / "mvm-orchestrator" / "SKILL.md"
@@ -2891,7 +2893,7 @@ class CliTest(unittest.TestCase):
         """mvm setup: quickstart の手順 4〜7 (config.env の手での書き換え、infra deploy、操作用ユーザー、
         シークレットの登録) を、済んでいないものだけ聞いて順に実行する。2 回目は何もしない。"""
         env = self.setup_env(PMVA_STUB_IAM="admin", PMVA_STUB_NO_STACK="1")
-        self.stub_dir.mkdir()
+        self.remove_secrets()   # setUp が登録したシークレットを消し、setup が登録を聞くところから始める
         (self.stub_dir / "secret-pmva_github-token").write_text("ghp_x", encoding="utf-8")
         # deploy → operator → claude-oauth-token の登録 (イメージは既にある)
         _, out, err = self.mvm("setup", "--profile", "admin", input=b"y\ny\ny\nsk-ant-oat01-abc\n", env=env)
@@ -2916,7 +2918,7 @@ class CliTest(unittest.TestCase):
 
     def test_setup_builds_image_and_can_skip_github(self):
         env = self.setup_env(PMVA_STUB_NO_IMAGE="1")
-        self.stub_dir.mkdir()
+        self.remove_secrets()   # setUp が登録したシークレットを消し、setup が登録を聞くところから始める
         (self.stub_dir / "secret-pmva_claude-oauth-token").write_text("sk-ant-oat01-x", encoding="utf-8")
         # GitHub は使わない (n) → イメージをビルドする (y)
         self.mvm("setup", input=b"n\ny\n", env=env)
@@ -2928,7 +2930,7 @@ class CliTest(unittest.TestCase):
     def test_setup_does_not_claim_done_after_skips(self):
         """断った手順があれば「準備ができました」と言わず、残りを案内する (doctor は !! でも 0 を返すため)。"""
         env = self.setup_env(PMVA_STUB_NO_IMAGE="1")
-        self.stub_dir.mkdir()
+        self.remove_secrets()   # setUp が登録したシークレットを消し、setup が登録を聞くところから始める
         (self.stub_dir / "secret-pmva_github-token").write_text("ghp_x", encoding="utf-8")
         # claude-oauth-token の登録を断り (n)、イメージのビルドも断る (n)
         _, _, err = self.mvm("setup", input=b"n\nn\n", env=env)
@@ -2945,7 +2947,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("ROLLBACK_COMPLETE", err)
         self.assertNotIn(["iam", "create-user"], [c[:2] for c in self.calls()])
         # イメージの問い合わせに失敗したら、ビルドを勧めずに理由を出す
-        self.stub_dir.mkdir(exist_ok=True)
+        self.remove_secrets()   # setUp が登録したシークレットを消し、setup が登録を聞くところから始める
         for kind in ("claude-oauth-token", "github-token"):
             (self.stub_dir / f"secret-pmva_{kind}").write_text("x", encoding="utf-8")
         rc, _, err = self.mvm("setup", input=b"y\n", env=self.setup_env(
