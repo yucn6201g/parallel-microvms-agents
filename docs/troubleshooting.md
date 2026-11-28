@@ -18,7 +18,7 @@
 
 | 症状 | 確認すること |
 |---|---|
-| `mvm image build` が FAILED | `mvm logs` を見る。`CONTAINER_BUILD_FAILED` なら Dockerfile (や `IMAGE_EXTRA_PACKAGES`) の問題。手元で `docker build --platform linux/arm64 image/` を試す |
+| `mvm image build` が FAILED | `mvm logs` を見る。`CONTAINER_BUILD_FAILED` なら Dockerfile (や `IMAGE_EXTRA_PACKAGES`) の問題。原因を絞りたいときだけ、手元で `docker build --platform linux/arm64 image/` を試す (**デバッグ用・任意**。docker が無くても `mvm` は使えます。イメージのビルドは AWS 側で行います) |
 | `mvm up` で「メモリ上限を超えます」 | `mvm doctor` でクォータと起動できる台数を確かめる。使っていない VM を止めるか、表示される「`MEMORY_MIB=2048` にした場合の台数」と申請文で、[引き上げを申請](setup.md#前提の確認とクォータ)する。AWS が `ServiceQuotaExceededException` で拒否したときは、別の PC や別のイメージの VM も数に入るので `aws lambda-microvms list-microvms` で確かめる |
 | `mvm up` で AccessDenied | 操作者に `pmva-operator` ポリシーが付いているか (`lambda:PassNetworkConnector`、`iam:PassRole` が要る)。足りない操作は [setup.md](setup.md#操作用の-iam-ユーザー) の手順で足す |
 | bootstrap が `failed` | シークレットを登録したか (`mvm secret ls`)、名前が既定と違うなら `--claude-secret` などで指定したか。ログは `bootstrap.log` |
@@ -30,7 +30,7 @@
 
 | 症状 | 確認すること |
 |---|---|
-| `mvm peek` が 502 | 起動直後なら数秒待つ。続くなら `mvm shell` で入り、`bootstrap.log` を見る |
+| `mvm peek` が 502 | 起動直後なら約 10 秒待つ。続くなら `mvm shell` で入り、`bootstrap.log` を見る |
 | `mvm peek` が 401 / 403 | 手元のトークンの期限切れ。`.state/tokens/<name>.*` を消してもう一度実行する |
 | `mvm ssh` で「SSH 公開鍵なしで起動されています」 | `ssh-keygen -t ed25519` で鍵を作り、`mvm renew <name>` で起動し直す (それまでは `mvm shell` で入れる) |
 | SSH が `Broken pipe` で切れる | 途中の通信経路 (社内プロキシなど) が長い接続を切ることがある。`mvm ssh <name>` (コマンドなし) は自動で再接続し、作業は tmux の中で続いている |

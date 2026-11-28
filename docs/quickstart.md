@@ -33,6 +33,12 @@ AI エージェントに AWS を使わせるので、最初にアカウントの
 ## 2. 手元 PC にツールを入れる
 
 必要なのは Git、Python 3.9 以上、AWS CLI v2、OpenSSH クライアントの 4 つです。
+あわせて、手順 5 で聞かれるものを先に用意しておくと止まらずに進められます。
+
+| 用意するもの | いつ使うか | 用意の仕方 |
+|---|---|---|
+| 手元の Claude Code | 既定の認証方式 (Claude Pro / Max) のトークンを作る (`claude setup-token`) | Claude Code を入れて、一度ログインしておく。Anthropic API キーや Amazon Bedrock などで使うなら不要 ([auth.md](auth.md)) |
+| GitHub の Personal Access Token | VM が GitHub のリポジトリを clone / push する | GitHub の Settings → Developer settings で Fine-grained personal access token を作る。対象リポジトリだけに絞り、Contents と Pull requests を Read and write にする。GitHub を使わないなら不要 ([auth.md](auth.md#github)) |
 
 **Windows (PowerShell)**
 
@@ -81,9 +87,27 @@ scripts/install.sh
 ## 4. 管理者のプロファイルを用意する
 
 AWS の土台を作るところだけ管理者の権限が要ります。**自分の PC で**行ってください。
+新しい AWS アカウントにはルートユーザーしかありません。ルートユーザーは使わず (ルートのアクセスキーは作りません)、次のどちらかで管理者を作って、AWS CLI のプロファイル `admin` にします。
 
-- IAM Identity Center (SSO) を使っている場合 (おすすめ): `aws configure sso` を実行し、プロファイル名を `admin` にする
-- 使っていない場合: 管理者の IAM ユーザーのアクセスキーを作り、`aws configure --profile admin` で入力する。**手順 5 が終わったらこのキーは削除する**
+**A. IAM Identity Center (SSO) を使う (おすすめ。アクセスキーを作らずに済みます)**
+
+1. マネジメントコンソールにルートユーザーでサインインし、「IAM Identity Center」を開いて有効にする (リージョンは `config.env` の `AWS_REGION` に合わせると迷いません)
+2. 「ユーザー」で自分のユーザーを作る (招待メールからパスワードと MFA を設定する)
+3. 「許可セット」で `AdministratorAccess` の許可セットを作り、「AWS アカウント」で自分のユーザーにこのアカウントを割り当てる
+4. 自分の PC でプロファイルにする。表示される「AWS アクセスポータルの URL」(IAM Identity Center の設定画面にあります) を聞かれるので入力する
+
+```bash
+aws configure sso --profile admin
+aws sso login --profile admin      # 以降、期限が切れたらこれで入り直す
+```
+
+**B. 管理者の IAM ユーザーを使う**
+
+1. ルートユーザーで IAM コンソールを開き、`AdministratorAccess` を付けた IAM ユーザーを作り、MFA を設定する
+2. そのユーザーのアクセスキー (用途は「コマンドライン インターフェイス」) を作り、`aws configure --profile admin` で入力する
+3. **手順 5 が終わったらこのキーは削除する**
+
+どちらも、確かめるには `aws sts get-caller-identity --profile admin` を実行します。アカウント ID が返れば使えます。
 
 リージョンは既定で東京 (`ap-northeast-1`) です。キープアライブ・毎晩の自動停止・予算アラートが要らなければ、手順 5 の前に `config.env` に `INFRA_TEMPLATE=minimal` を書き足すと、動かすのに必要なリソースだけを作ります ([setup.md](setup.md#aws-の構成を作る))。
 
@@ -97,7 +121,7 @@ mvm setup --profile admin
 
 | 順番 | やること | 聞かれたときに用意するもの |
 |---|---|---|
-| 1 | AWS の土台 (S3・IAM ロール・ログなど) を作る (`mvm infra deploy`、数分) | なし |
+| 1 | AWS の土台 (S3・IAM ロール・ログなど) を作る (`mvm infra deploy`、約 2 分) | なし |
 | 2 | 普段使う IAM ユーザー `pmva-operator` (`pmva-operator` ポリシーだけを付ける) を作り、プロファイル `pmva` に切り替える (`mvm infra operator`) | なし (キーは画面に出ず、`~/.aws/credentials` にだけ書かれる) |
 | 3 | エージェントの認証情報を Secrets Manager に登録する (`mvm secret set`) | 既定の Claude Pro / Max なら、手元に Claude Code を入れて `claude setup-token` を実行し、表示されたトークン。GitHub のリポジトリで作業させるなら、対象リポジトリに絞った Fine-grained personal access token (Contents と Pull requests を Read and write)。GitHub を使わないなら `n` と答える |
 | 4 | SSH 鍵が無ければ作る (`ssh-keygen`) | なし (質問はすべて Enter で構いません) |
@@ -120,7 +144,7 @@ mvm setup --profile admin
 mvm up test-01 --repo https://github.com/<owner>/<repo>.git --prompt "README を読んで概要を説明して"
 ```
 
-clone したいリポジトリのフォルダで打つなら、`--repo` は省けます (そのフォルダの `origin` を使います)。GitHub を使わない場合は `mvm up test-01 --no-repo --no-github --prompt "..."` とします。10 秒ほどで起動します。
+clone したいリポジトリのフォルダで打つなら、`--repo` は省けます (そのフォルダの `origin` を使います)。GitHub を使わない場合は `mvm up test-01 --no-repo --no-github --prompt "..."` とします。約 10 秒で起動します。
 
 ```bash
 mvm peek test-01                         # エージェントの画面の最後を表示する (接続せずに確認)
@@ -141,9 +165,9 @@ mvm stop test-01     # ワークスペースを保存してから終了する (�
 ```
 
 次回は `mvm up test-01` だけで続きから始められます (前回の repo とブランチを引き継ぎ、保存したワークスペースを戻します)。
-止め忘れが心配なら、`config.env` に `NIGHTLY_STOP_TIME=23:00` を書き足し、管理者のプロファイルで `mvm infra deploy` をやり直すと、毎晩その時刻に全台を保存してから止めます。
+止め忘れには、毎晩の自動停止が効きます。`config.env` は `config.example.env` のコピーなので、`NIGHTLY_STOP_TIME=23:00` (`NIGHTLY_STOP_TIMEZONE` の既定は `Asia/Tokyo`) が最初から入っていて、手順 5 の `mvm infra deploy` が、毎晩その時刻に全台を保存してから止める仕組みを作ります。作業中の VM も止まるので、夜をまたいで動かすなら時刻を変えるか、空にして無効にします。変えたら管理者のプロファイルで `mvm infra deploy` をやり直します (`INFRA_TEMPLATE=minimal` では作られません)。
 
-使った金額は、翌日以降に次のコマンドで確認できます (Cost Explorer への反映は最大 24 時間ほど遅れます)。
+使った金額は、翌日以降に次のコマンドで確認できます (Cost Explorer への反映は最大 24 時間遅れます)。
 
 ```bash
 mvm cost --actual --days 7

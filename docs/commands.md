@@ -208,7 +208,7 @@ Claude Code の自動メモリ (auto memory。Claude が `~/.claude/projects/<�
 mvm up <name> [オプション]
 ```
 
-MicroVM を 1 台起動し、エージェントを tmux の中で開始します。起動は 10 秒ほどです。
+MicroVM を 1 台起動し、エージェントを tmux の中で開始します。起動は約 10 秒です。
 
 | オプション | 既定 | 説明 |
 |---|---|---|
@@ -279,6 +279,7 @@ mvm peek <name> [行数] [--json]
 
 エージェントの画面の末尾 (既定 30 行) と、エージェントの状態 (`claude=working` など、[wait](#wait) の表を参照)、VM のメモリの使用量 (`mem=1.2/3.8GiB`)、初期化の状態 (`bootstrap=ready` / `failed: ...`)、最後に保存した時刻を表示します。メモリ不足でプロセスが強制終了されていれば `!!` で知らせます。接続はしないので、手元の負荷はほぼありません。
 `--json` で、VM 内の状態 API の応答をそのまま JSON で出力します。
+**サスペンド中のセッションに使うと、VM に通信が届くので自動で再開し (`IDLE_AUTO_RESUME=true` の既定のとき)、アイドルで止まるまで (`IDLE_MAX_SECONDS`) 課金が再開します。** 状態だけ知りたいときは、VM を起こさない [`ls`](#ls) / [`watch`](#watch) / [`wait`](#wait) / [`top`](#top) を使います。
 
 ### follow
 
@@ -385,7 +386,7 @@ AWS や VM から状態を取れないときは `unreachable` として待ち続
 - Codex は、許可・入力待ちを知らせる仕組みがないため、`waiting` になりません。承認待ちで止まったときは `--idle` の秒数が過ぎてから `stalled` で返ります。無人で動かすなら、承認を求めない設定 (`--codex-args "--dangerously-bypass-approvals-and-sandbox"` など) にしておきます
 - 待っている間は状態を確かめる通信をするので、そのセッションはサスペンドされません (終わった台は確かめるのをやめます)
 - `suspended` は、ふつうは作業が終わってアイドルで止まった状態です (作業中の VM はキープアライブが起こし続けます)。ただし手動で `mvm suspend` したときや、キープアライブの無い最小構成 (`INFRA_TEMPLATE=minimal`) では、作業の途中でもサスペンドします。そのため `suspended` で返ったときは、確かめ方 (`mvm peek <name>` で再開して状態を見て、作業中なら `mvm wait <name>` で待ち直す) も表示し、`--json` では `hint` に入れます。VM を起こさないのは、起こすとアイドルで止まるまで (`IDLE_MAX_SECONDS`) 課金されるためです
-- 手元のエージェントから呼ぶときは、ツールの実行時間の上限 (10 分ほど) より短い `--timeout` を付け、終了コード 2 なら呼び直します
+- 手元のエージェントから呼ぶときは、ツールの実行時間の上限 (約 10 分) より短い `--timeout` を付け、終了コード 2 なら呼び直します
 - このコマンドより前に作ったイメージは、エージェントの状態を返しません。その場合は画面と CPU が `--idle` の秒数止まったときだけ返ります。`mvm image build` で作り直してください
 
 ### result
@@ -399,6 +400,8 @@ mvm result <name> [--agent claude|codex] [--json]
 
 - Claude Code: 応答の終わり (`Stop` フック) で渡される最後の応答。渡されない版では、会話の記録 (`~/.claude/projects/` の JSONL) から、最後のツール実行より後の文章を取り出します
 - Codex: 応答の終わり (`notify` の `agent-turn-complete`) で渡される最後の応答
+
+**サスペンド中のセッションに使うと、[peek](#peek) と同じく VM が自動で再開し、アイドルで止まるまで課金が再開します。** 応答が終わったかを先に確かめたいときは、VM を起こさない [wait](#wait) を使います。
 
 ### watch
 
@@ -636,7 +639,7 @@ mvm cost --actual [--days N] [--daily]      # Cost Explorer の実績
 ```
 
 試算の主なオプション: `--agents` (台数、既定 2)、`--memory-gb` (既定 4)、`--hours-per-day` (既定 8)、`--days-per-month` (既定 22)、`--suspended-ratio` (サスペンドしている割合)、`--usd-jpy` (既定 150)、`--tax-rate` (消費税率、既定 0.10)。単価は東京の実請求の値で、`--vcpu-second` / `--gb-second` / `--snapshot-read-gb` / `--snapshot-write-gb` で上書きできる。全オプションは `mvm cost --help`、結果の読み方は [cost.md](cost.md)。
-`--actual` は直近 N 日 (既定 7、今日を含む) の実績をサービス別に表示します。アカウント全体の金額で、反映は最大 24 時間ほど遅れます。
+`--actual` は直近 N 日 (既定 7、今日を含む) の実績をサービス別に表示します。アカウント全体の金額で、反映は最大 24 時間遅れます。
 
 ---
 
