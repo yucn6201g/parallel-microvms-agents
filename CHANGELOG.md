@@ -84,6 +84,7 @@
 
 ### 変更
 
+- ドキュメントの導入のつまずきを減らした。quickstart に管理者のプロファイルの作り方 (IAM Identity Center / IAM ユーザー) と手順 2 の前提 (手元の Claude Code、GitHub のトークン) を追加し、毎晩の自動停止が既定で有効なことと食い違いを直した。usage に似たコマンド (peek / view / follow / watch / ui、stop / suspend / save / renew) の使い分けの表、司令塔の skill の状態表に `unreachable` / `UNKNOWN` / `terminated` の次の一手、commands の peek / result にサスペンド中の VM が再開して課金が戻る注意を追加。所要時間の書き方を「約 N 分」「N〜M 分」にそろえた
 - `mvm watch` を、全台を 1 台 1 行で見渡せる一覧ボードに作り直した。状態、経過時間、メモリ (使用/全体と、動かしている間の最大)、最後の出来事 (会話の記録の最後の 1 件) を表示し、許可・入力待ち、エラー、`UNKNOWN`、メモリ不足 (OOM) などの要対応の台は表の下に理由とやることを出す。`--once`、`--json` (台ごとの状態の JSON)、`--log <CSV>` (台ごと・更新ごとの状態とメモリを追記。2GB の VM で足りるかの測定に使える) を追加し、端末の幅に合わせて日本語の桁をそろえ、端末なら色を付ける (`NO_COLOR` で無効)。通信を減らすため、AWS CLI の `get-microvm` は 1 台につき 60 秒に 1 回までにし、`SUSPENDED` の VM には `/status` も `/events` も呼ばない
 - `mvm watch` の既定の間隔を 60 秒から 10 秒に変更 (呼び出しを軽くしたので負荷はほぼ同じ)。画面の末尾は出さなくなったので、画面を見たいときは `mvm peek` / `mvm view` を使う
 - `mvm memory pull|push|sync` の「config.env に MEMORY_SYNC=true を書いてください」の案内を、そのリポジトリで初めて同期したときだけ出す (毎回出ていた)。あわせて `mvm memory install-hooks` を案内する
