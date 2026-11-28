@@ -4,7 +4,7 @@
 - :9000 Lambda MicroVMs のライフサイクルフック (/ready /validate /run /resume /suspend /terminate)
 - :8080 ローカル PC の mvm から呼ばれる状態/操作 API
     GET  /healthz
-    GET  /status?lines=N   セッション情報、エージェントの状態 (作業中・完了・入力待ちなど)、各画面の末尾 N 行
+    GET  /status?lines=N   セッション情報、エージェントの状態 (作業中・完了・入力待ちなど)、作業ツリーの未コミット・未 push、各画面の末尾 N 行
     GET  /result?agent=X   エージェント (claude / codex) の最後の応答の文章
     GET  /events?agent=X&file=F&offset=N&tail=N&max=N
                            会話記録 (指示・思考・ツールの実行と結果・応答) を、前回の続きから返す (mvm follow)
@@ -187,22 +187,48 @@ def check_activity():
     return busy
 
 
+def s3_put(s, key, body):
+    """body を s3://<snapshotBucket>/<key> に書く。失敗はログだけ。成功したかを返す。"""
+    env = dict(os.environ, AWS_REGION=s.get("region") or "", AWS_DEFAULT_REGION=s.get("region") or "")
+    try:
+        p = subprocess.run(["aws", "s3", "cp", "--only-show-errors", "-", f"s3://{s['snapshotBucket']}/{key}"],
+                           input=body, text=True, capture_output=True, timeout=60, env=env)
+        if p.returncode != 0:
+            log(f"publish {key} failed: {p.stderr.strip()[:200]}")
+        return p.returncode == 0
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log(f"publish {key} failed: {e}")
+        return False
+
+
 def publish_status():
     """最後に作業した時刻を S3 に書く。AWS 側の定期処理 (keepalive) が、作業中の VM だけを起こし続けるのに使う。"""
     s = load_session()
     if not (s.get("snapshotBucket") and s.get("name") and s.get("microvmId")):
         return
-    body = json.dumps({"name": s["name"], "microvmId": s["microvmId"],
-                       "lastActivity": activity["last"], "updatedAt": time.time()})
-    env = dict(os.environ, AWS_REGION=s.get("region") or "", AWS_DEFAULT_REGION=s.get("region") or "")
-    try:
-        p = subprocess.run(["aws", "s3", "cp", "--only-show-errors", "-",
-                            f"s3://{s['snapshotBucket']}/status/{s['name']}.json"],
-                           input=body, text=True, capture_output=True, timeout=60, env=env)
-        if p.returncode != 0:
-            log(f"publish status failed: {p.stderr.strip()[:200]}")
-    except (OSError, subprocess.TimeoutExpired) as e:
-        log(f"publish status failed: {e}")
+    s3_put(s, f"status/{s['name']}.json", json.dumps({"name": s["name"], "microvmId": s["microvmId"],
+                                                      "lastActivity": activity["last"], "updatedAt": time.time()}))
+
+
+published_result = {"key": None}
+
+
+def publish_result():
+    """エージェントの最後の応答を S3 に書く。VM が終了した後も mvm result で読めるようにする。
+
+    エージェントの状態が前回書いたときから変わったときだけ書く。status/ には置かない
+    (keepalive の Lambda が status/ の全ファイルを状態として読むため)。
+    """
+    s = load_session()
+    agents = AGENT_WINDOWS.get(s.get("agent"), [])
+    if not (agents and s.get("snapshotBucket") and s.get("name")):
+        return
+    key = [(a, st.get("state"), st.get("at")) for a, st in ((a, read_agent_state(a)) for a in agents)]
+    if key == published_result["key"]:
+        return
+    body = json.dumps({"name": s["name"], "updatedAt": time.time(), "agents": {a: agent_result(a) for a in agents}})
+    if s3_put(s, f"workspaces/{s['name']}/result.json", body):
+        published_result["key"] = key
 
 
 def activity_loop():
@@ -215,6 +241,7 @@ def activity_loop():
         check_oom()
         if time.time() - last_publish >= PUBLISH_INTERVAL:
             publish_status()
+            publish_result()
             last_publish = time.time()
 
 
@@ -583,6 +610,23 @@ def check_oom():
         run(["/opt/pmva/notify.sh", "oom", str(kills)], timeout=30)
 
 
+def git_info(s):
+    """作業ツリー (bootstrap.sh と同じ場所) の、未コミットのファイル数と未 push のコミット数。git でなければ None。"""
+    repo = (s.get("repo") or "").rstrip("/")
+    name = os.path.basename(repo)
+    workdir = os.path.join(HOME, "work", name[:-4] if name.endswith(".git") and name != ".git" else name) if repo \
+        else os.path.join(HOME, "work")
+    if not os.path.exists(os.path.join(workdir, ".git")):
+        return None
+    git = ["git", "-C", workdir]
+    rc1, porcelain = run(git + ["status", "--porcelain"], timeout=5)
+    rc2, unpushed = run(git + ["rev-list", "--count", "HEAD", "--not", "--remotes"], timeout=5)
+    rc3, branch = run(git + ["branch", "--show-current"], timeout=5)
+    if rc1 or rc2 or rc3 or not unpushed.strip().isdigit():
+        return None
+    return {"branch": branch.strip() or None, "uncommitted": len(porcelain.splitlines()), "unpushed": int(unpushed)}
+
+
 def status(lines):
     s = load_session()
     windows = tmux_windows()
@@ -601,6 +645,7 @@ def status(lines):
         "uptimeSeconds": int(float(read_text("/proc/uptime", "0").split()[0])),
         "idleSeconds": int(time.time() - activity["last"]),
         "agents": agent_states(s, windows),
+        "git": git_info(s),
         "memory": memory_info(),
         "oomKills": session_oom_kills(),
         "windows": windows,

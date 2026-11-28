@@ -1806,6 +1806,65 @@ class CliTest(unittest.TestCase):
         self.assertIn("HTTP 403", err)
         self.assertEqual(len(tokens()), 3)
 
+    def test_peek_warns_about_unpushed_work(self):
+        """VM の作業ツリーに未コミット・未 push があると、GitHub にはまだ無いことを peek が知らせる。"""
+        api = StatusApi()
+        self.addCleanup(api.shutdown)
+        self.mvm("up", "a1")
+        env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}")
+        api.statuses = [dict(self.status(claude="done"), git={"branch": "pmva/a1", "uncommitted": 2, "unpushed": 1})]
+        _, out, _ = self.mvm("peek", "a1", env=env)
+        self.assertIn("!! 未コミット 2 ファイル・未 push 1 コミット (VM を終了しても S3 の保存には残りますが、GitHub にはありません)", out)
+        for git in ({"branch": "pmva/a1", "uncommitted": 0, "unpushed": 0}, None):   # 無ければ何も出さない (git: null は git でない作業場所)
+            api.statuses = [dict(self.status(claude="done"), git=git)]
+            _, out, _ = self.mvm("peek", "a1", env=env)
+            self.assertNotIn("未コミット", out)
+
+    def test_stop_warns_about_unpushed_work_but_still_stops(self):
+        api = StatusApi()
+        self.addCleanup(api.shutdown)
+        env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}")
+        api.statuses = [dict(self.status(claude="done"), git={"branch": "pmva/a1", "uncommitted": 2, "unpushed": 1})]
+        self.mvm("up", "w1", env=env)
+        _, _, err = self.mvm("stop", "w1", env=env)
+        self.assertIn("未コミット 2 ファイル・未 push 1 コミット", err)
+        self.assertIn("保存 (S3) には含まれますが、GitHub にはありません", err)
+        self.assertTrue((self.stub_dir / "microvm-0000.term").exists(), "警告しても止める")
+        self.mvm("up", "w2", env=env)
+        _, _, err = self.mvm("stop", "w2", "--no-save", env=env)
+        self.assertIn("保存もされず、止めると失われます", err)
+        self.assertTrue((self.stub_dir / "microvm-0001.term").exists())
+        api.statuses = [self.status(claude="done")]   # git が無い (古いイメージ) / きれいなときは黙る
+        self.mvm("up", "w3", env=env)
+        _, _, err = self.mvm("stop", "w3", env=env)
+        self.assertNotIn("未コミット", err)
+
+    def test_result_reads_last_answer_from_s3_when_vm_is_gone(self):
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            closed = s.getsockname()[1]
+        env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{closed}")   # VM に届かない
+        self.mvm("up", "a1", env=env)
+        _, _, err = self.mvm("result", "a1", env=env, check=False)
+        self.assertIn("mvm up a1 --restore latest", err, "S3 にも無ければ、次の一手を添えたエラー")
+        obj = self.stub_dir / "s3" / "pmva-bucket" / "workspaces" / "a1" / "result.json"
+        obj.parent.mkdir(parents=True)
+        obj.write_text(json.dumps({"name": "a1", "updatedAt": 1793201909.5, "agents": {
+            "claude": {"agent": "claude", "state": "done", "since": 1793201900.0, "text": "PR を作りました: #12"}}},
+            ensure_ascii=False), encoding="utf-8")
+        for terminated in (False, True):   # 届かないだけのとき / 終了済みのとき
+            if terminated:
+                self.mvm("stop", "a1", "--no-save", env=env)
+            rc, out, _ = self.mvm("result", "a1", env=env)
+            self.assertIn("PR を作りました: #12", out)
+            self.assertRegex(out, r"\(VM は終了しています。\d{4}-\d{2}-\d{2} \d{2}:\d{2} に記録した最後の応答\)"
+                             if terminated else r"\(VM に届きません。\d{4}-\d{2}-\d{2} \d{2}:\d{2} に記録した最後の応答\)")
+            _, out, _ = self.mvm("result", "a1", "--agent", "claude", "--json", env=env)
+            r = json.loads(out)
+            self.assertEqual((r["text"], r["state"], r["source"], r["updatedAt"]), ("PR を作りました: #12", "done", "s3", 1793201909.5))
+        rc, _, err = self.mvm("result", "a1", "--agent", "codex", env=env, check=False)
+        self.assertEqual(rc, 1, "S3 の記録にないエージェント")
+
     def test_vm_commands_on_terminated_vm_point_to_up(self):
         self.mvm("up", "t1")
         self.mvm("stop", "t1", "--no-save")
@@ -3471,6 +3530,23 @@ class CliTest(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("fleet", p.stdout.decode("utf-8", "replace"))
 
+    def test_launcher_without_usable_python(self):
+        # Python が無い、または 3.9 未満 (python3 が失敗する) とき、案内を出して終了コード 1 で止まる
+        empty = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, empty, True)
+        if IS_WINDOWS:
+            cmd = [os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "cmd.exe"), "/c", str(ROOT / "bin" / "mvm.cmd"), "--help"]
+            env = dict(self.env, PATH=os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32"))
+        else:
+            fake = empty / "python3"
+            fake.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            fake.chmod(0o755)
+            cmd = ["/bin/sh", str(ROOT / "bin" / "mvm"), "--help"]
+            env = dict(self.env, PATH=str(empty))
+        p = subprocess.run(cmd, capture_output=True, env=env, stdin=subprocess.DEVNULL, timeout=60)
+        self.assertEqual(p.returncode, 1, p.stdout)
+        self.assertIn("Python 3.9 以上".encode("utf-8"), p.stderr)
+
     def test_cost(self):
         _, out, _ = self.mvm("cost", "--agents", "2")
         self.assertIn("2 台", out)
@@ -3559,7 +3635,7 @@ class DockerfileVersionsTest(unittest.TestCase):
 
 
 class InstallScriptTest(unittest.TestCase):
-    """scripts/install.sh / install.ps1 が config.env を作り、エイリアスを 1 行だけ登録すること。"""
+    """scripts/install.sh が config.env を作ってエイリアスを 1 行だけ登録し、install.ps1 が config.env を作ること。"""
 
     def run_twice(self, cmd, rc, env):
         for _ in range(2):
@@ -3584,19 +3660,32 @@ class InstallScriptTest(unittest.TestCase):
         self.assertEqual(last, f"alias mvm='{ROOT / 'bin' / 'mvm'}' # pmva")
         self.assertTrue((self.tmp / "config.env").exists())
 
-    def test_install_ps1(self):
+    def ps_shell(self):
         shell = shutil.which("powershell") if IS_WINDOWS else None
         shell = shell or shutil.which("pwsh")
         if not shell:
             self.skipTest("PowerShell がありません")
+        return shell
+
+    def test_install_ps1(self):
+        # -NoPath: 本物のユーザー PATH (レジストリ) は書き換えない。古いエイリアスの行だけが消える
         rc = self.tmp / "profile.ps1"
-        rc.write_text("# existing\n", encoding="utf-8")
-        cmd = [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ROOT / "scripts" / "install.ps1"),
-               "-ProfilePath", str(rc)]
-        text, last = self.run_twice(cmd, rc, self.env)
-        self.assertTrue(text.startswith(b"\xef\xbb\xbf"), "Windows PowerShell 5.1 向けに BOM 付きで書く")
-        self.assertTrue(last.startswith("Set-Alias mvm '") and last.endswith("mvm.cmd' # pmva"), last)
+        rc.write_text("# existing\nSet-Alias mvm 'C:\\old\\bin\\mvm.cmd' # pmva\n", encoding="utf-8")
+        cmd = [self.ps_shell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ROOT / "scripts" / "install.ps1"),
+               "-ProfilePath", str(rc), "-NoPath"]
+        for _ in range(2):
+            p = subprocess.run(cmd, capture_output=True, env=self.env, timeout=120)
+            self.assertEqual(p.returncode, 0, p.stdout.decode("utf-8", "replace") + p.stderr.decode("utf-8", "replace"))
+        self.assertEqual(rc.read_bytes().decode("utf-8-sig").splitlines(), ["# existing"])
         self.assertTrue((self.tmp / "config.env").exists())
+
+    def test_install_ps1_adds_bin_to_user_path(self):
+        # 実際にレジストリを書き換えるテストは書かない。登録の仕組みが入っていることだけ確かめる
+        text = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("[switch]$NoPath", text)
+        self.assertIn("OpenSubKey('Environment'", text)
+        self.assertIn("DoNotExpandEnvironmentNames", text)
+        self.assertIn("Join-Path $Root 'bin'", text)
 
 
 if __name__ == "__main__":

@@ -23,10 +23,17 @@ missing=0
 ok() { echo "[OK] $1"; }
 ng() { echo "[NG] $1"; missing=$((missing + 1)); }
 
-if command -v python3 >/dev/null 2>&1 && python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))'; then
-  ok "$(python3 --version 2>&1)"
+# bin/mvm と同じ順 (python3 → python) で探す
+found=""
+for py in python3 python; do
+  if command -v "$py" >/dev/null 2>&1 && "$py" -c 'import sys; sys.exit(sys.version_info < (3, 9))' >/dev/null 2>&1; then
+    found=$py; break
+  fi
+done
+if [ -n "$found" ]; then
+  ok "$($found --version 2>&1)"
 else
-  ng "Python 3.9 以上が見つかりません (macOS: brew install python / https://www.python.org/downloads/)"
+  ng "Python 3.9 以上が見つかりません (macOS: brew install python / Linux: sudo apt install python3 など / https://www.python.org/downloads/)"
 fi
 if command -v aws >/dev/null 2>&1; then
   v=$(aws --version 2>&1) || v="error:$(echo "$v" | tail -1)"
@@ -67,6 +74,7 @@ if [ "$ALIAS" = true ]; then
   cat "$tmp" > "$RC"
   rm -f "$tmp"
   ok "エイリアスを登録しました: $RC (新しいターミナルを開くか source $RC で有効になります)"
+  echo "     fish など zsh / bash 以外のシェルでは、エイリアスの代わりに $ROOT/bin を PATH に足してください"
 fi
 
 echo
