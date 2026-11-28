@@ -69,6 +69,9 @@
 - `mvm doctor`: `mvm infra deploy` の直後でも「AWS の構成が、手元のテンプレートと違います」と出ていた。CloudFormation がテンプレートの日本語を `?` に置き換えて保存するため。比べる前に手元の側もそろえるようにした
 - `printf '...' | mvm shell <name>` のように標準入力をパイプやファイルにすると、コマンドは VM で動いても結果が表示されずに終わっていた。読み終えたら Ctrl-D でシェルを終わらせ、VM 側が閉じるまで出力を表示するようにした (`exit` を書かなくても終わる)
 - `mvm renew`: SSH 公開鍵なしで起動した後に鍵を作っても、鍵付きにならなかった (`mvm ssh` は「鍵を用意して `mvm renew`」と案内していた)。renew のときに `SSH_PUBLIC_KEY_FILE` を読み直す
+- `mvm up <名前>` で前回の続きから始めるとき、repo / ブランチと復元しか引き継がず、`--agent codex` で起動したセッションが既定の claude で起動していた (`mvm renew` は前回の設定を丸ごと引き継ぐので、結果が違った)。agent、認証方式とシークレット、`--claude-args` / `--codex-args`、`--model`、`--bedrock-region`、通知、メモリ共有、`--remote-control`、`--no-setup`、`--profile`、`--idle`、`--max-duration` も引き継ぎ (prompt は除く)、コマンドラインの指定を優先する。別の `--agent` を指定したときは認証方式などを引き継がない。引き継いだ agent と repo は 1 行で表示する
+- `mvm up` が、mvm 自身のフォルダで打ったときや origin が無いときに、理由を言わずにリポジトリなしで起動していた。理由と `--repo` で指定できることを表示する
+- 起動中の名前に `mvm up` を打つと、「今のフォルダの origin を使います」と出してから「既に起動しています」で止まっていた。最初に起動中かを確かめ、`mvm peek` / `mvm ssh` / `mvm resume` を案内して止める
 
 ### 変更
 

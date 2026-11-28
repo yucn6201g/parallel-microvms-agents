@@ -1040,6 +1040,32 @@ class CliTest(unittest.TestCase):
         self.assertEqual((a2["repo"], a2["branch"]), ("https://github.com/o/r2.git", "pmva/a2"))
         self.assertNotIn("restore", a2, "保存が無ければ復元しない")
 
+    def test_up_continue_inherits_previous_settings(self):
+        self.previous_session("k1", False, repo="https://github.com/o/r.git", agent="codex", claudeAuth="none",
+                              codexAuth="chatgpt", codexSecret="pmva/codex-auth-json", codexArgs="--x",
+                              claudeModel="m1", notifySecret="pmva/notify-webhook", skipSetup="true",
+                              prompt="前回の指示")
+        self.previous_session("k2", False, repo="https://github.com/o/r.git", agent="codex", codexAuth="chatgpt")
+        _, _, err = self.mvm("up", "k1")
+        self.mvm("up", "k2", "--agent", "claude")
+        k1, k2 = self.payloads()
+        self.assertEqual((k1["agent"], k1["codexAuth"], k1["codexArgs"], k1["claudeModel"]), ("codex", "chatgpt", "--x", "m1"))
+        self.assertEqual(k1["notifySecret"], "pmva/notify-webhook")
+        self.assertEqual(k1["skipSetup"], "true")
+        self.assertNotIn("githubSecret", k1, "前回は GitHub トークンを使っていない")
+        self.assertNotIn("prompt", k1)
+        self.assertIn("agent=codex", err)
+        self.assertEqual((k2["agent"], k2["codexAuth"]), ("claude", "none"), "別のエージェントなら認証は引き継がない")
+
+    def test_up_running_name_stops_before_origin_message(self):
+        self.mvm("up", "r1", "--repo", "https://github.com/o/r.git")
+        rc, _, err = self.mvm("up", "r1", check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("既に起動しています", err)
+        self.assertIn("mvm peek r1", err)
+        self.assertIn("mvm resume r1", err)
+        self.assertNotIn("origin", err)
+
     def test_up_fresh_or_explicit_repo_does_not_continue(self):
         self.previous_session("f1", True, repo="https://github.com/o/r.git", branch="feature/x")
         self.previous_session("e1", True, repo="https://github.com/o/r.git", branch="feature/x")
@@ -1066,7 +1092,9 @@ class CliTest(unittest.TestCase):
         _, out, err = self.mvm("up", "g2", cwd=token)
         self.mvm("up", "g3", "--no-repo", cwd=ssh)
         _, _, err4 = self.mvm("up", "g4", cwd=local)
-        self.mvm("up", "g5", cwd=ROOT)
+        _, _, err5 = self.mvm("up", "g5", cwd=ROOT)
+        self.assertIn("mvm 自身のフォルダ", err5)
+        self.assertIn("--repo", err5)
         g1, g2, g3, g4, g5 = self.payloads()
         self.assertNotIn("repo", g5, "mvm 自身のフォルダで打ったときは mvm のリポジトリを clone しない")
         self.assertEqual((g1["repo"], g1["branch"]), ("https://github.com/Owner/Repo.git", "pmva/g1"))
