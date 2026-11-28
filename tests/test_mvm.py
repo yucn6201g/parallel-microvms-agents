@@ -919,6 +919,10 @@ class CliTest(unittest.TestCase):
         cfg.write_text(
             "AWS_REGION=ap-northeast-1\nMEMORY_MIB=4096\nMAX_AGENTS=10\nUSE_GITHUB_TOKEN=true\n"
             "SSH_PUBLIC_KEY_FILE=~/.ssh/id_ed25519.pub\nGIT_USER_NAME=山田 太郎\n", encoding="utf-8")
+        # mvm up は起動の前にシークレットの登録を確かめるので、既定では全部登録済みにする (無い場合は remove_secrets で消す)
+        self.stub_dir.mkdir(parents=True)
+        for kind in mvm.SECRET_NAME_PREFIXES:
+            (self.stub_dir / f"secret-pmva_{kind}").write_text("x", encoding="utf-8")
         self.env = dict(os.environ)
         self.env.update({
             "PATH": str(bindir) + os.pathsep + os.environ.get("PATH", ""),
@@ -936,6 +940,10 @@ class CliTest(unittest.TestCase):
         recorder.write_text(f"import sys\nopen({str(self.opened_url)!r}, 'w', encoding='utf-8').write(sys.argv[1])\n",
                             encoding="utf-8")
         self.env["BROWSER"] = " ".join(shlex.quote(Path(p).as_posix()) for p in (sys.executable, recorder)) + " %s"
+
+    def remove_secrets(self):
+        for p in self.stub_dir.glob("secret-*"):
+            p.unlink()
 
     def mvm(self, *args, input=None, env=None, check=True, cwd=None):
         p = subprocess.run([sys.executable, str(MVM), *args], input=input, capture_output=True,
@@ -968,6 +976,26 @@ class CliTest(unittest.TestCase):
         self.assertTrue(args[args.index("--run-hook-payload") + 1].startswith("file://"))
         self.assertEqual(list(Path(self.env["PMVA_STATE_DIR"]).glob("payload-*")), [], "一時ファイルが残っていない")
         self.assertEqual(json.loads(args[args.index("--idle-policy") + 1])["maxIdleDurationSeconds"], 1800)
+
+    def test_up_stops_before_launch_when_secret_missing(self):
+        """シークレットが無いまま起動すると、課金が始まってから bootstrap が失敗する。起動の前に止める。"""
+        self.remove_secrets()
+        rc, _, err = self.mvm("up", "s1", check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("シークレット pmva/claude-oauth-token がありません", err)
+        self.assertIn("mvm secret set claude-oauth-token", err)
+        self.assertEqual(self.payloads(), [])
+        rc, _, err = self.mvm("up", "s1", "--claude-auth", "oauth-token", "--claude-secret", "pmva/claude-mine", check=False)
+        self.assertIn("mvm secret set claude-oauth-token --name pmva/claude-mine", err)
+        rc, _, err = self.mvm("up", "s1", "--claude-auth", "interactive", check=False)
+        self.assertIn("シークレット pmva/github-token がありません", err, "GitHub のトークンも確かめる")
+        self.mvm("up", "s1", "--claude-auth", "interactive", "--no-github")   # 認証が interactive なら Claude のシークレットは不要
+        self.assertEqual(len(self.payloads()), 1)
+
+    def test_fleet_checks_each_secret_once(self):
+        self.mvm("fleet", "2", env=dict(self.env, PMVA_STUB_QUOTA_GB="100"))
+        described = [c[c.index("--secret-id") + 1] for c in self.calls() if c[:2] == ["secretsmanager", "describe-secret"]]
+        self.assertEqual(sorted(described), ["pmva/claude-oauth-token", "pmva/github-token"])
 
     def test_help_groups_common_commands(self):
         """mvm -h は約 30 個のコマンドを平たく並べていた。よく使うものとその他に分け、全部を 1 回ずつ載せる。"""
@@ -1452,6 +1480,30 @@ class CliTest(unittest.TestCase):
         self.assertIn("MEMORY_MIB=2048 にすれば同じクォータで 4 台", out)
         self.assertIn("希望値: 40 GB", out)
         self.assertIn("ap-northeast-1", out)
+
+    def test_doctor_is_ng_when_no_vm_fits_quota(self):
+        rc, out, _ = self.mvm("doctor", env=dict(self.env, PMVA_STUB_QUOTA_GB="2"), check=False)   # 4GB の VM が 1 台も入らない
+        self.assertIn("NG   MicroVM のメモリ上限 2GB → 4GB の VM を同時に 0 台まで", out)
+        self.assertNotEqual(rc, 0)
+
+    def test_doctor_shows_aws_error_hint_when_auth_fails(self):
+        env = dict(self.env, PMVA_STUB_ERROR="The SSO session associated with this profile has expired or is otherwise invalid",
+                   PMVA_STUB_ERROR_CMDS="sts get-caller-identity")
+        rc, out, _ = self.mvm("doctor", env=env, check=False)
+        self.assertIn("NG   AWS の認証を確かめられません: AWS の認証が切れています → aws sso login", out)
+        env["PMVA_STUB_ERROR"] = "Could not connect to the endpoint URL"
+        _, out, _ = self.mvm("doctor", env=env, check=False)
+        self.assertIn("AWS に接続できません", out)
+
+    def test_doctor_warns_when_safety_nets_are_off(self):
+        _, out, _ = self.mvm("doctor", check=False)
+        self.assertIn("!!   止め忘れ・使いすぎの安全網が無効です (config.env の NIGHTLY_STOP_TIME / BUDGET_MONTHLY_USD", out)
+        self.add_config("NIGHTLY_STOP_TIME=23:00\n")
+        _, out, _ = self.mvm("doctor", check=False)
+        self.assertIn("安全網が無効です", out, "予算が 0 のままなら出す")
+        self.add_config("BUDGET_MONTHLY_USD=100\n")
+        _, out, _ = self.mvm("doctor", check=False)
+        self.assertNotIn("安全網が無効です", out)
 
     def test_service_quota_exceeded_points_to_list_microvms(self):
         env = dict(self.env, PMVA_STUB_ERROR="An error occurred (ServiceQuotaExceededException) when calling the RunMicrovm operation",
@@ -2453,6 +2505,16 @@ class CliTest(unittest.TestCase):
         self.assertIn("!!   イメージの元 (image/ と IMAGE_* などの設定) が、最後にビルドしたときから変わっています", out)
         self.assertIn("mvm image build", out)
 
+    def test_image_build_stops_when_status_calls_keep_failing(self):
+        """完成待ちで AWS の呼び出しが 3 回続けて失敗したら、ドットを出し続けずに理由を出して止める (待ちは 15 秒 x 2)。"""
+        env = dict(self.env, PMVA_STUB_ERROR="Token has expired and refresh failed",
+                   PMVA_STUB_ERROR_CMDS="lambda-microvms get-microvm-image-version")
+        rc, _, err = self.mvm("image", "build", env=env, check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("ビルドの状態を取得できません: AWS の認証が切れています", err)
+        self.assertIn("ビルドは AWS 側で続いています", err)
+        self.assertIn("mvm image status", err)
+
     def deleted_image_versions(self):
         calls = [json.loads(l) for l in (self.stub_dir / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
         return [c[c.index("--image-version") + 1] for c in calls if c[:2] == ["lambda-microvms", "delete-microvm-image-version"]]
@@ -2576,6 +2638,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("--keep は 1 以上", err)
 
     def test_doctor_checks_default_auth(self):
+        self.remove_secrets()
         _, out, _ = self.mvm("doctor", check=False)
         self.assertIn("!!   既定の認証方式 (DEFAULT_CLAUDE_AUTH=oauth-token) のシークレット pmva/claude-oauth-token がありません。"
                       "mvm secret set claude-oauth-token で登録してください", out)
