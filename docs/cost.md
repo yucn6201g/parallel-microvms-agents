@@ -90,3 +90,4 @@
 - `mvm cost --actual --days 7 --daily` で Cost Explorer の実績をサービス別・日別に表示する (アカウント全体の金額。反映は最大 24 時間遅れる。操作用ポリシーに `ce:GetCostAndUsage` を含めている)
 - Cost Explorer のコンソールでサービス「Lambda」の利用料を日別に確認する
 - AWS Budgets で月額の予算アラートを設定する (例: $100 で通知)
+- `mvm watch` / `mvm ui` の一覧の「費用(上限)」は、今の VM を起動してからの経過時間で計算した上限の目安 (税抜。サスペンド中の分は引けない)。止め忘れに気づくためのもので、実績は `mvm cost --actual` で確かめる
