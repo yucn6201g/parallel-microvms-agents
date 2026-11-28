@@ -173,7 +173,7 @@ MicroVM は、受信通信が `IDLE_MAX_SECONDS` (既定 30 分) 無いと一時
 
 - VM が、画面の変化や CPU の使用から最後に作業した時刻を S3 に書く
 - Lambda 関数 `pmva-keepalive` が `KEEPALIVE_RATE_MINUTES` (既定 5 分) ごとに動き、最後の作業から `KEEPALIVE_ACTIVE_SECONDS` (既定 900 秒) 以内の VM にだけ通信を送る
-- 作業が終わった VM には何も送らないので、15〜45 分ほどで一時停止する
+- 作業が終わった VM には何も送らないので、15〜45 分で一時停止する
 
 `KEEPALIVE_RATE_MINUTES=0` で無効になります。費用は月 $0.1 程度です。仕組みの詳細は [architecture.md](architecture.md#キープアライブ-作業中の-vm-だけを起こし続ける) にあります。
 
@@ -183,7 +183,8 @@ MicroVM は、受信通信が `IDLE_MAX_SECONDS` (既定 30 分) 無いと一時
 
 - 一時停止中の VM も、保存のために一度再開してから終了する
 - 保存に失敗した VM も終了する (終了時のフックがもう一度保存を試みる)
-- 空にすると無効になる。AWS 上での動作はまだ確認していない
+- 空にすると無効になる
+- AWS 上での動作は確認済み: 23:00 に動いていた VM もサスペンド中の VM も、保存してから終了した ([poc-checklist.md](poc-checklist.md))
 
 ### 予算アラート
 

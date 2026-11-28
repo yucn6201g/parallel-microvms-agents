@@ -18,7 +18,7 @@
 
 | 症状 | 確認すること |
 |---|---|
-| `mvm image build` が FAILED | `mvm logs` を見る。`CONTAINER_BUILD_FAILED` なら Dockerfile (や `IMAGE_EXTRA_PACKAGES`) の問題。手元で `docker build --platform linux/arm64 image/` を試す |
+| `mvm image build` が FAILED | `mvm logs` を見る。`CONTAINER_BUILD_FAILED` なら Dockerfile (や `IMAGE_EXTRA_PACKAGES`) の問題。原因を絞りたいときだけ、手元で `docker build --platform linux/arm64 image/` を試す (**デバッグ用・任意**。docker が無くても `mvm` は使えます。イメージのビルドは AWS 側で行います) |
 | `mvm up` で「メモリ上限を超えます」 | `mvm doctor` でクォータと起動できる台数を確かめる。使っていない VM を止めるか、表示される「`MEMORY_MIB=2048` にした場合の台数」と申請文で、[引き上げを申請](setup.md#前提の確認とクォータ)する。AWS が `ServiceQuotaExceededException` で拒否したときは、別の PC や別のイメージの VM も数に入るので `aws lambda-microvms list-microvms` で確かめる |
 | `mvm up` で AccessDenied | 操作者に `pmva-operator` ポリシーが付いているか (`lambda:PassNetworkConnector`、`iam:PassRole` が要る)。足りない操作は [setup.md](setup.md#操作用の-iam-ユーザー) の手順で足す |
 | bootstrap が `failed` | シークレットを登録したか (`mvm secret ls`)、名前が既定と違うなら `--claude-secret` などで指定したか。ログは `bootstrap.log` |
@@ -30,7 +30,7 @@
 
 | 症状 | 確認すること |
 |---|---|
-| `mvm peek` が 502 | 起動直後なら数秒待つ。続くなら `mvm shell` で入り、`bootstrap.log` を見る |
+| `mvm peek` が 502 | 起動直後なら約 10 秒待つ。続くなら `mvm shell` で入り、`bootstrap.log` を見る |
 | `peek` / `send` / `result` / `ssh` / `shell` / `top` などが「<name> は終了しています」「サスペンド中です」「起動の途中です」 | VM が操作を受け付けない状態。案内のとおり、終了していれば `mvm up <name>` (保存した時点の続きから始まる)、サスペンド中なら `mvm resume <name>`、起動中なら `mvm wait <name>` |
 | `mvm send` が「終了した状態なので送りません」 | エージェントが終了してシェルに戻っている (`exited`)。送ると文字がシェルに入る。`mvm renew <name>` で作り直す (シェルに送るなら `--window shell`) |
 | `mvm result` が「まだ作業中です」(終了コード 2) | エージェントが作業中。`mvm wait <name>` で終わるまで待つ |
