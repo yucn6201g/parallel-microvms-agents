@@ -19,6 +19,9 @@ D.mkdir(parents=True, exist_ok=True)
 a = sys.argv[1:]
 with open(D / "calls.jsonl", "a", encoding="utf-8") as f:
     f.write(json.dumps(a, ensure_ascii=False) + "\n")
+if os.environ.get("AWS_PROFILE"):   # profiles.jsonl: [使われたプロファイル, 呼び出しの先頭 2 語]
+    with open(D / "profiles.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps([os.environ["AWS_PROFILE"], a[:2]]) + "\n")
 
 
 def opt(k):

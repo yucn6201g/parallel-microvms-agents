@@ -32,8 +32,8 @@ mvm setup [--profile <プロファイル名>]
 
 | 順番 | 済んでいないと判断するとき | 実行すること |
 |---|---|---|
-| 1 | スタック (`STACK_NAME`) が無い | `mvm infra deploy`。断ると中止する。スタックがあれば、`mvm doctor` と同じ確認の結果 (テンプレートとの違いなど) を表示するだけ |
-| 2 | 今の認証情報がルートユーザーか管理者権限 (`AdministratorAccess`) | `mvm infra operator` (ユーザー `pmva-operator`、プロファイル `pmva`)。プロファイル `pmva` が既にあれば、作らずに `config.env` をそれに切り替える。切り替えた後、新しいキーが使えるまで最長 1 分待つ |
+| 1 | スタック (`STACK_NAME`) が無い | 端末なら先に月の予算アラート (`BUDGET_MONTHLY_USD` が 0 のときだけ。金額と通知先を聞いて `config.env` に書く。Enter で作らない) を聞き、`mvm infra deploy`。断ると中止する。スタックがあれば、`mvm doctor` と同じ確認の結果 (テンプレートとの違いなど) を表示するだけ。deploy のやり直しが要るときは、そのまま打てる `mvm infra deploy --admin-profile ...` を残りの手順に出す |
+| 2 | 今の認証情報がルートユーザーか管理者権限 (`AdministratorAccess`) | `mvm infra operator` (ユーザー `pmva-operator`、プロファイル `pmva`)。プロファイル `pmva` が既にあれば、作らずに `config.env` をそれに切り替える。切り替えた後、新しいキーが使えるまで最長 1 分待つ。認証情報が SSO (`AWSReservedSSO_` のロール) のときは長期のアクセスキーを作らず、権限セットを作って `AWS_PROFILE` に書く案内を残りの手順に出す |
 | 3 | 既定の認証方式・`USE_GITHUB_TOKEN`・`NOTIFY_WEBHOOK` に要るシークレットが無い | 値の用意のしかたを表示して `mvm secret set <kind>`。`github-token` を断ると `config.env` を `USE_GITHUB_TOKEN=false` にする |
 | 4 | `SSH_PUBLIC_KEY_FILE` が無い | `ssh-keygen -t ed25519` (`ssh-keygen` があるときだけ) |
 | 5 | イメージ (`IMAGE_NAME`) が無いか、使える版が無いか、`image/` や設定が最後のビルドから変わった | `mvm image build` |
@@ -41,6 +41,8 @@ mvm setup [--profile <プロファイル名>]
 
 - `--profile`: そのプロファイルを `config.env` の `AWS_PROFILE` に書いてから始めます。初回は管理者のプロファイルを渡します (1 と 2 に管理者の権限が要るため)。AWS CLI の設定にそのプロファイルが無ければ、何も書かずに止まります
 - AWS の認証情報が無い・切れているときは、理由と `mvm setup --profile <管理者>` を案内して止まります
+- 認証の直後に `aws lambda-microvms list-managed-microvm-images` を 1 回呼び、失敗したら (AWS CLI が古い、またはリージョンが未対応) その理由と `aws --version` での確認を案内して止まります
+- 端末で、`DEFAULT_AGENT` / `DEFAULT_CLAUDE_AUTH` / `DEFAULT_CODEX_AUTH` が既定のまま (Claude の Pro/Max) で、その方式のシークレットがまだ無いときは、手順 1 の前に認証方式を番号で聞きます (1 Pro/Max、2 Anthropic の API キー、3 Amazon Bedrock、4 Codex の ChatGPT)。選んだ結果を `config.env` に書き、Enter は 1 です。すでに変えてあるときと、端末でないときは聞きません
 - 答えを読めない (標準入力が端末ではない) ときは、何もせずに止まります
 - 断った手順や、スタックの確認で `!!` が出た項目があれば、最後に「まだ残っている手順」として一覧します。何も残っていないときだけ「準備ができました」と出します
 - スタックの作成に失敗して出力が無い (`ROLLBACK_COMPLETE` など) ときと、AWS への問い合わせに失敗したときは、作り直しを勧めずに理由を出して止まります
@@ -68,11 +70,13 @@ mvm doctor
 ### infra
 
 ```bash
-mvm infra deploy     # スタックを作成・更新する (管理者の権限で実行)
+mvm infra deploy [--admin-profile <管理者のプロファイル>]    # スタックを作成・更新する (管理者の権限で実行)
 mvm infra outputs    # スタックの出力 (バケット名、ロールの ARN、OperatorPolicyArn など) を表示する
-mvm infra operator [--user <IAM ユーザー名>] [--profile <プロファイル名>]   # 普段使う IAM ユーザーを作る (管理者の権限で実行)
-mvm infra delete     # スタックと S3 バケットの中身を削除する (確認あり)
+mvm infra operator [--user <IAM ユーザー名>] [--profile <プロファイル名>] [--admin-profile <管理者のプロファイル>]   # 普段使う IAM ユーザーを作る (管理者の権限で実行)
+mvm infra delete [--admin-profile <管理者のプロファイル>]    # スタックと S3 バケットの中身を削除する (確認あり)
 ```
+
+- `--admin-profile`: そのコマンドの間だけ、そのプロファイルで AWS CLI を呼びます (`config.env` は書き換えません)。普段用のプロファイルを `config.env` に書いたまま管理者の `deploy` / `delete` をするときに使います。`config.env` の `AWS_PROFILE` は環境変数 `AWS_PROFILE` より優先されるので、PowerShell で `$env:AWS_PROFILE` を設定しても効きません。`--profile` は `operator` が作るプロファイルの名前なので、`deploy` / `delete` に付けるとエラーにして `--admin-profile` を案内します
 
 - `deploy`: CloudFormation のテンプレート (`INFRA_TEMPLATE=full` なら `infra/cloudformation.yaml`、`minimal` なら `infra/cloudformation-minimal.yaml`) を `config.env` の値で作成・更新します。予算アラート・キープアライブ・毎晩の自動停止などの設定は、変更後に `deploy` し直すと反映されます ([config.md](config.md))。前回の削除で残った Lambda 関数があると、先に知らせて止まります
 - `operator`: `pmva-operator` ポリシー (`OperatorPolicyArn`) だけを付けた IAM ユーザー (既定 `pmva-operator`。既にあればそのまま使う) とアクセスキーを作り、AWS CLI のプロファイル (既定 `pmva`) として `~/.aws/credentials` と `~/.aws/config` (`AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE` があればそこ) に書き足して、`config.env` の `AWS_PROFILE` をそのプロファイルに書き換えます。秘密のアクセスキーは画面にもコマンドライン引数にも出しません。同じ名前のプロファイルが既にあるときと、今使っているプロファイルと同じ名前のときは、何も作らずに止まります。ユーザーのアクセスキーが上限 (2 個) のときは、古いキーの消し方を表示して止まります

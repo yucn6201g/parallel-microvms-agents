@@ -2797,6 +2797,94 @@ class CliTest(unittest.TestCase):
         self.assertNotEqual(rc, 0)
         self.assertIn("mvm setup --profile", err)
 
+    SSO_ARN = "arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_Admin_abc123/me@example.com"
+
+    def test_setup_sso_admin_is_pointed_to_permission_set(self):
+        """SSO の管理者には、Enter だけで長期のアクセスキーを作る質問をせず、権限セットを案内する (docs/setup.md)。"""
+        env = self.setup_env(PMVA_STUB_IAM="admin", PMVA_STUB_ARN=self.SSO_ARN)
+        self.stub_dir.mkdir()
+        for kind in ("claude-oauth-token", "github-token"):
+            (self.stub_dir / f"secret-pmva_{kind}").write_text("x", encoding="utf-8")
+        _, _, err = self.mvm("setup", input=b"", env=env)   # 質問が出れば、答えを読めずに止まる
+        self.assertNotIn(["iam", "create-access-key"], [c[:2] for c in self.calls()])
+        self.assertIn("権限セット", err.split("残っている")[-1])
+        self.assertNotIn("準備ができました", err)
+
+    def test_setup_stops_when_lambda_microvms_is_unavailable(self):
+        env = self.setup_env(PMVA_STUB_ERROR="aws: error: argument operation: Invalid choice, valid choices are:",
+                             PMVA_STUB_ERROR_CMDS="lambda-microvms list-managed-microvm-images")
+        rc, _, err = self.mvm("setup", env=env, check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("aws --version", err)
+        self.assertIn("AWS_REGION", err)
+        self.assertNotIn(["cloudformation", "describe-stacks"], [c[:2] for c in self.calls()])
+
+    def test_setup_stale_stack_shows_deploy_command_with_admin_profile(self):
+        self.mvm("infra", "deploy")
+        self.stub_dir.mkdir(exist_ok=True)
+        for kind in ("claude-oauth-token", "github-token"):
+            (self.stub_dir / f"secret-pmva_{kind}").write_text("x", encoding="utf-8")
+        env = self.setup_env(PMVA_STUB_STACK_STATUS="UPDATE_ROLLBACK_COMPLETE")
+        _, _, err = self.mvm("setup", input=b"", env=env)
+        self.assertIn("mvm infra deploy --admin-profile <管理者のプロファイル>", err.split("残っている")[-1])
+        _, _, err = self.mvm("setup", "--profile", "admin", input=b"", env=env)
+        self.assertIn("mvm infra deploy --admin-profile admin", err.split("残っている")[-1])
+
+    def test_infra_admin_profile_applies_only_to_that_command(self):
+        """deploy / operator は --admin-profile のプロファイルで AWS CLI を呼ぶ。config.env は書き換えない。
+        --profile は operator の「作るプロファイル名」なので、deploy では受け付けずに --admin-profile を案内する。"""
+        env = self.setup_env()
+        cfg = Path(self.env["PMVA_CONFIG"])
+        before = cfg.read_text(encoding="utf-8")
+        self.mvm("infra", "deploy", "--admin-profile", "admin", env=env)
+        profiles = [json.loads(x) for x in (self.stub_dir / "profiles.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertIn(["admin", ["cloudformation", "deploy"]], profiles)
+        self.assertEqual({p[0] for p in profiles}, {"admin"})
+        self.mvm("infra", "operator", "--admin-profile", "admin", "--profile", "ops", env=env)
+        self.assertIn(["admin", ["iam", "create-user"]], [json.loads(x) for x in (
+            self.stub_dir / "profiles.jsonl").read_text(encoding="utf-8").splitlines()])
+        self.assertIn("[ops]", (Path(self.tmp.name) / "creds").read_text(encoding="utf-8"))
+        self.assertEqual(cfg.read_text(encoding="utf-8").replace("AWS_PROFILE=ops\n", ""), before)
+        rc, _, err = self.mvm("infra", "deploy", "--profile", "admin", env=env, check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("--admin-profile", err)
+        rc, _, err = self.mvm("infra", "deploy", "--admin-profile", "nope", env=env, check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("aws configure sso --profile nope", err)
+
+    def test_setup_asks_auth_and_budget_only_on_a_terminal(self):
+        """認証方式と予算は、端末で、かつ既定のままのときだけ聞いて config.env に書く。"""
+        cfg = Path(self.tmp.name) / "inproc.env"
+
+        def run(fn, answers, tty=True, **conf):
+            cfg.write_text("AWS_REGION=ap-northeast-1\n", encoding="utf-8")
+            with mock.patch.dict(mvm.C, dict(mvm.DEFAULTS, **conf)), mock.patch.object(mvm, "CONFIG_FILE", cfg), \
+                    mock.patch.object(mvm, "aws", return_value=None), \
+                    mock.patch.object(mvm.sys, "stdin") as stdin, mock.patch("builtins.input", side_effect=answers) as inp:
+                stdin.isatty.return_value = tty
+                fn()
+                return mvm.parse_env_file(cfg), inp.call_count
+
+        written, asked = run(mvm.setup_auth_choice, ["2"])
+        self.assertEqual((written["DEFAULT_CLAUDE_AUTH"], asked), ("api-key", 1))
+        written, _ = run(mvm.setup_auth_choice, ["3"])
+        self.assertEqual(written["DEFAULT_CLAUDE_AUTH"], "bedrock")
+        written, _ = run(mvm.setup_auth_choice, ["4"])
+        self.assertEqual((written["DEFAULT_AGENT"], written["DEFAULT_CODEX_AUTH"]), ("codex", "chatgpt"))
+        written, _ = run(mvm.setup_auth_choice, [""])
+        self.assertNotIn("DEFAULT_CLAUDE_AUTH", written, "Enter は既定 (Pro/Max) のまま")
+        for kw in ({"tty": False}, {"DEFAULT_CLAUDE_AUTH": "api-key"}, {"DEFAULT_AGENT": "codex"}):
+            written, asked = run(mvm.setup_auth_choice, [], **kw)
+            self.assertEqual((asked, written), (0, {"AWS_REGION": "ap-northeast-1"}), kw)
+        written, asked = run(mvm.setup_budget, ["50", "me@example.com"])
+        self.assertEqual((written["BUDGET_MONTHLY_USD"], written["BUDGET_EMAIL"], asked), ("50", "me@example.com", 2))
+        for answers in ([""], ["abc"], ["50", "not-an-address"]):
+            written, _ = run(mvm.setup_budget, answers)
+            self.assertNotIn("BUDGET_MONTHLY_USD", written, answers)
+        for kw in ({"tty": False}, {"BUDGET_MONTHLY_USD": "30"}, {"INFRA_TEMPLATE": "minimal"}):
+            written, asked = run(mvm.setup_budget, [], **kw)
+            self.assertEqual(asked, 0, kw)
+
     SSO_EXPIRED = ("Error when retrieving token from sso: Token has expired and refresh failed\n")
 
     ACCESS_DENIED = ("\nAn error occurred (AccessDeniedException) when calling the DescribeSecret operation: User: "
