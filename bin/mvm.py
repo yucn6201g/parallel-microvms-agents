@@ -4148,12 +4148,12 @@ def add_up_options(p):
 COMMON_COMMANDS = ("setup", "up", "ui", "ls", "send", "result", "ssh", "stop")
 
 
-def command_lines(parser, names=None):
+def command_lines(parser, names=None, numbered=False):
     """サブコマンドの名前と help を 1 行ずつ。names を省くと COMMON_COMMANDS 以外の全部。"""
     sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
     helps = {a.dest: a.help for a in sub._choices_actions}   # help の無い内部用 (_ssh-proxy) は入らない
     names = names or [n for n in helps if n not in COMMON_COMMANDS]
-    return "".join(f"  {n:<13} {helps[n]}\n" for n in names)
+    return "".join(f"  {f'{i}. ' if numbered else ''}{n:<13} {helps[n]}\n" for i, n in enumerate(names, 1))
 
 
 class MvmParser(argparse.ArgumentParser):
@@ -4200,8 +4200,60 @@ def cmd_home(parser):
         sys.stdout.flush()   # 一覧を出し切ってから警告を出す
         for line in unknown_notes(unknown):
             print(line, file=sys.stderr)
+    if CONFIG_FILE.exists() and sys.stdin.isatty() and sys.stdout.isatty():
+        print(f"\nよく使うコマンド:\n{command_lines(parser, COMMON_COMMANDS, numbered=True)}\n全部のコマンド: mvm -h")
+        return home_menu(parser)
     print(f"\nよく使うコマンド:\n{command_lines(parser, COMMON_COMMANDS)}\n全部のコマンド: mvm -h")
     return 0
+
+
+ARG_LABELS = {"name": "名前", "text": "指示"}
+
+
+def ask_args(cmd):
+    """そのコマンドに必須の位置引数を 1 つずつ聞く。空の答えなら None (やめる)。"""
+    argv = []
+    for a in cmd._actions:
+        if a.option_strings or a.nargs in ("?", "*", argparse.REMAINDER):
+            continue
+        hint = f" ({' / '.join(a.choices)})" if a.choices else ""
+        if a.dest == "name" and session_names():
+            hint = f" (今のセッション: {', '.join(session_names())})"
+        v = input(f"{ARG_LABELS.get(a.dest, a.metavar or a.dest)}{hint}: ").strip()
+        if not v:
+            return None
+        if v.startswith("-") and "--" not in argv:
+            argv.append("--")   # "-" で始まる指示をオプションと取り違えないように
+        argv.append(v)
+    return argv
+
+
+def home_menu(parser):
+    """端末で引数なしの mvm: よく使うコマンドを番号か名前の頭で選び、要る引数を聞いて実行する。"""
+    sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    names = list(COMMON_COMMANDS) + [n for n in sub.choices if n not in COMMON_COMMANDS and not n.startswith("_")]
+    try:
+        while True:
+            ans = input("番号か名前の頭で選ぶ (/ を付けてもよい。Enter で終わる): ").strip().lstrip("/")
+            if not ans:
+                return 0
+            if ans.isdigit() and 1 <= int(ans) <= len(COMMON_COMMANDS):
+                hits = [COMMON_COMMANDS[int(ans) - 1]]
+            else:
+                hits = [ans] if ans in names else [n for n in names if n.startswith(ans)]
+            if len(hits) == 1:
+                break
+            print(f"候補: {' / '.join(hits)}" if hits
+                  else f"{ans} で始まるコマンドはありません。全部のコマンドは mvm -h で見られます")
+        rest = ask_args(sub.choices[hits[0]])
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return 0
+    if rest is None:
+        return 0
+    argv = [hits[0], *rest]
+    print("実行: mvm " + " ".join(shlex.quote(a) for a in argv), flush=True)
+    return main(argv)
 
 
 def build_parser():

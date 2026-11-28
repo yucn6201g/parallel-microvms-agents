@@ -858,6 +858,45 @@ class WatchLogTest(unittest.TestCase):
 
 # ---------------------------------------------------------------- CLI (サブプロセス) のテスト
 
+class HomeMenuTest(unittest.TestCase):
+    """端末で引数なしの mvm を打つと、よく使うコマンドを番号か名前の頭で選び、要る引数を聞いて実行する。"""
+    def run_menu(self, *answers):
+        ran = []
+        with mock.patch("builtins.input", side_effect=list(answers)) as ask, \
+                mock.patch.object(mvm, "main", side_effect=lambda argv: ran.append(argv) or 0), \
+                mock.patch.object(mvm, "session_names", return_value=["a1", "b2"]), \
+                mock.patch("sys.stdout", new_callable=__import__("io").StringIO) as out:
+            code = mvm.home_menu(mvm.build_parser())
+        self.prompts = [c.args[0] for c in ask.call_args_list]
+        return code, ran, out.getvalue()
+
+    def test_number_then_asks_required_args(self):
+        n = mvm.COMMON_COMMANDS.index("send") + 1
+        code, ran, out = self.run_menu(str(n), "a1", '"日本語" の指示')
+        self.assertEqual(ran, [["send", "a1", '"日本語" の指示']])
+        self.assertIn("名前 (今のセッション: a1, b2): ", self.prompts, "名前を聞くときは今のセッションを見せる")
+        self.assertEqual(self.run_menu(str(n), "a1", "-h")[1], [["send", "a1", "--", "-h"]], "- で始まる指示")
+        self.assertIn("実行: mvm send a1 ", out, "同じ意味のコマンドを見せて覚えられるようにする")
+
+    def test_prefix_slash_and_exact_name(self):
+        self.assertEqual(self.run_menu("/ui")[1], [["ui"]])
+        self.assertEqual(self.run_menu("stop", "a1")[1], [["stop", "a1"]], "stop-all もあるが完全一致を優先する")
+        self.assertEqual(self.run_menu("peek", "a1")[1], [["peek", "a1"]], "よく使う 8 個以外も名前なら選べる")
+
+    def test_ambiguous_or_unknown_asks_again(self):
+        code, ran, out = self.run_menu("s", "zzz", "ls")
+        self.assertEqual(ran, [["ls"]])
+        self.assertRegex(out, r"候補:.*setup.*send.*ssh.*stop", "s で始まるものを並べて聞き直す")
+        self.assertIn("zzz", out)
+
+    def test_empty_answer_quits_without_running(self):
+        self.assertEqual(self.run_menu("")[:2], (0, []))
+        self.assertEqual(self.run_menu("up", "")[:2], (0, []), "引数を空にしたらやめる")
+        with mock.patch("builtins.input", side_effect=EOFError), mock.patch.object(mvm, "main") as m:
+            self.assertEqual(mvm.home_menu(mvm.build_parser()), 0)
+        m.assert_not_called()
+
+
 class CliTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
