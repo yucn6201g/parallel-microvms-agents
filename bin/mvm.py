@@ -459,6 +459,29 @@ def clear_tokens(name):
         p.unlink()
 
 
+def vm_unavailable_hint(name):
+    """VM が操作を受け付けない状態なら、状態に合った次の一手の文。使える状態や状態不明なら None。"""
+    state = vm_state(name)
+    if state in ("TERMINATED", "GONE"):
+        return f"{name} は終了しています。mvm up {name} で、保存した時点の続きから始められます"
+    if state == "TERMINATING":
+        return f"{name} は終了処理中です。終わってから mvm up {name} で、保存した時点の続きから始められます"
+    if state == "SUSPENDED":
+        return f"{name} はサスペンド中です。mvm resume {name} で再開してからやり直してください"
+    if state not in ("RUNNING", "UNKNOWN"):
+        return f"{name} は起動の途中です ({state})。mvm wait {name} で準備が終わるのを待ってからやり直してください"
+    return None
+
+
+def microvm_token(name, command, *opts):
+    """create-microvm-auth-token / create-microvm-shell-auth-token を呼ぶ。失敗したら VM の状態に合った案内で終わる。"""
+    r = lmv(command, "--microvm-identifier", load_session(name)["microvmId"], *opts, check=False)
+    if r is None:
+        err = last_aws_error().strip()   # vm_state が上書きする前に控える
+        die(vm_unavailable_hint(name) or f"aws lambda-microvms {command} に失敗しました: {err}")
+    return r["authToken"]["X-aws-proxy-auth"]
+
+
 def auth_token(name, port):
     """アプリ用トークン (最大 60 分) をキャッシュして使い回す。"""
     f = STATE_DIR / "tokens" / f"{name}.{port}.json"
@@ -470,9 +493,8 @@ def auth_token(name, port):
                 return cached["token"]
         except (ValueError, KeyError):
             pass
-    r = lmv("create-microvm-auth-token", "--microvm-identifier", load_session(name)["microvmId"],
-            "--expiration-in-minutes", "60", "--allowed-ports", json.dumps([{"port": port}]))
-    token = r["authToken"]["X-aws-proxy-auth"]
+    token = microvm_token(name, "create-microvm-auth-token",
+                          "--expiration-in-minutes", "60", "--allowed-ports", json.dumps([{"port": port}]))
     f.write_text(json.dumps({"exp": now + 3600, "token": token}), encoding="utf-8")
     os.chmod(f, 0o600)
     return token
@@ -498,14 +520,14 @@ def vm_api(name, method, path, body=None, timeout=30):
         try:
             return json.loads(text)
         except ValueError:
-            die(f"{name}: HTTP {e.code} {text[:200]}")
+            die(vm_unavailable_hint(name) or f"{name}: HTTP {e.code} {text[:200]}")
     except (urllib.error.URLError, OSError) as e:
         # サンドボックスがネットワークを止めていると、接続そのものが許されない (EPERM / EACCES)
         reason = getattr(e, "reason", e)
         blocked = isinstance(reason, OSError) and reason.errno in (errno.EPERM, errno.EACCES)
         hint = (f"。エージェント (Codex など) のサンドボックスの中で動かしているなら、ネットワークを許してください{SANDBOX_HINT}"
                 if blocked else "")
-        die(f"{name}: 接続できません ({e}){hint}")
+        die(vm_unavailable_hint(name) or f"{name}: 接続できません ({e}){hint}")
 
 
 # ---------------------------------------------------------------- WebSocket クライアント
@@ -1067,7 +1089,21 @@ def credential_findings(arn):
     return lines or ["  ok   認証情報: 管理者権限ではありません"]
 
 
+def use_admin_profile(name):
+    """このコマンドの間だけ、AWS CLI を管理者のプロファイルで呼ぶ (config.env は書き換えない)。
+    config.env の AWS_PROFILE は環境変数 AWS_PROFILE より優先されるので、一時的に切り替えるにはこちらを使う。"""
+    if not aws_profile_exists(name):
+        die(f"AWS CLI のプロファイル {name} がありません。aws configure sso --profile {name} (SSO) か "
+            f"aws configure --profile {name} で作ってから、もう一度実行してください")
+    C["AWS_PROFILE"] = name
+
+
 def cmd_infra(args):
+    if getattr(args, "profile", None) and args.action != "operator":
+        die("--profile は operator が作るプロファイルの名前です。deploy / delete を管理者のプロファイルで実行するには "
+            f"--admin-profile {args.profile} を使ってください")
+    if getattr(args, "admin_profile", None):
+        use_admin_profile(args.admin_profile)
     if args.action == "deploy":
         template = infra_template()
         declared = template_parameters(template)
@@ -1091,7 +1127,7 @@ def cmd_infra(args):
         log("普段使う IAM ユーザーは mvm infra operator で作れます "
             "(既にあるユーザー / ロールを使うなら、OperatorPolicyArn のポリシーをアタッチしてください)")
     elif args.action == "operator":
-        return infra_operator(args.user, args.profile)
+        return infra_operator(args.user, args.profile or "pmva")
     elif args.action == "outputs":
         (STATE_DIR / "stack-outputs.json").unlink(missing_ok=True)
         stack_output("ArtifactBucketName")
@@ -1207,7 +1243,7 @@ def infra_operator(user, profile):
         f"config.env を AWS_PROFILE={profile} に切り替えました")
     log("10 秒ほど待ってから mvm doctor で確かめてください (新しいキーが使えるまで少しかかります)")
     log("管理者のアクセスキーをこのために作った場合は、IAM コンソールから削除してください。"
-        "infra deploy をやり直すときは config.env の AWS_PROFILE を管理者のものに戻します")
+        "infra deploy をやり直すときは mvm infra deploy --admin-profile <管理者のプロファイル> を使います")
     return 0
 
 
@@ -1231,6 +1267,66 @@ def ask(prompt):
     return ans.strip().lower() not in ("n", "no")
 
 
+def ask_line(prompt):
+    """端末のときだけ 1 行聞く。端末ではない・答えを読めないときは None (聞かずに既定のまま進める)。"""
+    if not sys.stdin.isatty():
+        return None
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        return None
+
+
+def setup_auth_choice():
+    """認証方式が既定 (claude + oauth-token。Pro/Max 前提) のままなら、番号で聞いて config.env に書く。"""
+    if any(C[k] != DEFAULTS[k] for k in ("DEFAULT_AGENT", "DEFAULT_CLAUDE_AUTH", "DEFAULT_CODEX_AUTH")):
+        return
+    if aws("secretsmanager", "describe-secret", "--secret-id", default_secret(CLAUDE_AUTH_SECRETS, "oauth-token"),
+           check=False):
+        return   # 既定の方式で登録済みなら、毎回は聞かない
+    choices = {"1": {}, "2": {"DEFAULT_CLAUDE_AUTH": "api-key"}, "3": {"DEFAULT_CLAUDE_AUTH": "bedrock"},
+               "4": {"DEFAULT_AGENT": "codex", "DEFAULT_CODEX_AUTH": "chatgpt"}}
+    ans = ask_line("Claude の認証: 1) Pro/Max のサブスクリプション (oauth-token)  2) Anthropic の API キー  "
+                   "3) Amazon Bedrock  4) Codex (ChatGPT)  [1] ")
+    if ans is None:
+        return
+    if ans not in choices and ans:
+        log(f"{ans} は選べません。1〜4 の番号で答えてください。1 (Pro/Max) のまま進めます (後から config.env の DEFAULT_CLAUDE_AUTH を直せます)")
+    for key, value in choices.get(ans, {}).items():
+        set_config_value(key, value)
+        C[key] = value
+        log(f"config.env を {key}={value} にしました")
+
+
+def setup_budget():
+    """月の予算アラートが未設定なら、金額と通知先を聞いて config.env に書く (infra deploy の前に呼ぶ)。"""
+    try:
+        unset = float(C["BUDGET_MONTHLY_USD"] or 0) <= 0
+    except ValueError:
+        unset = False   # 読めない値は deploy が理由を出して止める
+    if C["INFRA_TEMPLATE"] == "minimal" or not unset:
+        return
+    amount = ask_line("月の予算アラートを作りますか? 金額 (USD、Enter で作らない): ")
+    if not amount:
+        return
+    try:
+        usd = float(amount)
+        if usd <= 0:
+            raise ValueError
+    except ValueError:
+        log(f"{amount} は金額として読めないので、予算アラートは作りません (後から config.env の BUDGET_MONTHLY_USD と BUDGET_EMAIL を書いて "
+            "mvm infra deploy をやり直せます)")
+        return
+    email = ask_line("通知先のメールアドレス: ")
+    if not email or "@" not in email:
+        log("通知先のメールアドレスが読めないので、予算アラートは作りません (BUDGET_EMAIL を config.env に書いて mvm infra deploy をやり直せます)")
+        return
+    for key, value in (("BUDGET_MONTHLY_USD", f"{usd:g}"), ("BUDGET_EMAIL", email)):
+        set_config_value(key, value)
+        C[key] = value
+    log(f"config.env を BUDGET_MONTHLY_USD={usd:g}、BUDGET_EMAIL={email} にしました")
+
+
 def cmd_setup(args):
     """導入の手順 (AWS の構成、普段使う IAM ユーザー、認証情報、SSH 鍵、イメージ、司令塔の skill) のうち、
     済んでいないものを順に聞いて実行し、最後に doctor で確かめる。何度実行してもよい (済んだ手順は飛ばす)。"""
@@ -1247,6 +1343,11 @@ def cmd_setup(args):
             "  初めてなら、管理者のプロファイルを用意して (aws configure sso --profile admin など。docs/quickstart.md の手順 4)、"
             "mvm setup --profile admin で実行してください")
     log(f"AWS の認証情報: {ident.get('Arn')}")
+    if lmv("list-managed-microvm-images", check=False) is None:   # cmd_doctor と同じ呼び出し
+        die(f"{C['AWS_REGION']} で Lambda MicroVMs を呼べません: {last_aws_error().strip()[:200]}\n"
+            "  AWS CLI が古いなら、aws --version で版を確かめて AWS CLI v2 を最新版に更新してください。"
+            "更新しても同じなら、config.env の AWS_REGION が MicroVMs に未対応のリージョンです (mvm doctor と docs/setup.md の「前提の確認とクォータ」)")
+    setup_auth_choice()   # Bedrock を選ぶと実行ロールの権限が要るので、infra deploy の前に聞く
 
     pending = []   # 済んでいない手順 (doctor は !! の行があっても 0 を返すので、完了と言ってよいかはこれで決める)
     log("[1/6] AWS の構成 (S3・IAM ロール・ログ)")
@@ -1260,10 +1361,13 @@ def cmd_setup(args):
             print(line, file=sys.stderr)
             if line.startswith("  !!"):
                 pending.append(line.strip()[2:].strip())
+        if any("mvm infra deploy" in x for x in pending):   # 普段用のプロファイルでは deploy できないので、そのまま打てる形で出す
+            pending.append(f"deploy は管理者のプロファイルで: mvm infra deploy --admin-profile {args.profile or '<管理者のプロファイル>'}")
     else:
         if not r:
             die_unless_not_found(f"スタック {C['STACK_NAME']} ")
         log("まだありません。管理者の権限で作ります (数分)")
+        setup_budget()
         if not ask("mvm infra deploy を実行しますか?"):
             die("中止しました。もう一度 mvm setup を実行すると、ここから続けます")
         if cmd_infra(argparse.Namespace(action="deploy")) != 0:
@@ -1276,6 +1380,10 @@ def cmd_setup(args):
         log("ok 今の認証情報は管理者権限ではありません")
     elif C["AWS_PROFILE"] == profile:
         pending.append(f"プロファイル {profile} が管理者権限です。IAM コンソールで、そのユーザーに pmva-operator ポリシーだけを付けてください")
+        log("!! " + pending[-1])
+    elif "assumed-role/AWSReservedSSO_" in ident.get("Arn", ""):   # 長期のアクセスキーを作らせない (docs/setup.md)
+        pending.append("SSO では、IAM Identity Center で pmva-operator ポリシーを付けた権限セットを作り、そのプロファイルを "
+                       "config.env の AWS_PROFILE に書いてください (docs/setup.md「操作用の IAM ユーザー」)")
         log("!! " + pending[-1])
     elif ask(f"今は管理者の権限です。普段の操作用に、pmva-operator ポリシーだけを付けたユーザー {user} を作り、"
              f"プロファイル {profile} に切り替えますか?"):
@@ -2483,8 +2591,11 @@ AGENT_STATE_LABELS = {
 
 def agent_error_hint(name, kind):
     """エージェントが API のエラー (Claude Code の StopFailure の error) で止まったときに、次にやること。"""
-    relogin = (f"mvm secret set <種類> で登録し直し、mvm stop {name} --no-save の後に"
-               " mvm up で起動し直します (認証情報は起動時に読み込むため)。詳しくは docs/auth.md")
+    relogin = (f"mvm secret set <種類> で登録し直し、mvm renew {name} で保存してから作り直します (認証情報は起動時に読み込むため)。"
+               "詳しくは docs/auth.md")
+    payload = load_session(name).get("payload", {}) if session_path(name).exists() else {}
+    if "interactive" in (payload.get("claudeAuth"), payload.get("codexAuth")):
+        relogin += f"。interactive で起動したセッションは作り直すとログインが切れるので、続けて mvm login {name} でログインしてください"
     if kind == "authentication_failed":
         return "認証情報を確かめてください。" + relogin
     if kind == "invalid_request":
@@ -2548,10 +2659,15 @@ def cmd_result(args):
             die(f"{args.name}: 最後の応答を取得できません ({r.get('error') or r})。"
                 "イメージが古い場合は mvm image build で作り直してください")
         results.append(r)
+    working = [r["agent"] for r in results if r.get("state") == "working"]
+    for agent in working:   # 作業中の「最後の応答」は 1 つ前の応答のことがあるので、代わりに待ち方を案内する
+        log(f"{args.name} ({agent}) はまだ作業中です。mvm wait {args.name} で終わるまで待てます")
     if args.json:
         print_json(results if len(results) > 1 else results[0])
     else:
         for r in results:
+            if r["agent"] in working:
+                continue
             if len(results) > 1:
                 print(f"--- {r['agent']} ({r.get('state')}) ---")
             if r.get("state") == "error":
@@ -2559,6 +2675,8 @@ def cmd_result(args):
                 log(agent_error_hint(args.name, r.get("error")))
             else:
                 print(r.get("text") if r.get("text") else f"(まだ {r['agent']} の応答がありません)")
+    if working:
+        return 2
     return 0 if all(r.get("text") and r.get("state") != "error" for r in results) else 1
 
 
@@ -3026,9 +3144,21 @@ def cmd_wait(args):
     return 0 if enough else 2
 
 
+# mvm send が送らないエージェントの状態と、次の一手 (exited のまま送ると、入力がシェルに入ってしまう)
+SEND_REFUSED = {
+    "exited": "送った文字はシェルに入力されてしまいます。mvm renew {name} で保存してから作り直してください (シェルに送るなら --window shell)",
+    "failed": "mvm peek {name} で原因を確かめ、mvm renew {name} で作り直してください",
+    "starting": "mvm wait {name} で準備が終わるまで待ってから送ってください",
+}
+
+
 def cmd_send(args):
     text = " ".join(args.text)
     window = args.window or ("codex" if load_session(args.name)["payload"].get("agent") == "codex" else "claude")
+    if not args.window:   # --window を明示したときは断らない (exited のシェルへ送る使い方もある)
+        state = ((vm_api(args.name, "GET", "/status?lines=0").get("agents") or {}).get(window) or {}).get("state")
+        if state in SEND_REFUSED:
+            die(f"{args.name} の {window} は{AGENT_STATE_LABELS[state]}状態なので送りません。{SEND_REFUSED[state].format(name=args.name)}")
     r = vm_api(args.name, "POST", "/send", {"window": window, "text": text, "enter": not args.no_enter})
     print("送信しました" if r.get("ok") else f"失敗: {r.get('error')}")
     return 0 if r.get("ok") else 1
@@ -3769,8 +3899,7 @@ refresh(); setInterval(() => { if (!document.hidden) refresh(); }, 10000);
 
 def cmd_shell(args):
     s = load_session(args.name)
-    r = lmv("create-microvm-shell-auth-token", "--microvm-identifier", s["microvmId"], "--expiration-in-minutes", "15")
-    token = r["authToken"]["X-aws-proxy-auth"]
+    token = microvm_token(args.name, "create-microvm-shell-auth-token", "--expiration-in-minutes", "15")
     log("接続します。入ったら agent-attach でエージェントの tmux に接続できます (切断は exit)")
     try:
         host, port, tls = ws_target(s["endpoint"])
@@ -4399,7 +4528,9 @@ def build_parser():
     x = sub.add_parser("infra", help="CloudFormation で S3 / IAM ロール / ログを作成・確認・削除")
     x.add_argument("action", choices=("deploy", "outputs", "delete", "operator"))
     x.add_argument("--user", default="pmva-operator", help="operator: 作る IAM ユーザー名 (既定 pmva-operator)")
-    x.add_argument("--profile", default="pmva", help="operator: 書き込む AWS CLI のプロファイル名 (既定 pmva)")
+    x.add_argument("--profile", help="operator: 書き込む AWS CLI のプロファイル名 (既定 pmva)")
+    x.add_argument("--admin-profile", help="deploy / delete / operator: このコマンドの間だけ、この管理者の "
+                                           "AWS CLI のプロファイルで実行する (config.env の AWS_PROFILE は変えない)")
     x.set_defaults(func=cmd_infra)
     x = sub.add_parser("secret", help="認証情報を Secrets Manager に登録 (set) / 一覧 (ls)")
     x.add_argument("action", choices=("set", "ls"))

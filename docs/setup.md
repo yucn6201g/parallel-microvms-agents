@@ -105,7 +105,7 @@ mvm infra deploy
 - Claude Platform on AWS の呼び出し権限 (`ENABLE_ANTHROPIC_AWS=true` のときだけ)
 - キープアライブ。毎晩の自動停止と予算アラートは、設定したときだけ作る ([下記](#キープアライブ毎晩の自動停止予算アラート))
 
-`mvm infra deploy` / `delete` は IAM ロールやスタックを作成・削除するので、いつも管理者の権限で実行します。
+`mvm infra deploy` / `delete` は IAM ロールやスタックを作成・削除するので、いつも管理者の権限で実行します。`config.env` の `AWS_PROFILE` が普段用のプロファイルのときは、`mvm infra deploy --admin-profile <管理者のプロファイル>` のように付けると、そのコマンドの間だけ管理者のプロファイルを使います (`config.env` の `AWS_PROFILE` は環境変数 `AWS_PROFILE` より優先されるので、`$env:AWS_PROFILE` を設定しても切り替わりません)。
 
 ## 操作用の IAM ユーザー
 
