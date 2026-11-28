@@ -2337,7 +2337,7 @@ def launch(name, payload, idle, max_duration):
     endpoint = resp["endpoint"].split("://", 1)[-1].rstrip("/")
     save_session({
         "name": name, "microvmId": resp["microvmId"], "endpoint": endpoint,
-        "imageVersion": resp.get("imageVersion"), "startedAt": resp.get("startedAt"),
+        "imageVersion": resp.get("imageVersion"), "startedAt": resp.get("startedAt"), "memoryMib": int(C["MEMORY_MIB"]),
         "idle": str(idle), "maxDuration": str(max_duration), "payload": payload, "terminated": False,
     })
     clear_tokens(name)
@@ -3338,7 +3338,7 @@ WATCH_IDLE_LIMIT = 300      # stalled とみなす、画面と CPU が動かな�
 WATCH_EVENT_CHARS = 200     # /events で受け取る 1 件の文字数の上限
 WATCH_LABELS = dict(AGENT_STATE_LABELS, stalled="動きが止まった", suspended="一時停止中", terminated="終了",
                     unreachable="応答なし", starting="起動の準備中")
-WATCH_HEADS = ("名前", "状態", "経過", "残り", "メモリ (使用/全体 最大)", "最後の出来事")
+WATCH_HEADS = ("名前", "状態", "経過", "残り", "メモリ (使用/全体 最大)", "費用(上限)", "最後の出来事")
 WATCH_COLORS = {"red": "\x1b[31m", "yellow": "\x1b[33m", "green": "\x1b[32m"}
 WATCH_LOG_COLUMNS = ("time", "name", "vm", "state", "usedMiB", "totalMiB", "peakMiB", "oomKills", "remainingSeconds")
 CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
@@ -3386,20 +3386,57 @@ def format_elapsed(seconds):
 REMAINING_WARN_SECONDS = 3600   # 寿命の残りがこれを切ったら目立たせる
 
 
+def started_epoch(s):
+    """セッション記録の startedAt を epoch 秒にする。無い・読めないときは TypeError / ValueError。"""
+    started = s.get("startedAt")
+    if isinstance(started, str):   # AWS CLI v2 は ISO 8601 (Z 付きのことがある)
+        try:
+            started = float(started)
+        except ValueError:
+            import datetime
+            dt = datetime.datetime.fromisoformat(started.replace("Z", "+00:00"))
+            started = (dt if dt.tzinfo else dt.astimezone()).timestamp()
+    return float(started)
+
+
 def remaining_seconds(s, now=None):
     """セッションの寿命の残り秒数 (startedAt + maxDuration - 今)。startedAt が無い・読めないときは None。"""
-    started = s.get("startedAt")
     try:
-        if isinstance(started, str):   # AWS CLI v2 は ISO 8601 (Z 付きのことがある)
-            try:
-                started = float(started)
-            except ValueError:
-                import datetime
-                dt = datetime.datetime.fromisoformat(started.replace("Z", "+00:00"))
-                started = (dt if dt.tzinfo else dt.astimezone()).timestamp()
-        return int(float(started) + int(s["maxDuration"]) - (time.time() if now is None else now))
+        return int(started_epoch(s) + int(s["maxDuration"]) - (time.time() if now is None else now))
     except (TypeError, ValueError, KeyError, OverflowError):
         return None
+
+
+_COST_RATES = []   # scripts/estimate_cost.py の単価 (vcpu_second, gb_second)。読めなければ None を入れる
+
+
+def cost_rates():
+    """単価の出どころは estimate_cost.PRESETS["tokyo"] だけ。読めなければ None (費用は出さない)。"""
+    if not _COST_RATES:
+        try:
+            spec = importlib.util.spec_from_file_location("pmva_estimate_cost", str(ROOT / "scripts" / "estimate_cost.py"))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            rates = module.PRESETS["tokyo"]
+            _COST_RATES.append((rates["vcpu_second"], rates["gb_second"]))
+        except Exception:   # ファイルが無い・壊れている・キーが無い、のどれでも費用を出さないだけにする
+            _COST_RATES.append(None)
+    return _COST_RATES[0]
+
+
+def session_cost(s, now):
+    """今の VM を起動してからの費用の上限の目安 (USD、税抜)。サスペンド中の分は引けないので、ずっと動いていた場合の額。
+    出せないときは None。"""
+    rates = cost_rates()
+    try:
+        gb = int(s.get("memoryMib") or C["MEMORY_MIB"]) / 1024   # memoryMib の無い古い記録は今の設定で代用する
+        return max(0.0, now - started_epoch(s)) * (gb / 2 * rates[0] + gb * rates[1]) if rates else None
+    except (TypeError, ValueError, KeyError, OverflowError):
+        return None
+
+
+def format_cost(usd):
+    return "-" if usd is None else f"${usd:.2f}"
 
 
 def format_remaining(seconds):
@@ -3507,9 +3544,12 @@ def watch_notes(name, row, summary):
 def watch_row(board, name, now):
     """1 台分の表示用データ。VM が止まっているときは /status も /events も呼ばない (起こして課金されるため)。"""
     row = {"name": name, "vm": board.vm_state(name, now), "state": "", "agents": {}, "sinceSeconds": None,
-           "remainingSeconds": None, "memory": None, "oomKills": 0, "lastEvent": "", "notes": []}
+           "remainingSeconds": None, "costUsd": None, "memory": None, "oomKills": 0, "lastEvent": "",
+           "notes": []}
     if row["vm"] not in ("TERMINATED", "TERMINATING", "GONE"):
-        row["remainingSeconds"] = remaining_seconds(load_session(name), now)
+        s = load_session(name)
+        row["remainingSeconds"] = remaining_seconds(s, now)
+        row["costUsd"] = session_cost(s, now)
     if row["vm"] != "RUNNING":
         row["state"] = row["vm"]
         row["notes"] = watch_notes(name, row, {})
@@ -3558,7 +3598,8 @@ def watch_cells(row):
     if row["oomKills"]:
         memory = (memory if mem else "") + f" !!OOM×{row['oomKills']}"
     return (row["name"], WATCH_LABELS.get(row["state"], row["state"]), format_elapsed(row["sinceSeconds"]),
-            format_remaining(row["remainingSeconds"]), memory.strip(), row["lastEvent"] or "-")
+            format_remaining(row["remainingSeconds"]), memory.strip(), format_cost(row["costUsd"]),
+            row["lastEvent"] or "-")
 
 
 def format_watch(rows, width, color, stamp, interval):
@@ -3575,12 +3616,13 @@ def format_watch(rows, width, color, stamp, interval):
                  f" / 完了 {count(lambda r: r['state'] == 'done')})  {interval} 秒ごと / Ctrl-C で終了")]
     if rows:
         cells = [tuple(CONTROL_CHARS.sub(" ", c) for c in watch_cells(r)) for r in rows]
-        widths = [max(display_width(c[i]) for c in cells + [WATCH_HEADS]) for i in range(5)]
+        widths = [max(display_width(c[i]) for c in cells + [WATCH_HEADS]) for i in range(6)]
         widths[0] = min(widths[0], 24)
         rest = max(10, width - sum(w + 2 for w in widths))
         for c, level in [(WATCH_HEADS, "")] + [(c, watch_level(r)) for c, r in zip(cells, rows)]:
-            parts = [pad_width(cut_width(c[i], widths[i]), widths[i]) for i in range(5)] + [cut_width(c[5], rest)]
+            parts = [pad_width(cut_width(c[i], widths[i]), widths[i]) for i in range(6)] + [cut_width(c[6], rest)]
             lines.append(paint(cut_width("  ".join(parts), width).rstrip(), level))
+        lines.append(fit(f"費用の目安 (上限): 合計 ${sum(r['costUsd'] or 0 for r in rows):.2f} / 税抜"))
     else:
         lines.append("表示するセッションがありません (mvm ls で確認)")
     lines.append("")
@@ -3686,13 +3728,13 @@ def ui_rows(ui):
         if ui.busy(name):   # 停止・renew の途中は .state を書き換えているので読まない
             job = ui.jobs[name]
             rows.append({"name": name, "vm": "", "level": "yellow", "notes": [],
-                         "cells": [name, job["message"], "-", "-", "-", "-"]})
+                         "costUsd": None, "cells": [name, job["message"], "-", "-", "-", "-", "-"]})
             continue
         if load_session(name).get("terminated"):
             continue
         row = watch_row(ui.board, name, now)
         rows.append({"name": name, "vm": row["vm"], "level": watch_level(row), "notes": row["notes"],
-                     "cells": list(watch_cells(row))})
+                     "costUsd": row["costUsd"], "cells": list(watch_cells(row))})
     return rows
 
 
@@ -3946,8 +3988,8 @@ input,select{font:inherit;padding:6px 8px;border-radius:6px;border:1px solid var
 </style></head><body>
 <header><h1>mvm</h1><span class="muted" id="stamp">読み込み中…</span><span class="muted">10 秒ごとに更新 (このタブを表示している間だけ)</span></header>
 <main>
-<section><h2>セッション</h2><div class="scroll"><table><thead><tr><th>名前</th><th>状態</th><th>経過</th><th>残り</th><th>メモリ</th><th>最後の出来事</th></tr></thead>
-<tbody id="rows"></tbody></table></div><p class="muted" id="empty" hidden>動いているセッションはありません。下の「新しく起動」から始められます。</p>
+<section><h2>セッション</h2><div class="scroll"><table><thead><tr><th>名前</th><th>状態</th><th>経過</th><th>残り</th><th>メモリ</th><th>費用(上限)</th><th>最後の出来事</th></tr></thead>
+<tbody id="rows"></tbody></table></div><p class="muted" id="cost"></p><p class="muted" id="empty" hidden>動いているセッションはありません。下の「新しく起動」から始められます。</p>
 <div id="notes"></div><div id="jobs"></div></section>
 <section><details id="upbox"><summary><h2 style="display:inline">新しく起動</h2></summary>
 <form id="up" class="form">
@@ -3998,12 +4040,13 @@ async function refresh() {
       rowsByName[r.name] = r;
       const tr = el("tr"); tr.tabIndex = 0; if (r.name === selected) tr.className = "sel";
       const c = r.cells, st = el("td"); st.append(el("span", c[1], "badge lv-" + r.level));
-      tr.append(el("td", c[0]), st, el("td", c[2]), el("td", c[3]), el("td", c[4]), el("td", c[5], "last"));
-      tr.title = c[5]; tr.onclick = () => select(r.name);
+      tr.append(el("td", c[0]), st, el("td", c[2]), el("td", c[3]), el("td", c[4]), el("td", c[5]), el("td", c[6], "last"));
+      tr.title = c[6]; tr.onclick = () => select(r.name);
       tr.onkeydown = e => { if (e.key === "Enter") select(r.name); };
       tb.append(tr);
     }
     $("empty").hidden = d.rows.length > 0;
+    $("cost").textContent = d.rows.length ? "費用の目安 (上限): 合計 $" + d.rows.reduce((a, r) => a + (r.costUsd || 0), 0).toFixed(2) + " / 税抜" : "";
     if (selected && !rowsByName[selected]) { selected = null; $("detail").hidden = true; }   // 停止した台の詳細は閉じる
     list("notes", "対応が要ること", d.rows.flatMap(r => r.notes));
     list("jobs", "裏で進めている操作", Object.values(d.jobs).map(j => j.message));

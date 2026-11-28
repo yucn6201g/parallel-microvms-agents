@@ -543,7 +543,7 @@ class DisplayWidthTest(unittest.TestCase):
 def watch_row(name, state, **kw):
     """format_watch に渡す、台ごとの dict。"""
     row = {"name": name, "vm": "RUNNING", "state": state, "agents": {}, "sinceSeconds": None, "remainingSeconds": None,
-           "memory": None, "oomKills": 0, "lastEvent": "", "notes": []}
+           "costUsd": None, "memory": None, "oomKills": 0, "lastEvent": "", "notes": []}
     row.update(kw)
     return row
 
@@ -576,9 +576,9 @@ class FormatWatchTest(unittest.TestCase):
     def board_rows(self):
         mem = lambda used, peak: {"usedMiB": used, "totalMiB": 3891, "peakMiB": peak}   # noqa: E731
         return [
-            watch_row("a1", "working", sinceSeconds=720, remainingSeconds=7800, memory=mem(1229, 1536),
+            watch_row("a1", "working", sinceSeconds=720, remainingSeconds=7800, memory=mem(1229, 1536), costUsd=0.42,
                       lastEvent="実行: Bash: pytest -x"),
-            watch_row("a2", "waiting", sinceSeconds=180, memory=mem(900, 900),
+            watch_row("a2", "waiting", sinceSeconds=180, memory=mem(900, 900), costUsd=0.314,
                       agents={"claude": {"state": "waiting", "message": "Bash の実行の許可を求めています"}},
                       lastEvent="Bash の実行の許可を求めています",
                       notes=["a2 (claude): 許可・入力待ち: Bash の実行の許可を求めています"]),
@@ -593,12 +593,13 @@ class FormatWatchTest(unittest.TestCase):
         self.assertTrue(lines[1].startswith("名前"))
         self.assertIn("メモリ (使用/全体 最大)", lines[1])
         self.assertIn("残り", lines[1])
-        self.assertRegex(lines[2], r"^a1 +作業中 +12分 +2h10m +1\.2/3\.8G 最大1\.5G +実行: Bash: pytest -x$")
-        self.assertRegex(lines[3], r"^a2 +許可・入力待ち +3分 ")
+        self.assertRegex(lines[2], r"^a1 +作業中 +12分 +2h10m +1\.2/3\.8G 最大1\.5G +\$0\.42 +実行: Bash: pytest -x$")
+        self.assertRegex(lines[3], r"^a2 +許可・入力待ち +3分 .* \$0\.31 +Bash の")
         self.assertRegex(lines[4], r"^a3 +応答が終わった +1分 ")
-        self.assertRegex(lines[5], r"^a4 +SUSPENDED +- +- +- +-$")
-        self.assertEqual(lines[6], "")
-        self.assertEqual(lines[7], "!! a2 (claude): 許可・入力待ち: Bash の実行の許可を求めています")
+        self.assertRegex(lines[5], r"^a4 +SUSPENDED +- +- +- +- +-$")
+        self.assertEqual(lines[6], "費用の目安 (上限): 合計 $0.73 / 税抜")
+        self.assertEqual(lines[7], "")
+        self.assertEqual(lines[8], "!! a2 (claude): 許可・入力待ち: Bash の実行の許可を求めています")
         self.assertEqual(lines[-1], "(表示中のセッションは自動サスペンドされません)")
         self.assertNotIn("\x1b", text)
 
@@ -2006,7 +2007,8 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, 200)
         rows = json.loads(text)["rows"]
         self.assertEqual([r["name"] for r in rows], ["a1"])
-        self.assertEqual(len(rows[0]["cells"]), 6)
+        self.assertEqual(len(rows[0]["cells"]), 7)
+        self.assertRegex(rows[0]["cells"][5], r"^\$\d+\.\d\d$")
         code, text = self.ui_call(base, "/api/detail?name=a1", token)
         self.assertEqual(code, 200, text)
         detail = json.loads(text)
@@ -3428,6 +3430,53 @@ class CliTest(unittest.TestCase):
         self.assertEqual(r["agents"]["claude"]["state"], "working")
         self.assertEqual(api.event_queries[0]["tail"], "1")
 
+    def set_session(self, name, **fields):
+        path = Path(self.env["PMVA_STATE_DIR"]) / "sessions" / f"{name}.json"
+        s = json.loads(path.read_text(encoding="utf-8"))
+        s.update(fields)
+        for k in [k for k, v in fields.items() if v is None]:
+            del s[k]
+        path.write_text(json.dumps(s), encoding="utf-8")
+
+    @staticmethod
+    def vm_rate(memory_mib):
+        """estimate_cost の単価 (PRESETS) から求めた、1 秒あたりの VM の費用。"""
+        spec = importlib.util.spec_from_file_location("est", ROOT / "scripts" / "estimate_cost.py")
+        est = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(est)
+        r, gb = est.PRESETS["tokyo"], memory_mib / 1024
+        return gb / 2 * r["vcpu_second"] + gb * r["gb_second"]
+
+    def test_up_saves_memory_mib_in_session(self):
+        self.mvm("up", "m1")
+        path = Path(self.env["PMVA_STATE_DIR"]) / "sessions" / "m1.json"
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["memoryMib"], 4096)
+
+    def test_watch_shows_cost_upper_bound_since_start(self):
+        api = self.watch_api()
+        try:
+            env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}")
+            self.mvm("up", "w1", env=env)
+            self.set_session("w1", startedAt=time.time() - 3600, memoryMib=2048)
+            _, out, _ = self.mvm("watch", "--json", env=env)
+            cost = json.loads(out)[0]["costUsd"]
+            self.assertAlmostEqual(cost, 3600 * self.vm_rate(2048), delta=self.vm_rate(2048) * 120)
+            # memoryMib の無い古い記録は MEMORY_MIB (4096) で計算する
+            self.set_session("w1", startedAt=time.time() - 3600, memoryMib=None)
+            _, out, _ = self.mvm("watch", "--json", env=env)
+            self.assertAlmostEqual(json.loads(out)[0]["costUsd"], 3600 * self.vm_rate(4096), delta=self.vm_rate(4096) * 120)
+            _, out, _ = self.mvm("watch", "--once", env=env)
+            shown = re.search(r"(?m)^w1 .* \$(\d+\.\d\d) ", out)
+            total = re.search(r"費用の目安 \(上限\): 合計 \$(\d+\.\d\d) / 税抜", out)
+            self.assertAlmostEqual(float(shown.group(1)), 3600 * self.vm_rate(4096), delta=0.02)
+            self.assertEqual(shown.group(1), total.group(1), "1 台なので合計と同じ")
+            # 起動時刻が分からなければ出せない
+            self.set_session("w1", startedAt=None)
+            _, out, _ = self.mvm("watch", "--json", env=env)
+            self.assertIsNone(json.loads(out)[0]["costUsd"])
+        finally:
+            api.shutdown()
+
     def test_watch_once_prints_board_without_control_characters(self):
         api = self.watch_api()
         try:
@@ -3439,7 +3488,8 @@ class CliTest(unittest.TestCase):
         out = out.replace("\r\n", "\n")
         self.assertNotIn("\x1b", out)
         self.assertIn("1 台 (作業中 1 / 要対応 0 / 完了 0)  10 秒ごと", out)
-        self.assertRegex(out, r"(?m)^w1 +作業中 +12分 +7h5\dm +1\.2/3\.8G 最大1\.2G +実行: Bash: pytest -x$")
+        self.assertRegex(out, r"(?m)^w1 +作業中 +12分 +7h5\dm +1\.2/3\.8G 最大1\.2G +\$\d+\.\d\d +実行: Bash: pytest -x$")
+        self.assertRegex(out, r"費用の目安 \(上限\): 合計 \$\d+\.\d\d / 税抜")
         self.assertEqual(api.status_calls, 1, "--once は 1 回だけ取得して終わる")
 
     def test_watch_log_appends_csv_with_header_once(self):
