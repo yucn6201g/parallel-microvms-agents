@@ -878,7 +878,7 @@ def cmd_doctor(_args):
         for line in credential_findings(ident.get("Arn", "")):
             print(line)
     else:
-        print("  NG   AWS 認証情報がありません (aws configure / aws sso login)")
+        print(f"  NG   AWS の認証を確かめられません: {aws_error_hint(last_aws_error())}")
         ok = False
     p = subprocess.run([aws_bin(), "lambda-microvms", "list-managed-microvm-images", "--output", "json"],
                        capture_output=True, text=True, encoding="utf-8", errors="replace", env=aws_env())
@@ -903,7 +903,8 @@ def cmd_doctor(_args):
         # 同時に動かせる台数はクォータで決まる。MAX_AGENTS (0 なら制限なし) は、さらに絞りたいときだけ使う
         fit = quota // int(C["MEMORY_MIB"])
         max_agents = int(C["MAX_AGENTS"])
-        mark = "ok" if fit >= max(max_agents, 1) else "!!"
+        mark = "NG" if fit < 1 else "ok" if fit >= max(max_agents, 1) else "!!"   # 1 台も起動できなければ先へ進めない
+        ok = ok and fit >= 1
         limit = f"、MAX_AGENTS={max_agents}" if max_agents else ""
         print(f"  {mark}   MicroVM のメモリ上限 {quota // 1024}GB → {int(C['MEMORY_MIB']) // 1024}GB の VM を同時に {fit} 台まで"
               f"{limit}")
@@ -913,6 +914,13 @@ def cmd_doctor(_args):
                   f"MEMORY_MIB を小さくするか、{MEMORY_QUOTA_CODE} を引き上げてください")
             for line in quota_advice(quota, want):
                 print("       " + line)   # 上の行の字下げ (9 文字) にそろえる
+    try:
+        no_budget = float(C["BUDGET_MONTHLY_USD"]) <= 0
+    except ValueError:
+        no_budget = False   # 値の誤りは infra deploy が指摘する
+    if not C["NIGHTLY_STOP_TIME"] or no_budget:
+        print("  !!   止め忘れ・使いすぎの安全網が無効です (config.env の NIGHTLY_STOP_TIME / BUDGET_MONTHLY_USD、"
+              "mvm infra deploy で反映)")
     key = expand_path(C["SSH_PUBLIC_KEY_FILE"])
     if key and key.exists():
         print(f"  ok   SSH 公開鍵: {key}")
@@ -998,13 +1006,44 @@ def auth_findings():
     """既定の認証方式 (config.env) に要るシークレットと設定がそろっているかを doctor 用の行で返す。"""
     lines, secrets = auth_requirements()
     for name, kind, setting, why in secrets:
-        if aws("secretsmanager", "describe-secret", "--secret-id", name, check=False):
+        state = secret_state(name)
+        if state == "ok":
             lines.append(f"  ok   シークレット {name} ({setting})")
-        elif not aws_not_found(last_aws_error()):
-            lines.append(f"  !!   {why} のシークレット {name} を確かめられません: {aws_error_hint(last_aws_error())}")
-        else:
+        elif state == "missing":
             lines.append(f"  !!   {why} のシークレット {name} がありません。mvm secret set {kind} で登録してください")
+        else:
+            lines.append(f"  !!   {why} のシークレット {name} を確かめられません: {state}")
     return lines
+
+
+def secret_state(name):
+    """Secrets Manager のシークレットの有無。"ok"、"missing"、または確かめられない理由 (aws_error_hint の文) を返す。"""
+    if aws("secretsmanager", "describe-secret", "--secret-id", name, check=False):
+        return "ok"
+    return "missing" if aws_not_found(last_aws_error()) else aws_error_hint(last_aws_error())
+
+
+_secrets_checked = set()
+
+
+def check_payload_secrets(payload):
+    """起動の前に、payload が使うシークレットが登録済みかを確かめる (無いまま起動すると課金が始まってから bootstrap が失敗する)。
+
+    fleet は全台が同じ設定なので、確かめたシークレットは 2 台目以降では確かめない。
+    """
+    wanted = [(payload.get("claudeSecret"), CLAUDE_AUTH_SECRETS.get(payload.get("claudeAuth"))),
+              (payload.get("codexSecret"), CODEX_AUTH_SECRETS.get(payload.get("codexAuth"))),
+              (payload.get("githubSecret"), "github-token"), (payload.get("notifySecret"), "notify-webhook")]
+    for name, kind in wanted:
+        if not name or name in _secrets_checked:
+            continue
+        state = secret_state(name)
+        if state == "missing":
+            how = f"mvm secret set {kind}" + ("" if name == f"{C['PMVA_PREFIX']}/{kind}" else f" --name {name}")
+            die(f"シークレット {name} がありません。{how} で登録してください (起動してから失敗すると、その間も課金されます)")
+        if state != "ok":
+            die(f"シークレット {name} を確かめられません: {state}")
+        _secrets_checked.add(name)
 
 
 def auth_requirements():
@@ -1998,8 +2037,15 @@ def cmd_image(args):
     arn, ver = resp["imageArn"], resp["imageVersion"]
     log(f"ビルド中: {arn} バージョン {ver} (数分〜十数分かかります)")
     deadline = time.time() + 3600
+    failures = 0
     while True:
-        v = lmv("get-microvm-image-version", "--image-identifier", arn, "--image-version", ver, check=False) or {}
+        v = lmv("get-microvm-image-version", "--image-identifier", arn, "--image-version", ver, check=False)
+        failures = 0 if v is not None else failures + 1
+        if failures >= 3:   # SSO の期限切れなどで呼び出しが通らないのに、ドットを出し続けない
+            print(file=sys.stderr)
+            die(f"ビルドの状態を取得できません: {aws_error_hint(last_aws_error())}\n"
+                f"  ビルドは AWS 側で続いています。認証し直してから mvm image status で確かめてください")
+        v = v or {}
         state = v.get("state")
         if state == "SUCCESSFUL":
             print(file=sys.stderr)
@@ -2193,6 +2239,7 @@ def launch(name, payload, idle, max_duration):
     if int(C["MAX_AGENTS"]) and running >= int(C["MAX_AGENTS"]):
         die(f"起動中のセッションが MAX_AGENTS ({C['MAX_AGENTS']}) に達しています")
     check_memory_quota(running, 1)
+    check_payload_secrets(payload)
     arn = find_image_arn() or die(f"イメージ {C['IMAGE_NAME']} がありません。先に mvm image build を実行してください")
     ver = lmv("get-microvm-image", "--image-identifier", arn).get("latestActiveImageVersion")
     if not ver:

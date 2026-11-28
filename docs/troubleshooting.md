@@ -21,6 +21,9 @@
 | `mvm image build` が FAILED | `mvm logs` を見る。`CONTAINER_BUILD_FAILED` なら Dockerfile (や `IMAGE_EXTRA_PACKAGES`) の問題。原因を絞りたいときだけ、手元で `docker build --platform linux/arm64 image/` を試す (**デバッグ用・任意**。docker が無くても `mvm` は使えます。イメージのビルドは AWS 側で行います) |
 | `mvm up` で「メモリ上限を超えます」 | `mvm doctor` でクォータと起動できる台数を確かめる。使っていない VM を止めるか、表示される「`MEMORY_MIB=2048` にした場合の台数」と申請文で、[引き上げを申請](setup.md#前提の確認とクォータ)する。AWS が `ServiceQuotaExceededException` で拒否したときは、別の PC や別のイメージの VM も数に入るので `aws lambda-microvms list-microvms` で確かめる |
 | `mvm up` で AccessDenied | 操作者に `pmva-operator` ポリシーが付いているか (`lambda:PassNetworkConnector`、`iam:PassRole` が要る)。足りない操作は [setup.md](setup.md#操作用の-iam-ユーザー) の手順で足す |
+| `mvm up` で「シークレット ... がありません」 | 起動の前の確認で止まった (課金は始まっていない)。案内どおりに `mvm secret set <種類>` で登録する。使わないなら `--claude-auth interactive` や `--no-github` を付ける |
+| `mvm doctor` の `NG   AWS の認証を確かめられません` | 理由に従う。SSO の期限切れなら `aws sso login`、プロファイル名の誤りなら `AWS_PROFILE`、ネットワーク断ならプロキシや VPN を確かめる |
+| `mvm image build` が「ビルドの状態を取得できません」で止まった | 認証切れなどで完成待ちの問い合わせが通らなくなった。ビルドは AWS 側で続いているので、認証し直して `mvm image status` で確かめる |
 | bootstrap が `failed` | シークレットを登録したか (`mvm secret ls`)、名前が既定と違うなら `--claude-secret` などで指定したか。ログは `bootstrap.log` |
 | `ready (warnings: setup.sh failed ...)` | リポジトリの `.pmva/setup.sh` が失敗した。エージェントは動いているので、「~/.pmva/setup.log を見て直して」と頼める |
 | `infra deploy` で `pmva-keepalive` / `pmva-nightly-stop` の作成が AccessDenied | 実行した認証情報の権限 (`lambda:CreateFunction` など) と、AWS Organizations の SCP |
