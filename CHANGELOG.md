@@ -45,6 +45,8 @@
 - `mvm forward <name> <port>`: VM の中のポート (開発サーバーなど) を手元の PC のポートにつなぐ
 - CI の `image` ワークフロー: 本物のイメージを ARM64 でビルドし、ツール、headless の Chromium、起動時の初期化を確かめる
 - CI の `agents-e2e`: 固定した版の Claude Code / Codex を LLM API の代わりにつないで動かし、フックと会話の記録の読み取りを確かめる
+- 名前を取るコマンド (`peek` / `send` / `result` / `stop` / `ssh` など。`up` と `fleet` を除く) は、動いているセッションが 1 つだけなら名前を省略できる。複数あるときは候補を出して止まる。引数なしの `mvm` のメニューは、2 つ以上あるときだけ名前を聞く
+- MicroVM の API が 401 / 403 を返したら、トークンのキャッシュを捨てて 1 回だけ取り直してやり直す (期限切れのときに `.state/tokens` を手で消さなくてよい)
 - MicroVM の寿命の残りを見えるようにした。`mvm ls` (`REMAINING` 列と `--json` の `remainingSeconds`)、`mvm watch` (「残り」列、`--json`、`--log` の CSV の末尾の列 `remainingSeconds`)、`mvm ui` の一覧、引数なしの `mvm` の「動いているセッション」に `2h10m` の形で出す。1 時間を切ると `!!` を付け、`ls` と引数なしの `mvm` では「`mvm renew <名前>` で延長できます」と案内する。`mvm suspend` はサスペンドの前にワークスペースを保存し (失敗しても警告して続ける)、実行後に「サスペンド中も寿命に数えます。残り Xh、サスペンドのまま 6 時間 (`IDLE_SUSPENDED_SECONDS`) で終了します」と伝える。列が増えたので、前の版で書いた `mvm watch --log` の CSV には追記せず、別のパスを指定するよう案内する
 
 - VM の作業が失われる・読めなくなる事故を防ぐ。`/status` に作業ツリーの未コミット・未 push の数 (`git`) を足し、`mvm peek` が「未コミット N ファイル・未 push M コミット」を知らせ、`mvm stop` / `stop-all` は止める前に警告する (`--no-save` では「保存もされず失われる」)。エージェントの最後の応答は S3 (`workspaces/<name>/result.json`) にも書き、VM が終了した後や届かないときは `mvm result` がそれを読む (`--json` では `source: "s3"`)。イメージの作り直しが必要 (`mvm image build`)
