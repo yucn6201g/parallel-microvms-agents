@@ -358,6 +358,46 @@ def session_names():
     return sorted(p.stem for p in (STATE_DIR / "sessions").glob("*.json"))
 
 
+def live_session_names():
+    """手元の記録で終了していないセッション (AWS には問い合わせない)。"""
+    return [n for n in session_names() if not load_session(n).get("terminated")]
+
+
+# name を省略できるコマンド。up は新しい名前を付けるので含めない
+NAME_OPTIONAL = ("stop", "suspend", "resume", "save", "renew", "peek", "forward", "login", "view",
+                 "result", "send", "ssh", "shell", "token")
+
+
+def fill_name(args):
+    """name を省略したコマンドに、終了していないセッションが 1 つだけならそれを補う。"""
+    if args.command not in NAME_OPTIONAL:
+        return
+    n = args.name
+    if n is not None and n not in session_names():
+        # 後ろの位置引数に食われた値を戻す。send は最初の単語、peek の行数と token のポートは数字、
+        # login のエージェントは claude / codex、forward のポートは 3000 や 8080:3000 の形のとき
+        if args.command == "send":
+            args.text.insert(0, n)
+        elif args.command in ("peek", "token") and n.isdigit():
+            setattr(args, "lines" if args.command == "peek" else "port", int(n))
+        elif args.command == "login" and n in ("claude", "codex") and args.agent is None:
+            args.agent = n
+        elif args.command == "forward" and re.fullmatch(r"\d+(:\d+)?", n):
+            args.ports.insert(0, n)
+        else:
+            return
+        args.name = None
+    if args.name is not None:
+        return
+    live = live_session_names()
+    if not live:
+        die("動いているセッションがありません。mvm up <名前> で起動してください")
+    if len(live) > 1:
+        die(f"セッションが複数あります: {', '.join(live)}。名前を指定してください (例: mvm {args.command} {live[0]})")
+    args.name = live[0]
+    print(f"(セッション {args.name} を使います)", file=sys.stderr)
+
+
 AWS_AUTH_EXPIRED = ("Token has expired", "ExpiredToken", "security token included in the request is expired",
                     "SSO session", "Error loading SSO Token", "sso login")
 AWS_AUTH_MISSING = ("Unable to locate credentials", "could not be found", "UnrecognizedClientException",
@@ -480,7 +520,7 @@ def auth_token(name, port):
 
 # ---------------------------------------------------------------- MicroVM 内 API (:8080)
 
-def vm_api(name, method, path, body=None, timeout=30):
+def vm_api(name, method, path, body=None, timeout=30, _retry=True):
     s = load_session(name)
     # PMVA_API_BASE_URL はローカルでのテスト・デバッグ用 (例: http://127.0.0.1:8080)
     base = os.environ.get("PMVA_API_BASE_URL") or f"https://{s['endpoint']}"
@@ -494,6 +534,10 @@ def vm_api(name, method, path, body=None, timeout=30):
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8") or "{}")
     except urllib.error.HTTPError as e:
+        if e.code in (401, 403) and _retry:   # トークンの期限切れ。キャッシュを捨てて 1 回だけ取り直す
+            e.close()
+            clear_tokens(name)
+            return vm_api(name, method, path, body, timeout, _retry=False)
         text = e.read().decode("utf-8", "replace")
         try:
             return json.loads(text)
@@ -4214,7 +4258,9 @@ def ask_args(cmd):
     """そのコマンドに必須の位置引数を 1 つずつ聞く。空の答えなら None (やめる)。"""
     argv = []
     for a in cmd._actions:
-        if a.option_strings or a.nargs in ("?", "*", argparse.REMAINDER):
+        # 省略できる name は、セッションが 2 つ以上あって省略すると決まらないときだけ聞く
+        if a.option_strings or a.nargs in ("*", argparse.REMAINDER) or (
+                a.nargs == "?" and not (a.dest == "name" and len(live_session_names()) >= 2)):
             continue
         hint = f" ({' / '.join(a.choices)})" if a.choices else ""
         if a.dest == "name" and session_names():
@@ -4305,7 +4351,7 @@ def build_parser():
     x.add_argument("--json", action="store_true", help="JSON で出力")
     x.set_defaults(func=cmd_ls)
     x = sub.add_parser("stop", help="保存してから終了")
-    x.add_argument("name")
+    x.add_argument("name", nargs="?", help="省略時は、動いているセッションが 1 つだけならそれ")
     x.add_argument("--no-save", action="store_true")
     x.set_defaults(func=cmd_stop)
     x = sub.add_parser("stop-all", help="全セッションを保存してから終了")
@@ -4315,11 +4361,11 @@ def build_parser():
                              ("save", cmd_save, "ワークスペースを S3 に保存"),
                              ("renew", cmd_renew, "保存 → 終了 → 同じ設定で再起動して復元 (8 時間制限の延長)")):
         x = sub.add_parser(name, help=text)
-        x.add_argument("name")
+        x.add_argument("name", nargs="?", help="省略時は、動いているセッションが 1 つだけならそれ")
         x.set_defaults(func=func)
 
     x = sub.add_parser("peek", help="エージェント画面の末尾を表示 (接続せずに確認)")
-    x.add_argument("name")
+    x.add_argument("name", nargs="?", help="省略時は、動いているセッションが 1 つだけならそれ")
     x.add_argument("lines", nargs="?", type=int, default=30)
     x.add_argument("--json", action="store_true", help="状態 API の応答を JSON のまま出力")
     x.set_defaults(func=cmd_peek)
@@ -4343,19 +4389,19 @@ def build_parser():
     x.add_argument("--json", action="store_true", help="1 行に 1 件の JSON で出力")
     x.set_defaults(func=cmd_follow)
     x = sub.add_parser("forward", help="VM の中のポート (開発サーバーなど) を手元の PC のポートにつなぐ")
-    x.add_argument("name")
+    x.add_argument("name", nargs="?", help="省略時は、動いているセッションが 1 つだけならそれ")
     x.add_argument("ports", nargs="+", metavar="port", help="VM のポート (例: 3000)。手元のポートを変えるときは 8080:3000")
     x.add_argument("--no-reconnect", action="store_true", help="接続が切れても再接続しない")
     x.set_defaults(func=cmd_forward)
     x = sub.add_parser("login", help="VM の中のエージェントに、手元のブラウザでログインする")
-    x.add_argument("name")
+    x.add_argument("name", nargs="?", help="省略時は、動いているセッションが 1 つだけならそれ")
     x.add_argument("agent", nargs="?", choices=("claude", "codex"), help="省略時はセッションのエージェント")
     x.add_argument("--device", action="store_true", help="Codex: コードを入力する方式 (codex login --device-auth)")
     x.add_argument("--no-browser", action="store_true", help="Codex: 手元のブラウザを自動で開かない")
     x.add_argument("--console", action="store_true", help="Claude Code: Anthropic Console (API の従量課金) でログイン")
     x.set_defaults(func=cmd_login)
     x = sub.add_parser("view", help="エージェントの画面を読み取り専用で表示 (入力はエージェントに届かない)")
-    x.add_argument("name")
+    x.add_argument("name", nargs="?", help="省略時は、動いているセッションが 1 つだけならそれ")
     x.add_argument("--window", help="表示するウィンドウ (claude / codex / shell)")
     x.add_argument("--no-reconnect", action="store_true", help="接続が切れても再接続しない")
     x.set_defaults(func=cmd_view)
@@ -4393,12 +4439,12 @@ def build_parser():
     x.add_argument("--dir", help="このフォルダで起動したエージェントだけを司令塔にする (重い処理を止める設定も入れる)")
     x.set_defaults(func=cmd_orchestrator)
     x = sub.add_parser("result", help="エージェントの最後の応答を表示")
-    x.add_argument("name")
+    x.add_argument("name", nargs="?", help="省略時は、動いているセッションが 1 つだけならそれ")
     x.add_argument("--agent", choices=("claude", "codex"), help="--agent both で起動したときに片方だけ表示する")
     x.add_argument("--json", action="store_true", help="JSON で出力")
     x.set_defaults(func=cmd_result)
     x = sub.add_parser("send", help="エージェントに指示を送る (tmux に入力)")
-    x.add_argument("name")
+    x.add_argument("name", nargs="?", help="省略時は、動いているセッションが 1 つだけならそれ")
     x.add_argument("--window", help="送信先の tmux ウィンドウ (claude / codex / shell)")
     x.add_argument("--no-enter", action="store_true")
     # "-" で始まる指示は "--" の後に書く (例: mvm send a1 -- -h)
@@ -4415,7 +4461,7 @@ def build_parser():
     x.add_argument("--no-open", action="store_true", help="ブラウザを開かず、URL を表示するだけにする")
     x.set_defaults(func=cmd_ui)
     x = sub.add_parser("ssh", help="SSH over WebSocket で接続 (既定で tmux にアタッチ。切れたら自動で再接続)")
-    x.add_argument("name")
+    x.add_argument("name", nargs="?", help="省略時は、動いているセッションが 1 つだけならそれ")
     x.add_argument("--no-reconnect", action="store_true", help="接続が切れても再接続しない")
     x.add_argument("remote_command", nargs=argparse.REMAINDER, metavar="command")
     x.set_defaults(func=cmd_ssh)
@@ -4426,10 +4472,10 @@ def build_parser():
     x.add_argument("--install", action="store_true", help="~/.ssh/config の pmva ブロックを書き換える")
     x.set_defaults(func=cmd_ssh_config)
     x = sub.add_parser("shell", help="AWS 標準のシェル接続 (SHELL_INGRESS)")
-    x.add_argument("name")
+    x.add_argument("name", nargs="?", help="省略時は、動いているセッションが 1 つだけならそれ")
     x.set_defaults(func=cmd_shell)
     x = sub.add_parser("token", help="エンドポイントと認証トークンを表示")
-    x.add_argument("name")
+    x.add_argument("name", nargs="?", help="省略時は、動いているセッションが 1 つだけならそれ")
     x.add_argument("port", nargs="?", type=int, default=API_PORT)
     x.set_defaults(func=cmd_token)
     x = sub.add_parser("logs", help="CloudWatch Logs を表示")
@@ -4477,6 +4523,7 @@ def main(argv=None):
         parser.error("secret set には kind が必要です")
     if args.command != "orchestrator":   # 手元のエージェントの設定だけなので、config.env がなくても使える
         load_config()
+    fill_name(args)
     return args.func(args) or 0
 
 

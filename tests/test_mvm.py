@@ -252,6 +252,7 @@ class StatusApi(http.server.ThreadingHTTPServer):
         self.events = {}    # /events?agent=X の応答 (エージェントごとのリスト。呼ばれるたびに先頭から返し、尽きたら 500)
         self.event_queries = []
         self.status_calls = 0
+        self.deny = 0   # この回数だけ GET に 403 を返す (トークンの期限切れ)
         api = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -268,6 +269,12 @@ class StatusApi(http.server.ThreadingHTTPServer):
 
             def do_GET(self):
                 api.headers_seen.append({k.lower(): v for k, v in self.headers.items()})
+                if api.deny > 0:
+                    api.deny -= 1
+                    self.send_response(403)
+                    self.send_header("Content-Length", "6")
+                    self.end_headers()
+                    return self.wfile.write(b"denied")
                 if self.path.startswith("/events"):
                     q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                     api.event_queries.append({k: v[0] for k, v in q.items()})
@@ -860,11 +867,11 @@ class WatchLogTest(unittest.TestCase):
 
 class HomeMenuTest(unittest.TestCase):
     """端末で引数なしの mvm を打つと、よく使うコマンドを番号か名前の頭で選び、要る引数を聞いて実行する。"""
-    def run_menu(self, *answers):
+    def run_menu(self, *answers, live=("a1", "b2")):
         ran = []
         with mock.patch("builtins.input", side_effect=list(answers)) as ask, \
                 mock.patch.object(mvm, "main", side_effect=lambda argv: ran.append(argv) or 0), \
-                mock.patch.object(mvm, "session_names", return_value=["a1", "b2"]), \
+                mock.patch.object(mvm, "session_names", return_value=["a1", "b2"]),                 mock.patch.object(mvm, "live_session_names", return_value=live), \
                 mock.patch("sys.stdout", new_callable=__import__("io").StringIO) as out:
             code = mvm.home_menu(mvm.build_parser())
         self.prompts = [c.args[0] for c in ask.call_args_list]
@@ -882,6 +889,12 @@ class HomeMenuTest(unittest.TestCase):
         self.assertEqual(self.run_menu("/ui")[1], [["ui"]])
         self.assertEqual(self.run_menu("stop", "a1")[1], [["stop", "a1"]], "stop-all もあるが完全一致を優先する")
         self.assertEqual(self.run_menu("peek", "a1")[1], [["peek", "a1"]], "よく使う 8 個以外も名前なら選べる")
+
+    def test_optional_name_is_asked_only_with_two_or_more_sessions(self):
+        """name を省略できるようにしたので、省略しても決まる (動いているのが 1 台以下の) ときは聞かない。"""
+        self.assertEqual(self.run_menu("peek", "a1")[1], [["peek", "a1"]])
+        self.assertEqual(self.run_menu("peek", live=("a1",))[1], [["peek"]])
+        self.assertEqual(self.run_menu("send", "-h", live=("a1",))[1], [["send", "--", "-h"]], "指示だけ聞く")
 
     def test_ambiguous_or_unknown_asks_again(self):
         code, ran, out = self.run_menu("s", "zzz", "ls")
@@ -1587,6 +1600,60 @@ class CliTest(unittest.TestCase):
             self.assertEqual(api.received[-1][1]["text"], "-h")
         finally:
             api.shutdown()
+
+    def test_name_defaults_to_the_only_live_session(self):
+        api = StatusApi()
+        self.addCleanup(api.shutdown)
+        env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}")
+        code, _, err = self.mvm("peek", check=False, env=env)
+        self.assertNotEqual(code, 0)
+        self.assertIn("動いているセッションがありません。mvm up <名前> で起動してください", err)
+        self.mvm("up", "a1", env=env)
+        _, out, err = self.mvm("peek", env=env)
+        self.assertIn("こんにちは", out)
+        self.assertIn("(セッション a1 を使います)", err)
+        self.assertNotIn("(セッション", self.mvm("peek", "a1", env=env)[2])
+        # 後ろの位置引数に食われた値は戻す: send の指示、peek の行数、login のエージェント、forward のポート
+        self.mvm("send", "echo", "hi", env=env)
+        self.assertEqual(api.received[-1][1]["text"], "echo hi")
+        self.mvm("send", "a1", "echo", env=env)
+        self.assertEqual(api.received[-1][1]["text"], "echo")
+        self.assertIn("こんにちは", self.mvm("peek", "5", env=env)[1], "数字は行数")
+        parser = mvm.build_parser()
+        with mock.patch.object(mvm, "session_names", return_value=["a1"]),                 mock.patch.object(mvm, "live_session_names", return_value=["a1"]):
+            for argv, attr, want in (["login", "codex"], "agent", "codex"), (["login", "a1"], "agent", None),                     (["token", "9000"], "port", 9000):
+                args = parser.parse_args(argv)
+                mvm.fill_name(args)
+                self.assertEqual((args.name, getattr(args, attr)), ("a1", want), argv)
+            args = parser.parse_args(["forward", "8080:3000", "3001"])
+            mvm.fill_name(args)
+            self.assertEqual((args.name, args.ports), ("a1", ["8080:3000", "3001"]))
+        # 終了していないセッションが 2 つなら止まる。終了済みは数えない
+        self.mvm("up", "b2", env=env)
+        code, _, err = self.mvm("peek", check=False, env=env)
+        self.assertNotEqual(code, 0)
+        self.assertIn("セッションが複数あります: a1, b2。名前を指定してください (例: mvm peek a1)", err)
+        self.mvm("stop", "b2", env=env)
+        self.assertIn("(セッション a1 を使います)", self.mvm("peek", env=env)[2])
+
+    def test_vm_api_refetches_token_once_on_401_403(self):
+        api = StatusApi()
+        self.addCleanup(api.shutdown)
+        env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}")
+        self.mvm("up", "a1", env=env)
+        self.mvm("peek", "a1", env=env)
+        tokens = lambda: [json.loads(l)[:2] for l in (self.stub_dir / "calls.jsonl").read_text(encoding="utf-8").splitlines()
+                          if "create-microvm-auth-token" in l]
+        self.assertEqual(len(tokens()), 1, "2 回目以降はキャッシュを使う")
+        api.deny = 1
+        _, out, _ = self.mvm("peek", "a1", env=env)
+        self.assertIn("こんにちは", out)
+        self.assertEqual(len(tokens()), 2, "403 でキャッシュを捨てて取り直した")
+        api.deny = 2   # 取り直しても 403 なら、繰り返さずに失敗する
+        code, _, err = self.mvm("peek", "a1", check=False, env=env)
+        self.assertNotEqual(code, 0)
+        self.assertIn("HTTP 403", err)
+        self.assertEqual(len(tokens()), 3)
 
     def start_ui(self, env):
         """mvm ui を起動し、(プロセス, ベース URL, 合言葉) を返す。"""
