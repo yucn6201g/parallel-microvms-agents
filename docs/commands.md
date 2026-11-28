@@ -268,8 +268,8 @@ mvm fleet <台数> [--prefix <接頭辞>] [--prompts-file <ファイル>] [up �
 mvm ls [--all] [--json]
 ```
 
-セッションの一覧 (名前、状態、エージェント、認証方式、起動時刻、MicroVM の ID) です。`--all` で終了済みも表示します。状態は `RUNNING` / `SUSPENDED` / `TERMINATED` などで、AWS から状態を取れなかったときは `UNKNOWN` と表示し (終了扱いにはしません)、一覧の後に理由とやるべきこと (`aws sso login` でログインし直す、`AWS_PROFILE` を確かめる、`mvm doctor` で確かめる、など) を標準エラーに出します。`watch` / `wait` / `top` も同じ理由を表示します。
-`--json` で、リポジトリと作業ブランチも含めて JSON の配列で出力します (スクリプトや、手元のエージェントから読むとき)。`UNKNOWN` の行には、理由とやるべきことを `stateError` に入れます。
+セッションの一覧 (名前、状態、エージェント、認証方式、起動時刻、寿命の残り `REMAINING`、MicroVM の ID) です。残りは `起動時刻 + MAX_DURATION_SECONDS - 今` で、`2h10m` の形で出します (起動時刻が分からないときは `-`)。1 時間を切った台は `!! 45m` と出し、表の下に「`mvm renew <名前>` で延長できます」と案内します。サスペンド中も数えます。`--all` で終了済みも表示します。状態は `RUNNING` / `SUSPENDED` / `TERMINATED` などで、AWS から状態を取れなかったときは `UNKNOWN` と表示し (終了扱いにはしません)、一覧の後に理由とやるべきこと (`aws sso login` でログインし直す、`AWS_PROFILE` を確かめる、`mvm doctor` で確かめる、など) を標準エラーに出します。`watch` / `wait` / `top` も同じ理由を表示します。
+`--json` で、リポジトリと作業ブランチ、寿命の残り秒数 (`remainingSeconds`。分からないときは `null`) も含めて JSON の配列で出力します (スクリプトや、手元のエージェントから読むとき)。`UNKNOWN` の行には、理由とやるべきことを `stateError` に入れます。
 
 ### peek
 
@@ -412,18 +412,18 @@ mvm watch [秒] [--once] [--json] [--log <CSV のパス>]
 |---|---|
 | `秒` | 更新の間隔。既定は 10 |
 | `--once` | 1 回だけ表示して終わる (描き直しの制御文字を出さない) |
-| `--json` | 台ごとの状態を JSON の配列で 1 回出力する (`--once` を含む)。キーは `name`、`vm`、`state`、`agents`、`sinceSeconds`、`memory` (`usedMiB`、`totalMiB`、`peakMiB`)、`oomKills`、`lastEvent`、`notes` |
-| `--log <パス>` | 更新のたびに台ごとに 1 行を CSV に追記する。列は `time,name,vm,state,usedMiB,totalMiB,peakMiB,oomKills`。ファイルが無ければ見出しの行を書く。書けないときは理由と次にやることを出して止まる |
+| `--json` | 台ごとの状態を JSON の配列で 1 回出力する (`--once` を含む)。キーは `name`、`vm`、`state`、`agents`、`sinceSeconds`、`remainingSeconds` (寿命の残り秒数。分からないときは `null`)、`memory` (`usedMiB`、`totalMiB`、`peakMiB`)、`oomKills`、`lastEvent`、`notes` |
+| `--log <パス>` | 更新のたびに台ごとに 1 行を CSV に追記する。列は `time,name,vm,state,usedMiB,totalMiB,peakMiB,oomKills,remainingSeconds`。ファイルが無ければ見出しの行を書く。前の版で書いた、列の違うファイルには追記しない。書けないときは理由と次にやることを出して止まる |
 
 表示の例:
 
 ```
 2026-11-24 15:00:12  4 台 (作業中 1 / 要対応 1 / 完了 1)  10 秒ごと / Ctrl-C で終了
-名前  状態            経過  メモリ (使用/全体 最大)  最後の出来事
-a1    作業中          12分  1.2/3.8G 最大1.5G        実行: Bash: pytest -x
-a2    許可・入力待ち  3分   0.9/3.8G 最大0.9G        Bash の実行の許可を求めています
-a3    応答が終わった  1分   0.5/3.8G 最大0.8G        応答: 原因はトークンの期限切れでした
-a4    SUSPENDED       -     -                        -
+名前  状態            経過  残り     メモリ (使用/全体 最大)  最後の出来事
+a1    作業中          12分  2h10m    1.2/3.8G 最大1.5G        実行: Bash: pytest -x
+a2    許可・入力待ち  3分   5h02m    0.9/3.8G 最大0.9G        Bash の実行の許可を求めています
+a3    応答が終わった  1分   !! 45m   0.5/3.8G 最大0.8G        応答: 原因はトークンの期限切れでした
+a4    SUSPENDED       -     7h30m    -                        -
 
 !! a2 (claude): 許可・入力待ち: Bash の実行の許可を求めています
 (表示中のセッションは自動サスペンドされません)
@@ -431,6 +431,7 @@ a4    SUSPENDED       -     -                        -
 
 - 状態: エージェントの状態を [wait](#wait) と同じ考え方で 1 つにまとめて出します (作業中・応答が終わった・許可・入力待ち・エラーで止まった・動きが止まった、など)。VM が `RUNNING` 以外のときは、VM の状態 (`SUSPENDED` など) をそのまま出します。AWS から状態を取れないとき (`UNKNOWN`) は、表の下に理由とやることを出します
 - 経過: 今の状態になってからの時間です (分からないときは `-`)
+- 残り: MicroVM の寿命 (`MAX_DURATION_SECONDS`) の残りです。1 時間を切ると `!!` を付けます。延長は [renew](#renew)。`mvm ui` の一覧にも同じ列が出ます
 - メモリ: 使用量/全体の量 (GiB) と、`watch` を動かしている間に見た使用量の最大 (`最大`。手元で台ごとに覚え、`watch` を終えると忘れます)。メモリ不足でプロセスが強制終了された (OOM) 台は `!!OOM×回数` を付け、表の下にも出します
 - 最後の出来事: 会話の記録 ([follow](#follow) と同じもの) の最後の 1 件です。`--agent both` のセッションは、状態が最近変わった方を出します (分からなければ claude)
 - 要対応: 許可・入力待ち、エラー、起動の準備の失敗、動きの停止、`UNKNOWN`、VM の状態 API の応答なし、OOM の台です。表の下に `!!` で理由を出します
@@ -457,6 +458,8 @@ mvm ui [--port <番号>] [--no-open]
 |---|---|
 | `--port <番号>` | 待ち受けるポート。既定は空いている番号 |
 | `--no-open` | ブラウザを開かず、URL を表示するだけにする |
+
+一覧の列は [watch](#watch) と同じです (名前、状態、経過、寿命の残り、メモリ、最後の出来事)。
 
 画面でできること:
 
@@ -572,6 +575,8 @@ mvm resume <name>
 ```
 
 一時停止 / 再開します。一時停止中は計算料金がかかりません。通信が来ると自動でも再開します (`IDLE_AUTO_RESUME=true`)。
+
+`suspend` は、サスペンドの前にワークスペースを保存します (`stop` と同じ。動いているときだけ。保存に失敗しても警告してサスペンドは続けます)。サスペンド中も寿命 (`MAX_DURATION_SECONDS`) には数えます。サスペンドのまま `IDLE_SUSPENDED_SECONDS` (既定 6 時間) たつと終了するので、実行後に残りの寿命とあわせて表示します。
 
 ### stop
 
