@@ -2305,14 +2305,20 @@ def cmd_fleet(args):
         prompts = expand_path(args.prompts_file).read_text(encoding="utf-8").splitlines()
     names = [f"{args.prefix}-{i:02d}" for i in range(1, args.count + 1)]
     running = active_names()
+    failed, skipped = [], []
     # 1 台目を起動する前に、全台分がクォータに収まるかを確かめる
     check_memory_quota(len(running), len([n for n in names if n not in running]))
     for i, name in enumerate(names, start=1):
         if name in running:
             log(f"{name} は起動済みのためスキップ")
+            skipped.append(name)
             continue
         a = argparse.Namespace(**vars(args))
         a.name = name
+        if session_path(name).exists() and not args.no_repo and not args.branch:
+            # fleet は前回のワークスペースは復元しないが、VM は origin に同名のブランチがあればそれを使う
+            log(f"{name}: 前回の記録があります。ブランチ pmva/{name} が GitHub にあれば、その続きから始めます "
+                "(保存したワークスペースは復元しません)")
         if i <= len(prompts) and prompts[i - 1].strip():
             a.prompt = prompts[i - 1].strip()
         try:
@@ -2320,6 +2326,12 @@ def cmd_fleet(args):
         except SystemExit as e:
             print(e.code, file=sys.stderr)
             log(f"{name} の起動に失敗しました")
+            failed.append(name)
+    if skipped:
+        log(f"起動済みのためスキップ: {', '.join(skipped)}")
+    if failed:
+        log(f"起動に失敗: {', '.join(failed)} (原因は上のエラーを確認し、同じコマンドを打ち直してください。起動済みの台は飛ばします)")
+        return 1
     return 0
 
 
@@ -2410,14 +2422,18 @@ def skip_terminate_save(name, saved=False):
 
 
 def stop(name, save=True, require_save=False):
-    """保存してから終了する。require_save=True なら、保存に失敗したときは終了せずに止める (renew 用)。"""
+    """保存してから終了する。require_save=True なら、保存に失敗したときは終了せずに止める (renew 用)。
+
+    保存に失敗したまま終了したときは True を返す (呼び出し元が終了コードとメッセージに反映する)。
+    """
     state = vm_state(name)
     if state in ("TERMINATED", "GONE"):
         log(f"{name} は既に終了しています")
-        return
+        return False
     if require_save and state not in ("RUNNING", "SUSPENDED"):
         reason = f" ({state_error(name)})" if state == "UNKNOWN" else ""
         die(f"{name} の状態が {state} のため保存できません。作業内容を失わないよう、終了せずに止めました{reason}")
+    save_failed = False
     if save and state in ("RUNNING", "SUSPENDED"):
         if state == "SUSPENDED":
             # サスペンド中は保存できないので再開する (自動レジュームが無効でも保存できるように明示的に)
@@ -2435,6 +2451,7 @@ def stop(name, save=True, require_save=False):
                     f"原因を確認して再実行するか、保存せずに作り直すなら mvm stop {name} --no-save → "
                     f"mvm up {name} --restore latest (最後に保存できた時点に戻ります)")
             log("保存に失敗しました (terminate フックでもう一度試みます)")
+            save_failed = True
         else:
             # 保存できたので、terminate フックでもう一度保存しない
             skip_terminate_save(name, saved=True)
@@ -2446,21 +2463,32 @@ def stop(name, save=True, require_save=False):
     save_session(s)
     clear_tokens(name)
     log(f"終了しました: {name}")
+    if save_failed:
+        log(f"{name} の保存に失敗しました。terminate フックでの保存も失敗していれば、"
+            f"最後に保存できた時点 (workspaces/{name}/latest.tar.gz) に戻ります。"
+            f"確かめるには mvm up {name} --restore latest")
+    return save_failed
 
 
 def cmd_stop(args):
-    stop(args.name, save=not args.no_save)
-    return 0
+    return 1 if stop(args.name, save=not args.no_save) else 0
 
 
 def cmd_stop_all(args):
+    save_failed, stop_failed = [], []
     for name in session_names():
         if not load_session(name).get("terminated"):
             try:
-                stop(name, save=not args.no_save)
+                if stop(name, save=not args.no_save):
+                    save_failed.append(name)
             except SystemExit as e:
                 print(e.code, file=sys.stderr)
-    return 0
+                stop_failed.append(name)
+    if save_failed:
+        log(f"保存に失敗: {', '.join(save_failed)} (最後に保存できた時点 workspaces/<名前>/latest.tar.gz に戻ります)")
+    if stop_failed:
+        log(f"終了に失敗: {', '.join(stop_failed)} (原因は上のエラーを確認し、mvm stop <名前> を打ち直してください)")
+    return 1 if save_failed or stop_failed else 0
 
 
 def cmd_renew(args):
@@ -3479,7 +3507,10 @@ def ui_up_args(body):
 def ui_run_job(ui, name, action, args=None):
     try:
         if action == "stop":
-            stop(name, save=True)
+            if stop(name, save=True):
+                ui.jobs[name].update(state="error", message=f"{name}: 終了しましたが、保存に失敗しました。"
+                                     f"最後に保存できた時点 (workspaces/{name}/latest.tar.gz) に戻ります")
+                return
         elif action == "up":
             cmd_up(args)
         else:
