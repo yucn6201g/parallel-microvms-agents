@@ -89,6 +89,11 @@ if cmd == "cloudformation get-template":  # deploy する前は権限がない�
         fail("An error occurred (AccessDenied) when calling the GetTemplate operation")
     out({"TemplateBody": deployed["template"], "StagesAvailable": ["Original", "Processed"]})
 if cmd == "cloudformation describe-stacks":
+    if os.environ.get("PMVA_STUB_NO_STACK") and not deployed:   # deploy するまでスタックが無い
+        fail("An error occurred (ValidationError) when calling the DescribeStacks operation: "
+             f"Stack with id {opt('--stack-name')} does not exist")
+    if os.environ.get("PMVA_STUB_STACK_FAILED"):   # 作成に失敗して出力の無いスタック (ROLLBACK_COMPLETE など)
+        out({"Stacks": [{"StackStatus": os.environ["PMVA_STUB_STACK_FAILED"], "Outputs": []}]})
     extra = {}
     if deployed:
         extra = {"StackStatus": os.environ.get("PMVA_STUB_STACK_STATUS", "UPDATE_COMPLETE"),
@@ -115,9 +120,12 @@ if os.environ.get("PMVA_STUB_DOCKER_IMAGE"):   # 手元の Docker を MicroVM �
             fail(str(e))
 if cmd == "lambda-microvms list-managed-microvm-images":
     out({"items": [{"imageArn": "arn:aws:lambda:ap-northeast-1:aws:microvm-image:al2023-1"}]})
-if cmd == "lambda-microvms list-microvm-images":
+if cmd == "lambda-microvms list-microvm-images":   # PMVA_STUB_NO_IMAGE=1 で create-microvm-image するまでイメージが無い
+    if os.environ.get("PMVA_STUB_NO_IMAGE") and not (D / "image-created").exists():
+        out({"items": []})
     out({"items": [{"name": "pmva-agent", "imageArn": "arn:img", "state": "CREATED"}]})
 if cmd in ("lambda-microvms create-microvm-image", "lambda-microvms update-microvm-image"):
+    (D / "image-created").touch()
     out({"imageArn": "arn:img", "imageVersion": "2.0"})
 if cmd == "lambda-microvms get-microvm-image-version":
     out({"state": "SUCCESSFUL"})

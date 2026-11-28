@@ -38,19 +38,16 @@ flowchart LR
 
 ## はじめかた
 
-**[docs/quickstart.md](docs/quickstart.md) を上から順に進めてください。** AWS アカウントの守り方から、1 台目のエージェントを動かして止めるまでを 9 つの手順にまとめています。流れは次のとおりです。
+**[docs/quickstart.md](docs/quickstart.md) を上から順に進めてください。** AWS アカウントの守り方から、1 台目のエージェントを動かして止めるまでを 7 つの手順にまとめています。流れは次のとおりです。
 
 ```bash
-mvm doctor                        # 前提ツールと AWS の認証を確認
-mvm infra deploy                  # (管理者で 1 回だけ) S3・IAM ロールなどを作る
-mvm secret set claude-oauth-token # エージェントの認証情報を登録
-mvm image build                   # Claude Code / Codex 入りのイメージを作る
+mvm setup --profile admin         # 済んでいない準備 (S3・IAM ロール、普段使うユーザー、認証情報、イメージ) を聞きながら実行
 mvm up test-01 --repo https://github.com/<owner>/<repo>.git --prompt "README を読んで概要を説明して"
 mvm peek test-01                  # 画面を確認 (ブラウザで全台を見て操作するなら mvm ui)
 mvm stop test-01                  # 保存してから止める
 ```
 
-`infra deploy` だけを管理者で行い、普段は権限を絞った IAM ユーザーで使います。AI エージェントに AWS を使わせるので、ルートユーザーの MFA と予算アラートを最初に設定してください (quickstart の手順 1)。
+AWS の土台を作るところだけを管理者で行い、普段は `mvm setup` が作る権限を絞った IAM ユーザーで使います。AI エージェントに AWS を使わせるので、ルートユーザーの MFA と予算アラートを最初に設定してください (quickstart の手順 1)。
 
 費用の目安は、4GB の MicroVM 1 台で 1 時間あたり約 $0.29 (税抜) です。止めている間は計算料金がかかりません ([docs/cost.md](docs/cost.md))。
 

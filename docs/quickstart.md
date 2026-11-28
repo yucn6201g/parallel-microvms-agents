@@ -8,12 +8,10 @@
 | [1](#1-aws-アカウントを守る) | AWS アカウントを守る (MFA と予算) | 10 分 |
 | [2](#2-手元-pc-にツールを入れる) | 手元 PC にツールを入れる | 10〜20 分 |
 | [3](#3-このリポジトリを取得してセットアップする) | このリポジトリを取得してセットアップする | 5 分 |
-| [4](#4-aws-の土台を作る-管理者で-1-回だけ) | AWS の土台を作る (管理者で 1 回だけ) | 10 分 |
-| [5](#5-普段使う-iam-ユーザーに切り替える) | 普段使う IAM ユーザーに切り替える | 5 分 |
-| [6](#6-エージェントの認証情報を登録する) | エージェントの認証情報を登録する | 5 分 |
-| [7](#7-イメージをビルドする) | イメージをビルドする | 10〜20 分 (待つだけ) |
-| [8](#8-1-台目を動かす) | 1 台目を動かす | 5 分 |
-| [9](#9-使い終わったら止める) | 使い終わったら止める | 1 分 |
+| [4](#4-管理者のプロファイルを用意する) | 管理者のプロファイルを用意する | 5 分 |
+| [5](#5-mvm-setup-で残りの準備をする) | `mvm setup` で残りの準備をする (AWS の土台、普段使うユーザー、認証情報、イメージ) | 20〜30 分 (大半は待つだけ) |
+| [6](#6-1-台目を動かす) | 1 台目を動かす | 5 分 |
+| [7](#7-使い終わったら止める) | 使い終わったら止める | 1 分 |
 
 **費用の目安**: 4GB の MicroVM 1 台で 1 時間あたり約 $0.29 (税抜)。止めれば計算料金はかかりません。ほかに保存などの固定費が月 $4 前後です ([cost.md](cost.md))。
 
@@ -54,11 +52,7 @@ xcode-select --install       # Git と Python 3 (すでに入っていれば不�
 brew install awscli          # Homebrew が無ければ https://brew.sh から入れる
 ```
 
-SSH 鍵が無ければ作ります (両 OS 共通。質問はすべて Enter で構いません)。
-
-```bash
-ssh-keygen -t ed25519
-```
+SSH 鍵は、無ければ手順 5 の `mvm setup` が作ります。
 
 ## 3. このリポジトリを取得してセットアップする
 
@@ -84,72 +78,42 @@ scripts/install.sh
 すべて `[OK]` なら成功です。`[NG]` が出たら、表示に従ってツールを入れてからもう一度実行してください。
 **ここで新しいターミナルを開き直します** (開き直すと `mvm` と打つだけで動くようになります。Windows で「スクリプトの実行が無効」と出たら `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` を 1 回実行)。以降は `parallel-microvms-agents` フォルダで作業します。
 
-## 4. AWS の土台を作る (管理者で 1 回だけ)
+## 4. 管理者のプロファイルを用意する
 
-ここだけ管理者の権限が要ります。**自分の PC で**行ってください。
+AWS の土台を作るところだけ管理者の権限が要ります。**自分の PC で**行ってください。
 
-1. 管理者のプロファイルを用意する
-   - IAM Identity Center (SSO) を使っている場合 (おすすめ): `aws configure sso` を実行し、プロファイル名を `admin` にする
-   - 使っていない場合: 管理者の IAM ユーザーのアクセスキーを作り、`aws configure --profile admin` で入力する。**手順 5 が終わったらこのキーは削除する**
-2. `config.env` をテキストエディタで開き、最後に `AWS_PROFILE=admin` を書き足す (リージョンは既定で東京 `ap-northeast-1`)
-3. 確認してから作成する
+- IAM Identity Center (SSO) を使っている場合 (おすすめ): `aws configure sso` を実行し、プロファイル名を `admin` にする
+- 使っていない場合: 管理者の IAM ユーザーのアクセスキーを作り、`aws configure --profile admin` で入力する。**手順 5 が終わったらこのキーは削除する**
 
-```bash
-mvm doctor           # 「ok AWS 認証」と「Lambda MicroVMs が利用可能」が出れば OK (管理者の警告 !! はこの段階では想定どおり)
-mvm infra deploy     # S3・IAM ロール・ログなどを作る (数分)
-```
+リージョンは既定で東京 (`ap-northeast-1`) です。キープアライブ・毎晩の自動停止・予算アラートが要らなければ、手順 5 の前に `config.env` に `INFRA_TEMPLATE=minimal` を書き足すと、動かすのに必要なリソースだけを作ります ([setup.md](setup.md#aws-の構成を作る))。
 
-`mvm doctor` の「同時に何台まで」の行も見ておきます。この台数まで並列に動かせます ([setup.md](setup.md#前提の確認とクォータ))。
-
-キープアライブ・毎晩の自動停止・予算アラートが要らなければ、`mvm infra deploy` の前に `config.env` に `INFRA_TEMPLATE=minimal` を書き足すと、動かすのに必要なリソースだけを作ります ([setup.md](setup.md#aws-の構成を作る))。
-
-## 5. 普段使う IAM ユーザーに切り替える
-
-普段の操作は、`pmva-operator` ポリシーだけを付けた専用ユーザーで行います。続けて管理者のプロファイルのまま実行します。
+## 5. `mvm setup` で残りの準備をする
 
 ```bash
-mvm infra operator   # IAM ユーザー pmva-operator とアクセスキーを作り、プロファイル pmva に保存して config.env を切り替える
+mvm setup --profile admin
 ```
 
-キーは画面に表示されず、AWS CLI の認証情報ファイル (`~/.aws/credentials`) にだけ書かれます。`config.env` の `AWS_PROFILE` も `pmva` に書き換わります。10 秒ほど待ってから確認します。
+まだ済んでいない準備を 1 つずつ聞きながら進めます。聞かれたら Enter (はい) で進めてください。途中で止めても、もう一度 `mvm setup` を実行すれば続きから始まります。
 
-```bash
-mvm doctor           # 「権限の確認は省略しました」または「管理者権限ではありません」と出れば切り替え完了
-```
-
-IAM Identity Center (SSO) の権限セットで使う場合は、このコマンドは使わず [setup.md](setup.md#操作用の-iam-ユーザー) の手順に従います。
-
-手順 4 で管理者のアクセスキーを作った場合は、ここで IAM コンソールから削除します (`mvm infra deploy` をやり直すときは、その都度作って使い終わったら削除します)。
-
-## 6. エージェントの認証情報を登録する
-
-使うものを 1 つ選んで登録します。値は入力しても画面に表示されず、AWS Secrets Manager にだけ保存されます。
-
-| 使いたいもの | 手元で行うこと | 登録コマンド |
+| 順番 | やること | 聞かれたときに用意するもの |
 |---|---|---|
-| Claude Pro / Max (サブスクリプション) | 手元に Claude Code を入れて `claude setup-token` を実行し、表示されたトークンをコピー | `mvm secret set claude-oauth-token` |
-| Anthropic API キー | Claude Console でキーを発行 | `mvm secret set anthropic-api-key` |
-| Codex (OpenAI API キー) | OpenAI のダッシュボードでキーを発行 | `mvm secret set openai-api-key` |
+| 1 | AWS の土台 (S3・IAM ロール・ログなど) を作る (`mvm infra deploy`、数分) | なし |
+| 2 | 普段使う IAM ユーザー `pmva-operator` (`pmva-operator` ポリシーだけを付ける) を作り、プロファイル `pmva` に切り替える (`mvm infra operator`) | なし (キーは画面に出ず、`~/.aws/credentials` にだけ書かれる) |
+| 3 | エージェントの認証情報を Secrets Manager に登録する (`mvm secret set`) | 既定の Claude Pro / Max なら、手元に Claude Code を入れて `claude setup-token` を実行し、表示されたトークン。GitHub のリポジトリで作業させるなら、対象リポジトリに絞った Fine-grained personal access token (Contents と Pull requests を Read and write)。GitHub を使わないなら `n` と答える |
+| 4 | SSH 鍵が無ければ作る (`ssh-keygen`) | なし (質問はすべて Enter で構いません) |
+| 5 | Claude Code / Codex 入りのイメージをビルドする (`mvm image build`、10〜20 分) | なし。待つだけ |
 
-既定の設定は「Claude Code をサブスクリプションで使う」です。ほかの方式 (Amazon Bedrock、ChatGPT アカウントの Codex など) や切り替え方は [auth.md](auth.md) を参照してください。
+最後に `mvm doctor` で確かめ、「準備ができました」と出れば完了です。`config.env` の `AWS_PROFILE` は `pmva` に書き換わっています。
+`mvm doctor` の「同時に何台まで」の行も見ておきます。この台数まで並列に動かせます。足りなければ引き上げを申請します (審査に数日かかることがあります。[setup.md](setup.md#前提の確認とクォータ))。
 
-GitHub のリポジトリで作業させる場合は、対象リポジトリに絞った Fine-grained personal access token (Contents と Pull requests を Read and write) を発行して登録します。
+- 値の入力は画面に表示されず、AWS Secrets Manager にだけ保存されます
+- Anthropic API キー、Amazon Bedrock、Codex などで使う場合は、先に `config.env` の `DEFAULT_AGENT` / `DEFAULT_CLAUDE_AUTH` / `DEFAULT_CODEX_AUTH` を書き換えてから `mvm setup` を実行します。その方式に要る認証情報を聞かれます ([auth.md](auth.md))
+- IAM Identity Center (SSO) の権限セットで普段の操作をする場合は、2 番目で `n` と答え、[setup.md](setup.md#操作用の-iam-ユーザー) の手順に従います
+- 手順 4 で管理者のアクセスキーを作った場合は、ここで IAM コンソールから削除します (`mvm infra deploy` をやり直すときは、その都度作って使い終わったら削除します)
 
-```bash
-mvm secret set github-token
-```
+1 つずつ自分で実行したいときは、上の表のかっこの中のコマンドを順に実行しても同じです ([setup.md](setup.md))。
 
-GitHub を使わない場合は、`config.env` に `USE_GITHUB_TOKEN=false` を書き足します。
-
-## 7. イメージをビルドする
-
-Claude Code / Codex 入りの実行環境を AWS 上で作ります。初回は 10〜20 分かかるので、その間は待つだけです。
-
-```bash
-mvm image build      # 「ビルド成功」と出れば完了
-```
-
-## 8. 1 台目を動かす
+## 6. 1 台目を動かす
 
 ```bash
 mvm up test-01 --repo https://github.com/<owner>/<repo>.git --prompt "README を読んで概要を説明して"
@@ -168,7 +132,7 @@ mvm ssh test-01                          # 画面に入って直接操作する�
 `mvm ssh` から抜けても、エージェントは AWS 上で作業を続けます。手元の PC を閉じても止まりません。
 作業ブランチは `pmva/test-01` です。エージェントに commit と push をさせれば、成果は GitHub に残ります。
 
-## 9. 使い終わったら止める
+## 7. 使い終わったら止める
 
 ```bash
 mvm stop test-01     # ワークスペースを保存してから終了する (全部まとめて止めるなら mvm stop-all)
@@ -199,12 +163,12 @@ mvm cost --actual --days 7
 | 症状 | 確認すること |
 |---|---|
 | `mvm` が見つからない | 手順 3 の後でターミナルを開き直したか。フォルダの中で `bin/mvm` (Windows は `.\bin\mvm.cmd`) なら動くか |
-| `mvm doctor` で「AWS 認証情報がありません」 | `config.env` の `AWS_PROFILE` と、`aws configure` で付けたプロファイル名が同じか。SSO なら `aws sso login --profile admin` |
+| `mvm setup` / `mvm doctor` で「AWS 認証情報がありません」「AWS に接続できません」 | `mvm setup --profile` に渡した名前と、`aws configure` で付けたプロファイル名が同じか。SSO なら `aws sso login --profile admin` |
 | `mvm doctor` で「lambda-microvms に未対応」 | AWS CLI が古い。最新版に入れ直す |
-| `mvm infra deploy` で AccessDenied | 管理者のプロファイル (`AWS_PROFILE=admin`) で実行しているか |
+| `mvm setup` の `mvm infra deploy` で AccessDenied | 管理者のプロファイルで実行しているか (`mvm setup --profile admin`) |
 | `mvm up` で「メモリ上限を超えます」 | クォータで決まる台数まで起動している。`mvm ls` で確認して、使っていないものを止める ([setup.md](setup.md#前提の確認とクォータ)) |
-| `mvm peek` で bootstrap が `failed` | 手順 6 のシークレットを登録したか (`mvm secret ls`)。`mvm shell test-01` で入って `cat ~agent/.pmva/bootstrap.log` |
-| `mvm ssh` で「SSH 公開鍵なしで起動されています」 | 手順 2 の `ssh-keygen` をしたか。作った後に `mvm renew test-01` で起動し直す (それまでは `mvm shell test-01` で入れる) |
-| 手順 5 の後に `mvm image build` や `mvm up` で AccessDenied | `pmva-operator` ポリシーに足りない権限がある (このポリシーだけでの動作はまだ確認できていない)。エラーに出た操作を [setup.md](setup.md#操作用の-iam-ユーザー) の手順で追加する |
+| `mvm peek` で bootstrap が `failed` | 手順 5 でシークレットを登録したか (`mvm secret ls`)。`mvm shell test-01` で入って `cat ~agent/.pmva/bootstrap.log` |
+| `mvm ssh` で「SSH 公開鍵なしで起動されています」 | 手順 5 で SSH 鍵を作ったか。作った後に `mvm renew test-01` で起動し直す (それまでは `mvm shell test-01` で入れる) |
+| プロファイル `pmva` に切り替えた後に `mvm image build` や `mvm up` で AccessDenied | `pmva-operator` ポリシーに足りない権限がある (普段の操作はこのポリシーだけで通ることを確認済み。新しい機能で足りないことがある)。`mvm infra deploy` をやり直していなければ管理者のプロファイルでやり直し、それでも出るならエラーに出た操作を [setup.md](setup.md#操作用の-iam-ユーザー) の手順で追加する |
 
 ほかの症状は [troubleshooting.md](troubleshooting.md) を参照してください。

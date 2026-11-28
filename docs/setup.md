@@ -108,7 +108,7 @@ mvm infra deploy
 
 ## 操作用の IAM ユーザー
 
-普段の操作 (起動・接続・停止・イメージのビルド) は、**`pmva-operator` ポリシーだけを付けた専用の IAM ユーザー**で行います。作り方は [quickstart.md の手順 5](quickstart.md#5-普段使う-iam-ユーザーに切り替える) にあります。
+普段の操作 (起動・接続・停止・イメージのビルド) は、**`pmva-operator` ポリシーだけを付けた専用の IAM ユーザー**で行います。`mvm setup` が作るか ([quickstart.md の手順 5](quickstart.md#5-mvm-setup-で残りの準備をする))、`mvm infra operator` で作れます。
 
 IAM Identity Center (SSO) を使っている場合は、アクセスキーを作らずに済む権限セットがおすすめです。権限セットを作るときにカスタマーマネージドポリシーとして `pmva-operator` (パスは `/`) だけを付け、自分のユーザーにこのアカウントで割り当てます。続けて `aws configure sso` (既存の SSO セッションがあれば `~/.aws/config` に `sso_role_name = <権限セットの名前>` のプロファイルを足すだけ) でプロファイルを作り、`config.env` の `AWS_PROFILE` に設定します。`mvm doctor` で「権限の確認は省略しました」(`pmva-operator` だけでは IAM の情報を読めないため) と出て、ほかの項目が OK なら準備完了です。
 
