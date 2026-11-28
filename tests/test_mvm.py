@@ -249,6 +249,8 @@ class StatusApi(http.server.ThreadingHTTPServer):
                           "windows": [{"name": "shell", "command": "bash"},
                                       {"name": "claude", "command": "claude", "screen": "こんにちは"}]}]
         self.results = {}   # /result?agent=X の応答
+        self.diff = None    # /diff の応答 (None は古いイメージ: 404)
+        self.diff_paths = []
         self.events = {}    # /events?agent=X の応答 (エージェントごとのリスト。呼ばれるたびに先頭から返し、尽きたら 500)
         self.event_queries = []
         self.status_calls = 0
@@ -259,9 +261,9 @@ class StatusApi(http.server.ThreadingHTTPServer):
             def log_message(self, *args):
                 pass
 
-            def reply(self, body):
+            def reply(self, body, code=200):
                 data = json.dumps(body, ensure_ascii=False).encode()
-                self.send_response(200)
+                self.send_response(code)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
@@ -285,6 +287,11 @@ class StatusApi(http.server.ThreadingHTTPServer):
                         self.end_headers()
                         return self.wfile.write(b"broken")
                     return self.reply(queue.pop(0))
+                if self.path.startswith("/diff"):
+                    api.diff_paths.append(self.path)
+                    # None は /diff を知らない古いイメージ (404)
+                    return self.reply(api.diff if api.diff is not None else {"error": "not found"},
+                                      200 if api.diff is not None else 404)
                 if self.path.startswith("/result"):
                     agent = self.path.split("agent=", 1)[-1]
                     return self.reply(api.results.get(agent, {"error": "not found"}))
@@ -323,6 +330,38 @@ class ParseEnvFileTest(unittest.TestCase):
         self.assertEqual(r["GIT_USER_NAME"], "山田 太郎")
         self.assertEqual(r["EMPTY"], "")
         self.assertEqual(r["URL"], "https://example.com/#anchor")
+
+
+class AwsProfileOverrideTest(unittest.TestCase):
+    """PMVA_AWS_PROFILE は config.env の AWS_PROFILE より優先される (環境変数 AWS_PROFILE ではない)。"""
+
+    def load(self, env_value, config_profile="pmva-op"):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d) / "config.env"
+            cfg.write_text(f"AWS_PROFILE={config_profile}\n", encoding="utf-8")
+            env = {"PMVA_AWS_PROFILE": env_value, "AWS_PROFILE": "admin-from-shell"}
+            with mock.patch.object(mvm, "CONFIG_FILE", cfg), mock.patch.object(mvm, "STATE_DIR", Path(d) / "state"), \
+                    mock.patch.dict(os.environ, env), mock.patch.dict(mvm.C, clear=False):
+                mvm.load_config()
+                return mvm.aws_env()["AWS_PROFILE"], mvm.aws_profile_override_note()
+
+    def test_env_overrides_config(self):
+        profile, note = self.load("pmva")
+        self.assertEqual(profile, "pmva")
+        self.assertEqual(note, "PMVA_AWS_PROFILE=pmva で config.env の AWS_PROFILE=pmva-op を上書きしています")
+
+    def test_empty_keeps_config(self):
+        profile, note = self.load("")
+        self.assertEqual(profile, "pmva-op")
+        self.assertEqual(note, "")
+
+    def test_auth_expired_hint_names_profile(self):
+        with mock.patch.dict(mvm.C, {"AWS_PROFILE": "pmva-op"}):
+            hint = mvm.aws_error_hint("Token has expired")
+        self.assertIn("aws sso login --profile pmva-op", hint)
+        self.assertIn("PMVA_AWS_PROFILE=<名前>", hint)
+        with mock.patch.dict(mvm.C, {"AWS_PROFILE": ""}):
+            self.assertNotIn("--profile", mvm.aws_error_hint("Token has expired"))
 
 
 class WsTargetTest(unittest.TestCase):
@@ -1585,6 +1624,12 @@ class CliTest(unittest.TestCase):
         _, out, _ = self.mvm("doctor", env=env, check=False)
         self.assertIn("AWS に接続できません", out)
 
+    def test_doctor_shows_pmva_aws_profile_override(self):
+        _, out, _ = self.mvm("doctor", check=False)
+        self.assertNotIn("PMVA_AWS_PROFILE", out)
+        _, out, _ = self.mvm("doctor", env=dict(self.env, PMVA_AWS_PROFILE="other"), check=False)
+        self.assertIn("PMVA_AWS_PROFILE=other で config.env の AWS_PROFILE=", out)
+
     def test_doctor_warns_when_safety_nets_are_off(self):
         _, out, _ = self.mvm("doctor", check=False)
         self.assertIn("!!   止め忘れ・使いすぎの安全網が無効です (config.env の NIGHTLY_STOP_TIME / BUDGET_MONTHLY_USD", out)
@@ -1874,6 +1919,41 @@ class CliTest(unittest.TestCase):
             _, out, _ = self.mvm("peek", "a1", env=env)
             self.assertNotIn("未コミット", out)
 
+    def test_diff_shows_uncommitted_work(self):
+        api = StatusApi()
+        self.addCleanup(api.shutdown)
+        self.mvm("up", "a1")
+        env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}")
+        api.diff = {"branch": "pmva/a1", "untracked": ["new.txt"], "unpushed": ["abc1234 初期化"],
+                    "stat": " a.txt | 2 +-\n 1 file changed", "diff": "diff --git a/a.txt b/a.txt\n-古い\n+新しい\n",
+                    "truncated": False}
+        _, out, _ = self.mvm("diff", "a1", env=env)
+        for want in ("pmva/a1", "abc1234 初期化", "new.txt", "+新しい"):
+            self.assertIn(want, out)
+        self.assertNotIn("1 file changed", out)
+        _, out, _ = self.mvm("diff", "a1", "--stat", env=env)
+        self.assertIn("1 file changed", out)
+        self.assertNotIn("+新しい", out)
+        _, out, _ = self.mvm("diff", "--json", env=env)   # name の省略
+        self.assertEqual(json.loads(out), api.diff)
+        api.diff = dict(api.diff, truncated=True)
+        _, out, _ = self.mvm("diff", "a1", env=env)
+        self.assertIn("先頭", out)
+        self.assertIn("全文は mvm ssh で", out)
+        api.diff = {"branch": "main", "untracked": [], "unpushed": [], "stat": "", "diff": "", "truncated": False}
+        _, out, _ = self.mvm("diff", "a1", env=env)
+        self.assertIn("未コミット・未 push の変更はありません", out)
+        api.diff = {"error": "not a git repository"}
+        code, _, err = self.mvm("diff", "a1", env=env, check=False)
+        self.assertEqual(code, 1)
+        self.assertIn("git のリポジトリではありません", err)
+        api.diff = None   # /diff を知らない古いイメージ
+        code, _, err = self.mvm("diff", "a1", env=env, check=False)
+        self.assertEqual(code, 1)
+        self.assertIn("この VM のイメージは差分の表示に対応していません", err)
+        self.assertIn("mvm image build", err)
+        self.assertIn("mvm renew a1", err)
+
     def test_stop_warns_about_unpushed_work_but_still_stops(self):
         api = StatusApi()
         self.addCleanup(api.shutdown)
@@ -2012,6 +2092,12 @@ class CliTest(unittest.TestCase):
         detail = json.loads(text)
         self.assertIn("こんにちは", detail["screen"])
         self.assertEqual(detail["results"][0]["text"], "終わりました")
+        self.assertIn("対応していません", detail["diff"]["error"], "古いイメージ (/diff が 404) は 1 行の案内")
+        api.diff = {"branch": "main", "untracked": ["n.txt"], "unpushed": [], "stat": " a.txt | 1 +",
+                    "diff": "+<b>x</b>\n", "truncated": False}
+        detail = json.loads(self.ui_call(base, "/api/detail?name=a1", token)[1])
+        self.assertEqual((detail["diff"]["stat"], detail["diff"]["diff"]), (" a.txt | 1 +", "+<b>x</b>\n"))
+        self.assertIn("n.txt", detail["diff"]["untracked"])
         code, _ = self.ui_call(base, "/api/send", token, {"name": "a1", "text": "テストを実行して"})
         self.assertEqual(code, 200)
         self.assertEqual(api.received[-1], ("/send", {"window": "claude", "text": "テストを実行して", "enter": True}))

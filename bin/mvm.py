@@ -177,6 +177,8 @@ def load_config():
         die(f"{CONFIG_FILE} がありません。config.example.env をコピーして config.env を作成してください")
     C.update(DEFAULTS)
     C.update(parse_env_file(CONFIG_FILE))
+    if os.environ.get("PMVA_AWS_PROFILE"):   # config.env を書き換えずに、その場だけプロファイルを替える
+        C["AWS_PROFILE"] = os.environ["PMVA_AWS_PROFILE"]
     C["BASE_IMAGE_ARN"] = C["BASE_IMAGE_ARN"] or f"arn:aws:lambda:{C['AWS_REGION']}:aws:microvm-image:al2023-1"
     C["BEDROCK_REGION"] = C["BEDROCK_REGION"] or C["AWS_REGION"]
     C["ANTHROPIC_AWS_REGION"] = C["ANTHROPIC_AWS_REGION"] or C["AWS_REGION"]
@@ -216,6 +218,15 @@ def aws_env():
     if C.get("AWS_PROFILE"):
         env["AWS_PROFILE"] = C["AWS_PROFILE"]
     return env
+
+
+def aws_profile_override_note():
+    """PMVA_AWS_PROFILE で config.env の AWS_PROFILE を上書きしているときの 1 行 (していなければ空)。"""
+    name = os.environ.get("PMVA_AWS_PROFILE")
+    if not name:
+        return ""
+    base = parse_env_file(CONFIG_FILE).get("AWS_PROFILE") if CONFIG_FILE.exists() else ""
+    return f"PMVA_AWS_PROFILE={name} で config.env の AWS_PROFILE={base or '(未設定)'} を上書きしています"
 
 
 THROTTLE_MARKERS = ("ThrottlingException", "TooManyRequestsException", "Rate exceeded")
@@ -364,7 +375,7 @@ def live_session_names():
 
 
 # name を省略できるコマンド。up は新しい名前を付けるので含めない
-NAME_OPTIONAL = ("stop", "suspend", "resume", "save", "renew", "peek", "forward", "login", "view",
+NAME_OPTIONAL = ("stop", "suspend", "resume", "save", "renew", "peek", "diff", "forward", "login", "view",
                  "result", "send", "ssh", "shell", "token")
 
 
@@ -428,6 +439,10 @@ AWS_NETWORK = ("Could not connect", "Connect timeout", "Read timeout", "Endpoint
 def aws_error_hint(err):
     """AWS CLI のエラー文から、利用者向けの理由と次にやることを 1 行で返す。"""
     if any(m in err for m in AWS_AUTH_EXPIRED):
+        profile = C.get("AWS_PROFILE")
+        if profile:
+            return (f"AWS の認証が切れています → aws sso login --profile {profile} でログインし直し (SSO でなければアクセスキーを更新し)、"
+                    "mvm doctor で確かめてください。一時的に別のプロファイルを使うなら PMVA_AWS_PROFILE=<名前> を付けて実行します")
         return ("AWS の認証が切れています → aws sso login でログインし直し (SSO でなければアクセスキーを更新し)、"
                 "mvm doctor で確かめてください")
     if any(m in err for m in AWS_AUTH_MISSING):
@@ -934,6 +949,8 @@ def cmd_doctor(_args):
         ok = ok and bool(found or tool == "ssh")
     if not shutil.which("aws"):
         return 1
+    if aws_profile_override_note():
+        print("  --   " + aws_profile_override_note())
     print("  aws: " + (aws("--version", output=None, check=False) or "?"))
     ident = aws("sts", "get-caller-identity", check=False)
     if ident:
@@ -2820,6 +2837,44 @@ def cmd_peek(args):
     return 0
 
 
+DIFF_MAX = 200000   # /diff の本文の上限 (文字数)。画面 (mvm ui) では DIFF_MAX_UI
+DIFF_MAX_UI = 100000
+DIFF_UNSUPPORTED = ("この VM のイメージは差分の表示に対応していません → mvm image build の後に mvm renew {name}")
+
+
+def vm_diff(name, limit):
+    """VM の作業ツリーの差分 (/diff)。古いイメージ (/diff が無い) では die する。"""
+    r = vm_api(name, "GET", f"/diff?max={limit}")
+    if r.get("error") == "not a git repository":
+        die(f"{name}: 作業場所が git のリポジトリではありません (差分はありません)")
+    if "diff" not in r:
+        die(DIFF_UNSUPPORTED.format(name=name))
+    return r
+
+
+def cmd_diff(args):
+    d = vm_diff(args.name, DIFF_MAX)
+    if args.json:
+        print_json(d)
+        return 0
+    body = d["stat"] if args.stat else d["diff"]
+    if not (d["unpushed"] or d["untracked"] or d["stat"] or d["diff"]):
+        print("未コミット・未 push の変更はありません")
+        return 0
+    print(f"ブランチ: {d.get('branch') or '(なし)'}")
+    for title, items in ((f"未 push のコミット ({len(d['unpushed'])})", d["unpushed"]),
+                         (f"未追跡のファイル ({len(d['untracked'])})", d["untracked"])):
+        if items:
+            print(f"{title}:")
+            print("\n".join(f"  {x}" for x in items))
+    if body:
+        print()
+        print(body.rstrip("\n"))
+    if d.get("truncated") and not args.stat:
+        print(f"… (先頭 {len(d['diff'])} 文字まで。全文は mvm ssh で)")
+    return 0
+
+
 def session_agents(name, agent=None):
     if agent:
         return [agent]
@@ -3747,6 +3802,13 @@ def ui_detail(name):
         elif r.get("state") == "error":
             r["hint"] = agent_error_hint(name, r.get("error"))
         detail["results"].append(r)
+    d = vm_api(name, "GET", f"/diff?max={DIFF_MAX_UI}")
+    if "diff" in d:
+        detail["diff"] = d
+    elif d.get("error") == "not a git repository":
+        detail["diff"] = {"error": "作業場所が git のリポジトリではありません"}
+    else:
+        detail["diff"] = {"error": DIFF_UNSUPPORTED.format(name=name)}
     return detail
 
 
@@ -4008,7 +4070,8 @@ input,select{font:inherit;padding:6px 8px;border-radius:6px;border:1px solid var
 <div class="bar" style="margin-top:8px"><textarea id="text" placeholder="エージェントへの指示 (Ctrl+Enter で送信)"></textarea>
 <button id="b-send" class="primary">送信</button></div>
 <div class="grid2"><div><h2>画面の末尾</h2><pre id="screen">(まだ読み込んでいません)</pre></div>
-<div><h2>最後の応答</h2><pre id="result">(まだ読み込んでいません)</pre></div></div></section>
+<div><h2>最後の応答</h2><pre id="result">(まだ読み込んでいません)</pre></div></div>
+<details style="margin-top:12px"><summary><h2 style="display:inline" id="diffsum">差分</h2></summary><pre id="diff">(まだ読み込んでいません)</pre></details></section>
 </main>
 <script>
 const T = new URLSearchParams(location.search).get("t");
@@ -4054,7 +4117,7 @@ async function refresh() {
 }
 function select(name) {
   selected = name; $("detail").hidden = false; $("dname").textContent = name;
-  $("screen").textContent = $("result").textContent = "(まだ読み込んでいません)"; say("");
+  $("screen").textContent = $("result").textContent = $("diff").textContent = "(まだ読み込んでいません)"; say("");
   refresh();
   if ((rowsByName[name] || {}).vm === "RUNNING") load(false);
 }
@@ -4068,6 +4131,14 @@ async function load(ask) {
     $("result").textContent = d.results.map(x => (d.results.length > 1 ? "--- " + x.agent + " ---\\n" : "") +
       (x.error && !x.text ? x.error : (x.state === "error" ? "(エラーで止まりました: " + x.error + ")\\n" : "") + (x.text || "(まだ応答がありません)")) +
       (x.hint ? "\\n→ " + x.hint : "")).join("\\n\\n") || "(エージェントを起動していません)";
+    const g = d.diff || {};   // textContent に入れるので、差分の中身は HTML として解釈されない
+    $("diff").textContent = g.error ? g.error : [
+      "ブランチ: " + (g.branch || "(なし)"),
+      g.unpushed.length ? "未 push のコミット:\\n" + g.unpushed.map(x => "  " + x).join("\\n") : "",
+      g.untracked.length ? "未追跡のファイル:\\n" + g.untracked.map(x => "  " + x).join("\\n") : "",
+      g.stat, g.diff, g.truncated ? "… (先頭 " + g.diff.length + " 文字まで。全文は mvm ssh で)" : ""
+    ].filter(Boolean).join("\\n\\n");
+    if (!g.error && !g.unpushed.length && !g.untracked.length && !g.diff) $("diff").textContent = "未コミット・未 push の変更はありません";
     say("");
   } catch (e) { say(e.message, true); }
 }
@@ -4645,6 +4716,8 @@ def cmd_home(parser):
         print("次の一手: config.example.env をコピーして config.env を作り、mvm setup を実行する (docs/quickstart.md)")
     else:
         load_config()
+        if aws_profile_override_note():
+            print(aws_profile_override_note())
         states = {n: vm_state(n) for n in session_names() if not load_session(n).get("terminated")}
         alive = [n for n, s in states.items() if s not in ("TERMINATED", "TERMINATING", "GONE", "UNKNOWN")]
         left = {n: remaining_seconds(load_session(n)) for n in alive}
@@ -4799,6 +4872,11 @@ def build_parser():
     x.add_argument("lines", nargs="?", type=int, default=30)
     x.add_argument("--json", action="store_true", help="状態 API の応答を JSON のまま出力")
     x.set_defaults(func=cmd_peek)
+    x = sub.add_parser("diff", help="VM の作業ツリーの未コミットの差分、未追跡のファイル、未 push のコミットを表示")
+    x.add_argument("name", nargs="?", help="省略時は、動いているセッションが 1 つだけならそれ")
+    x.add_argument("--stat", action="store_true", help="本文の代わりに変更したファイルの一覧 (git diff --stat) を表示")
+    x.add_argument("--json", action="store_true", help="/diff の応答を JSON のまま出力")
+    x.set_defaults(func=cmd_diff)
     x = sub.add_parser("wait", help="エージェントの応答が終わるか、許可・入力待ちになるまで待つ")
     x.add_argument("names", nargs="*", metavar="name", help="待つセッション (省略時は動いている全セッション)")
     x.add_argument("--timeout", type=float, default=0, help="最大の待ち時間 (秒)。過ぎたら終了コード 2 で返る。0 で無制限 (既定)")

@@ -10,7 +10,7 @@
 |---|---|
 | 準備 | [`setup`](#setup) / [`doctor`](#doctor) / [`infra`](#infra) / [`secret`](#secret) / [`image`](#image) / [`profile`](#profile) / [`memory`](#memory) |
 | 起動 | [`up`](#up) / [`fleet`](#fleet) |
-| 確認・指示 | [`ls`](#ls) / [`peek`](#peek) / [`follow`](#follow) / [`view`](#view) / [`top`](#top) / [`send`](#send) / [`wait`](#wait) / [`result`](#result) / [`watch`](#watch) / [`ui`](#ui) / [`logs`](#logs) |
+| 確認・指示 | [`ls`](#ls) / [`peek`](#peek) / [`diff`](#diff) / [`follow`](#follow) / [`view`](#view) / [`top`](#top) / [`send`](#send) / [`wait`](#wait) / [`result`](#result) / [`watch`](#watch) / [`ui`](#ui) / [`logs`](#logs) |
 | 接続 | [`ssh`](#ssh) / [`forward`](#forward) / [`ssh-config`](#ssh-config) / [`shell`](#shell) / [`token`](#token) |
 | 保存・停止 | [`save`](#save) / [`suspend` / `resume`](#suspend--resume) / [`stop`](#stop) / [`stop-all`](#stop-all) / [`renew`](#renew) |
 | 司令塔 | [`orchestrator`](#orchestrator) |
@@ -291,6 +291,21 @@ mvm peek <name> [行数] [--json]
 `--json` で、VM 内の状態 API の応答をそのまま JSON で出力します。
 **サスペンド中のセッションに使うと、VM に通信が届くので自動で再開し (`IDLE_AUTO_RESUME=true` の既定のとき)、アイドルで止まるまで (`IDLE_MAX_SECONDS`) 課金が再開します。** 状態だけ知りたいときは、VM を起こさない [`ls`](#ls) / [`watch`](#watch) / [`wait`](#wait) / [`top`](#top) を使います。
 
+### diff
+
+```bash
+mvm diff [<name>] [--stat] [--json]
+```
+
+VM の作業ツリーの、GitHub にまだ無い変更の中身を表示します。`peek` の `!! 未コミット N ファイル・未 push M コミット` の中身を、`mvm ssh` で入らずに確かめるためのコマンドです。ブランチ、未 push のコミットの一覧 (先頭 50 件)、未追跡のファイルの一覧、未コミットの変更の本文 (`git diff HEAD`) を出します。本文が 20 万文字を超えるときは先頭だけを出し、「全文は `mvm ssh` で」と案内します。
+
+- `--stat`: 本文の代わりに、変更したファイルの一覧 (`git diff HEAD --stat`) を出します
+- `--json`: VM 内の `/diff` の応答 (`branch`、`untracked`、`unpushed`、`stat`、`diff`、`truncated`) をそのまま出力します
+- 変更が何も無ければ「未コミット・未 push の変更はありません」と出します
+- 古いイメージ (`/diff` が無い) では、「`mvm image build` の後に `mvm renew <name>`」と案内して終了コード 1 で終わります。`mvm ui` の詳細にも同じ「差分」が出ます
+
+[peek](#peek) と同じく、サスペンド中の VM に使うと VM が自動で再開し、課金が再開します。
+
 ### follow
 
 ```bash
@@ -481,7 +496,7 @@ mvm ui [--port <番号>] [--no-open]
 画面でできること:
 
 - **一覧**: [watch](#watch) と同じ表 (状態、経過、メモリ、最後の出来事) を 10 秒ごとに更新します。要対応は黄、エラーと OOM は赤、完了は緑で示し、表の下に対応が要ることを出します
-- **詳細**: 行をクリックすると、画面の末尾 ([peek](#peek)) と最後の応答 ([result](#result)) を出します。一時停止中の VM は、見る前に確認します (見ると VM が再開して課金されるため)
+- **詳細**: 行をクリックすると、画面の末尾 ([peek](#peek)) と最後の応答 ([result](#result))、折りたためる「差分」([diff](#diff)) を出します。一時停止中の VM は、見る前に確認します (見ると VM が再開して課金されるため)
 - **操作**: 指示を送る ([send](#send)、Ctrl+Enter でも送れる)、再開 ([resume](#suspend--resume))、作り直す ([renew](#renew))、保存して停止 ([stop](#stop))。renew と停止は確認してから裏で進め、終わったら「裏で進めている操作」に結果を出します
 - **新しく起動**: 名前、リポジトリ URL、エージェント、最初の指示を入れて起動します ([up](#up) と同じ)。リポジトリ URL を空欄にすると、`mvm up <名前>` と同じく前回の同じ名前の続きから始め、前回が無ければ `mvm ui` を起動したフォルダの `origin` を clone します。「前回の続きにしない」は `--fresh` です。起動は裏で進め、終わると一覧に出ます。動いている名前を指定すると「裏で進めている操作」にエラーが出ます。認証方式や `--idle` などの細かい設定は、コマンドの `mvm up` で指定します
 
@@ -679,8 +694,9 @@ mvm cost --actual [--days N] [--daily]      # Cost Explorer の実績
 |---|---|
 | `PMVA_CONFIG` | 設定ファイルの場所 (既定はリポジトリ直下の `config.env`) |
 | `PMVA_STATE_DIR` | セッションの記録やトークンのキャッシュの場所 (既定は `.state/`) |
+| `PMVA_AWS_PROFILE` | 空でなければ、`config.env` の `AWS_PROFILE` より優先して使う AWS のプロファイル (`config.env` は書き換えない)。SSO の期限が切れたときに、期限の無い別のプロファイルで一時的に動かす用途。`mvm doctor` と引数なしの `mvm` が上書きしていることを 1 行出す |
 | `PMVA_DEBUG` | ファイル名を指定すると、接続の詳細 (切断の理由など) を追記する |
 | `HTTPS_PROXY` / `NO_PROXY` | 社内プロキシを経由して MicroVM に接続する (CONNECT) |
 | `PMVA_NPM_REGISTRY` | `image versions` が参照する npm レジストリ (既定 `https://registry.npmjs.org`) |
 
-AWS のプロファイルやリージョンは環境変数ではなく `config.env` の `AWS_PROFILE` / `AWS_REGION` で指定します ([config.md](config.md))。
+AWS のプロファイルやリージョンは `config.env` の `AWS_PROFILE` / `AWS_REGION` で指定します ([config.md](config.md))。環境変数 `AWS_PROFILE` は `config.env` に負けます (普段使っている管理者のプロファイルで知らずに動くのを防ぐため)。その場だけ切り替えるには `PMVA_AWS_PROFILE` を使います (PowerShell は `$env:PMVA_AWS_PROFILE = "pmva"`)。
