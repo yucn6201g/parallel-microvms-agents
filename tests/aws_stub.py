@@ -12,6 +12,7 @@
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 D = Path(os.environ["PMVA_STUB_DIR"])
@@ -170,7 +171,7 @@ if cmd == "lambda-microvms run-microvm":
     (D / f"{vid}.payload").write_text(payload, encoding="utf-8")
     (D / f"{vid}.args").write_text(json.dumps(a), encoding="utf-8")
     out({"microvmId": vid, "state": "PENDING", "endpoint": f"https://{vid}.lambda-microvm.example.on.aws",
-         "imageVersion": "1.0", "startedAt": 1793201909.5})
+         "imageVersion": "1.0", "startedAt": time.time()})
 if cmd == "lambda-microvms get-microvm":
     vid = opt("--microvm-identifier")
     if not (D / f"{vid}.payload").exists():
@@ -186,6 +187,9 @@ if cmd == "lambda-microvms get-microvm":
     if (D / f"{vid}.term").exists():
         out({"state": "TERMINATED"})
     out({"state": "SUSPENDED" if (D / f"{vid}.suspended").exists() else "RUNNING"})
+if cmd == "lambda-microvms suspend-microvm":
+    (D / f"{opt('--microvm-identifier')}.suspended").touch()
+    out({})
 if cmd == "lambda-microvms resume-microvm":
     (D / f"{opt('--microvm-identifier')}.suspended").unlink(missing_ok=True)
     out({})

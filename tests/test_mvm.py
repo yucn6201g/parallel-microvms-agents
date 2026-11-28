@@ -535,10 +535,32 @@ class DisplayWidthTest(unittest.TestCase):
 
 def watch_row(name, state, **kw):
     """format_watch に渡す、台ごとの dict。"""
-    row = {"name": name, "vm": "RUNNING", "state": state, "agents": {}, "sinceSeconds": None, "memory": None,
-           "oomKills": 0, "lastEvent": "", "notes": []}
+    row = {"name": name, "vm": "RUNNING", "state": state, "agents": {}, "sinceSeconds": None, "remainingSeconds": None,
+           "memory": None, "oomKills": 0, "lastEvent": "", "notes": []}
     row.update(kw)
     return row
+
+
+class RemainingTest(unittest.TestCase):
+    def test_remaining_seconds_from_epoch_and_iso(self):
+        s = {"startedAt": 1_800_000_000.5, "maxDuration": "28800"}
+        self.assertEqual(mvm.remaining_seconds(s, 1_800_000_000 + 3600), 28800 - 3600)
+        s = {"startedAt": "2026-11-28T01:00:00.123000+00:00", "maxDuration": "3600"}
+        self.assertEqual(mvm.remaining_seconds(s, 1_795_827_600), 3600)   # 2026-11-28T01:00:00Z
+        s["startedAt"] = "2026-11-28T01:00:00Z"
+        self.assertEqual(mvm.remaining_seconds(s, 1_795_827_600 + 60), 3540)
+
+    def test_remaining_seconds_is_none_when_unknown(self):
+        for s in ({}, {"startedAt": "-", "maxDuration": "60"}, {"startedAt": "x", "maxDuration": "60"},
+                  {"startedAt": 1_800_000_000, "maxDuration": "x"}, {"startedAt": 1_800_000_000}):
+            self.assertIsNone(mvm.remaining_seconds(s, 1_800_000_000), s)
+
+    def test_format_remaining(self):
+        self.assertEqual(mvm.format_remaining(None), "-")
+        self.assertEqual(mvm.format_remaining(7800), "2h10m")
+        self.assertEqual(mvm.format_remaining(3600), "1h00m")
+        self.assertEqual(mvm.format_remaining(3599), "!! 59m")
+        self.assertEqual(mvm.format_remaining(-5), "!! 0m")
 
 
 class FormatWatchTest(unittest.TestCase):
@@ -547,7 +569,8 @@ class FormatWatchTest(unittest.TestCase):
     def board_rows(self):
         mem = lambda used, peak: {"usedMiB": used, "totalMiB": 3891, "peakMiB": peak}   # noqa: E731
         return [
-            watch_row("a1", "working", sinceSeconds=720, memory=mem(1229, 1536), lastEvent="実行: Bash: pytest -x"),
+            watch_row("a1", "working", sinceSeconds=720, remainingSeconds=7800, memory=mem(1229, 1536),
+                      lastEvent="実行: Bash: pytest -x"),
             watch_row("a2", "waiting", sinceSeconds=180, memory=mem(900, 900),
                       agents={"claude": {"state": "waiting", "message": "Bash の実行の許可を求めています"}},
                       lastEvent="Bash の実行の許可を求めています",
@@ -562,14 +585,19 @@ class FormatWatchTest(unittest.TestCase):
         self.assertEqual(lines[0], "2026-11-24 15:00:12  4 台 (作業中 1 / 要対応 1 / 完了 1)  10 秒ごと / Ctrl-C で終了")
         self.assertTrue(lines[1].startswith("名前"))
         self.assertIn("メモリ (使用/全体 最大)", lines[1])
-        self.assertRegex(lines[2], r"^a1 +作業中 +12分 +1\.2/3\.8G 最大1\.5G +実行: Bash: pytest -x$")
+        self.assertIn("残り", lines[1])
+        self.assertRegex(lines[2], r"^a1 +作業中 +12分 +2h10m +1\.2/3\.8G 最大1\.5G +実行: Bash: pytest -x$")
         self.assertRegex(lines[3], r"^a2 +許可・入力待ち +3分 ")
         self.assertRegex(lines[4], r"^a3 +応答が終わった +1分 ")
-        self.assertRegex(lines[5], r"^a4 +SUSPENDED +- +- +-$")
+        self.assertRegex(lines[5], r"^a4 +SUSPENDED +- +- +- +-$")
         self.assertEqual(lines[6], "")
         self.assertEqual(lines[7], "!! a2 (claude): 許可・入力待ち: Bash の実行の許可を求めています")
         self.assertEqual(lines[-1], "(表示中のセッションは自動サスペンドされません)")
         self.assertNotIn("\x1b", text)
+
+    def test_low_remaining_is_marked(self):
+        text = mvm.format_watch([watch_row("a1", "working", remainingSeconds=2700)], 100, False, self.STAMP, 10)
+        self.assertRegex(text.splitlines()[2], r"^a1 +作業中 +- +!! 45m ")
 
     def test_columns_line_up_by_display_width(self):
         lines = mvm.format_watch(self.board_rows(), 100, False, self.STAMP, 10).splitlines()[1:6]
@@ -830,15 +858,24 @@ class WatchLogTest(unittest.TestCase):
             path = Path(t) / "sub" / "mem.csv"
             mvm.watch_open_log(path)
             mvm.watch_open_log(path)
-            rows = [watch_row("a1", "working", memory={"usedMiB": 100, "totalMiB": 3891, "peakMiB": 150}, oomKills=1),
+            rows = [watch_row("a1", "working", memory={"usedMiB": 100, "totalMiB": 3891, "peakMiB": 150}, oomKills=1,
+                              remainingSeconds=7800),
                     watch_row("a2", "SUSPENDED", vm="SUSPENDED")]
             mvm.watch_append_log(path, rows, 1_800_000_000)
             mvm.watch_append_log(path, rows[:1], 1_800_000_010)
             lines = path.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(lines[0], "time,name,vm,state,usedMiB,totalMiB,peakMiB,oomKills")
+        self.assertEqual(lines[0], "time,name,vm,state,usedMiB,totalMiB,peakMiB,oomKills,remainingSeconds")
         self.assertEqual(len(lines), 4)
-        self.assertTrue(lines[1].endswith(",a1,RUNNING,working,100,3891,150,1"))
-        self.assertTrue(lines[2].endswith(",a2,SUSPENDED,SUSPENDED,,,,0"))
+        self.assertTrue(lines[1].endswith(",a1,RUNNING,working,100,3891,150,1,7800"))
+        self.assertTrue(lines[2].endswith(",a2,SUSPENDED,SUSPENDED,,,,0,"))
+
+    def test_refuses_log_written_with_other_columns(self):
+        with tempfile.TemporaryDirectory() as t:
+            path = Path(t) / "old.csv"
+            path.write_text("time,name,vm,state,usedMiB,totalMiB,peakMiB,oomKills\n", encoding="utf-8")
+            with self.assertRaises(SystemExit) as cm:
+                mvm.watch_open_log(path)
+            self.assertIn("別のパス", str(cm.exception))
 
     def test_append_writes_header_when_file_vanished(self):
         with tempfile.TemporaryDirectory() as t:
@@ -1006,7 +1043,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("次の一手: mvm setup", out, "この PC でまだ何もしていない")
         self.mvm("up", "a1", "--repo", "https://github.com/o/r.git")
         _, out, _ = self.mvm()
-        self.assertIn("a1 (RUNNING)", out)
+        self.assertRegex(out, r"a1 \(RUNNING、残り 7h\d\dm\)")
         self.assertIn("次の一手: mvm ui", out)
         _, out, err = self.mvm(env=dict(self.env, PMVA_STUB_GET_ERROR="Error loading SSO Token"))
         self.assertIn("mvm doctor", out)
@@ -1040,6 +1077,32 @@ class CliTest(unittest.TestCase):
         self.assertEqual((a2["repo"], a2["branch"]), ("https://github.com/o/r2.git", "pmva/a2"))
         self.assertNotIn("restore", a2, "保存が無ければ復元しない")
 
+    def test_up_continue_inherits_previous_settings(self):
+        self.previous_session("k1", False, repo="https://github.com/o/r.git", agent="codex", claudeAuth="none",
+                              codexAuth="chatgpt", codexSecret="pmva/codex-auth-json", codexArgs="--x",
+                              claudeModel="m1", notifySecret="pmva/notify-webhook", skipSetup="true",
+                              prompt="前回の指示")
+        self.previous_session("k2", False, repo="https://github.com/o/r.git", agent="codex", codexAuth="chatgpt")
+        _, _, err = self.mvm("up", "k1")
+        self.mvm("up", "k2", "--agent", "claude")
+        k1, k2 = self.payloads()
+        self.assertEqual((k1["agent"], k1["codexAuth"], k1["codexArgs"], k1["claudeModel"]), ("codex", "chatgpt", "--x", "m1"))
+        self.assertEqual(k1["notifySecret"], "pmva/notify-webhook")
+        self.assertEqual(k1["skipSetup"], "true")
+        self.assertNotIn("githubSecret", k1, "前回は GitHub トークンを使っていない")
+        self.assertNotIn("prompt", k1)
+        self.assertIn("agent=codex", err)
+        self.assertEqual((k2["agent"], k2["codexAuth"]), ("claude", "none"), "別のエージェントなら認証は引き継がない")
+
+    def test_up_running_name_stops_before_origin_message(self):
+        self.mvm("up", "r1", "--repo", "https://github.com/o/r.git")
+        rc, _, err = self.mvm("up", "r1", check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("既に起動しています", err)
+        self.assertIn("mvm peek r1", err)
+        self.assertIn("mvm resume r1", err)
+        self.assertNotIn("origin", err)
+
     def test_up_fresh_or_explicit_repo_does_not_continue(self):
         self.previous_session("f1", True, repo="https://github.com/o/r.git", branch="feature/x")
         self.previous_session("e1", True, repo="https://github.com/o/r.git", branch="feature/x")
@@ -1066,7 +1129,9 @@ class CliTest(unittest.TestCase):
         _, out, err = self.mvm("up", "g2", cwd=token)
         self.mvm("up", "g3", "--no-repo", cwd=ssh)
         _, _, err4 = self.mvm("up", "g4", cwd=local)
-        self.mvm("up", "g5", cwd=ROOT)
+        _, _, err5 = self.mvm("up", "g5", cwd=ROOT)
+        self.assertIn("mvm 自身のフォルダ", err5)
+        self.assertIn("--repo", err5)
         g1, g2, g3, g4, g5 = self.payloads()
         self.assertNotIn("repo", g5, "mvm 自身のフォルダで打ったときは mvm のリポジトリを clone しない")
         self.assertEqual((g1["repo"], g1["branch"]), ("https://github.com/Owner/Repo.git", "pmva/g1"))
@@ -1488,6 +1553,54 @@ class CliTest(unittest.TestCase):
         self.assertEqual(renewed["restore"], "s3://pmva-bucket/workspaces/r1/latest.tar.gz")
         self.assertNotIn("prompt", renewed)
 
+    def set_remaining(self, name, seconds):
+        """セッションの startedAt を、寿命の残りが seconds 秒になるように書き換える。"""
+        path = Path(self.env["PMVA_STATE_DIR"]) / "sessions" / f"{name}.json"
+        s = json.loads(path.read_text(encoding="utf-8"))
+        s["startedAt"] = time.time() + seconds - int(s["maxDuration"])
+        path.write_text(json.dumps(s), encoding="utf-8")
+
+    def test_ls_shows_remaining_and_renew_hint_when_low(self):
+        self.mvm("up", "r1")
+        self.mvm("up", "r2")
+        self.set_remaining("r2", 1800)
+        _, out, _ = self.mvm("ls")
+        self.assertIn("REMAINING", out)
+        self.assertRegex(next(l for l in out.splitlines() if l.startswith("r1")), r" 7h\d\dm ")
+        self.assertRegex(next(l for l in out.splitlines() if l.startswith("r2")), r" !! (29|30)m ")
+        self.assertIn("mvm renew r2 で延長できます", out)
+        self.assertNotIn("mvm renew r1", out)
+        _, out, _ = self.mvm("ls", "--json")
+        rows = {r["name"]: r for r in json.loads(out)}
+        self.assertTrue(0 < rows["r2"]["remainingSeconds"] <= 1800)
+        self.assertGreater(rows["r1"]["remainingSeconds"], 3600)
+
+    def test_bare_mvm_warns_when_remaining_is_low(self):
+        self.mvm("up", "r1")
+        self.set_remaining("r1", 600)
+        _, out, _ = self.mvm()
+        self.assertRegex(out, r"r1 \(RUNNING、残り !! (9|10)m\)")
+        self.assertIn("mvm renew r1 で延長できます", out)
+
+    def test_suspend_saves_first_then_explains_lifetime(self):
+        api = StatusApi()
+        try:
+            env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}")
+            self.mvm("up", "s1", env=env)
+            _, out, err = self.mvm("suspend", "s1", env=env)
+            self.assertIn(("/snapshot", {}), api.received)
+            calls = [json.loads(l)[:2] for l in (self.stub_dir / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertIn(["lambda-microvms", "suspend-microvm"], calls)
+            self.assertRegex(out + err, r"サスペンド中も寿命に数えます。残り 7h\d\dm、サスペンドのまま 6時間 \(IDLE_SUSPENDED_SECONDS\) で終了します")
+        finally:
+            api.shutdown()
+
+    def test_suspend_continues_when_save_fails(self):
+        self.mvm("up", "s1")   # VM の API につながらない → 保存は失敗する
+        _, out, err = self.mvm("suspend", "s1")
+        self.assertIn("サスペンドは続けます", out + err)
+        self.assertTrue((self.stub_dir / "microvm-0000.suspended").exists())
+
     def test_renew_picks_up_ssh_key_created_after_up(self):
         # mvm ssh は「SSH_PUBLIC_KEY_FILE を設定して mvm renew」と案内する。鍵なしで up した後に鍵を作ったら、
         # renew で鍵付きに起動し直せること
@@ -1636,7 +1749,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, 200)
         rows = json.loads(text)["rows"]
         self.assertEqual([r["name"] for r in rows], ["a1"])
-        self.assertEqual(len(rows[0]["cells"]), 5)
+        self.assertEqual(len(rows[0]["cells"]), 6)
         code, text = self.ui_call(base, "/api/detail?name=a1", token)
         self.assertEqual(code, 200, text)
         detail = json.loads(text)
@@ -3034,7 +3147,7 @@ class CliTest(unittest.TestCase):
         out = out.replace("\r\n", "\n")
         self.assertNotIn("\x1b", out)
         self.assertIn("1 台 (作業中 1 / 要対応 0 / 完了 0)  10 秒ごと", out)
-        self.assertRegex(out, r"(?m)^w1 +作業中 +12分 +1\.2/3\.8G 最大1\.2G +実行: Bash: pytest -x$")
+        self.assertRegex(out, r"(?m)^w1 +作業中 +12分 +7h5\dm +1\.2/3\.8G 最大1\.2G +実行: Bash: pytest -x$")
         self.assertEqual(api.status_calls, 1, "--once は 1 回だけ取得して終わる")
 
     def test_watch_log_appends_csv_with_header_once(self):
@@ -3048,11 +3161,12 @@ class CliTest(unittest.TestCase):
         finally:
             api.shutdown()
         lines = log.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(lines[0], "time,name,vm,state,usedMiB,totalMiB,peakMiB,oomKills")
+        self.assertEqual(lines[0], "time,name,vm,state,usedMiB,totalMiB,peakMiB,oomKills,remainingSeconds")
         self.assertEqual(len(lines), 3, "見出しは 1 回だけで、実行のたびに 1 台 1 行を足す")
         for line in lines[1:]:
             cols = line.split(",")
-            self.assertEqual(cols[1:], ["w1", "RUNNING", "working", "1229", "3891", "1229", "2"])
+            self.assertEqual(cols[1:8], ["w1", "RUNNING", "working", "1229", "3891", "1229", "2"])
+            self.assertGreater(int(cols[8]), 3600)
             self.assertRegex(cols[0], r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$")
 
     def test_watch_log_unwritable_stops_with_next_step(self):
