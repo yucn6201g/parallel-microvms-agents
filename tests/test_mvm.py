@@ -682,6 +682,16 @@ class WatchBoardTest(unittest.TestCase):
         self.assertEqual(row["notes"], ["a2 (claude): 許可・入力待ち: Bash の実行の許可を求めています"])
         self.assertEqual(mvm.watch_level(row), "yellow")
 
+    def test_auth_error_hint_recommends_renew_and_login_for_interactive(self):
+        with mock.patch.object(mvm, "session_path", return_value=Path("/nonexistent/x.json")):
+            hint = mvm.agent_error_hint("nosuch", "authentication_failed")
+        self.assertIn("mvm renew nosuch", hint)
+        self.assertNotIn("--no-save", hint)
+        self.assertNotIn("mvm login", hint)
+        with mock.patch.object(mvm, "session_path", return_value=Path(__file__)), \
+                mock.patch.object(mvm, "load_session", return_value={"payload": {"claudeAuth": "interactive"}}):
+            self.assertIn("mvm login i1", mvm.agent_error_hint("i1", "authentication_failed"))
+
     def test_error_agent_gets_note_with_hint(self):
         self.fleet({"a3": "RUNNING"}, {"a3": self.status({"claude": {
             "state": "error", "since": self.NOW - 5, "error": "authentication_failed", "message": "401"}})})
@@ -1588,6 +1598,45 @@ class CliTest(unittest.TestCase):
         finally:
             api.shutdown()
 
+    def test_vm_commands_on_terminated_vm_point_to_up(self):
+        self.mvm("up", "t1")
+        self.mvm("stop", "t1", "--no-save")
+        env = dict(self.env, PMVA_STUB_TOKEN_NEEDS_RUNNING="1")
+        for cmd in ("peek", "send", "result", "shell"):
+            rc, _, err = self.mvm(cmd, "t1", *(["x"] if cmd == "send" else []), env=env, check=False)
+            self.assertNotEqual(rc, 0, cmd)
+            self.assertIn("t1 は終了しています。mvm up t1", err, cmd)
+            self.assertNotIn("に失敗しました", err, cmd)
+
+    def test_vm_commands_on_suspended_vm_point_to_resume(self):
+        self.mvm("up", "t2")
+        (Path(self.env["PMVA_STUB_DIR"]) / "microvm-0000.suspended").touch()
+        env = dict(self.env, PMVA_STUB_TOKEN_NEEDS_RUNNING="1")
+        rc, _, err = self.mvm("peek", "t2", env=env, check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("mvm resume t2", err)
+
+    def test_send_refuses_agent_that_is_not_running_but_not_explicit_window(self):
+        api = StatusApi()
+        try:
+            self.mvm("up", "a1")
+            env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}")
+            for state, hint in (("exited", "mvm renew a1"), ("failed", "mvm peek a1"), ("starting", "mvm wait a1")):
+                api.statuses = [self.status(claude=state)]
+                api.received.clear()
+                rc, _, err = self.mvm("send", "a1", "続けて", env=env, check=False)
+                self.assertNotEqual(rc, 0, state)
+                self.assertIn(hint, err, state)
+                self.assertEqual(api.received, [], "断ったときは送らない")
+            api.statuses = [self.status(claude="exited")]
+            self.mvm("send", "a1", "--window", "shell", "ls", env=env)
+            self.assertEqual(api.received[-1][1]["window"], "shell")
+            api.statuses = [self.status(claude="working")]
+            self.mvm("send", "a1", "続けて", env=env)
+            self.assertEqual(api.received[-1][1]["window"], "claude")
+        finally:
+            api.shutdown()
+
     def start_ui(self, env):
         """mvm ui を起動し、(プロセス, ベース URL, 合言葉) を返す。"""
         proc = subprocess.Popen([sys.executable, str(MVM), "ui", "--no-open"], env=env, cwd=self.tmp.name,
@@ -1829,9 +1878,17 @@ class CliTest(unittest.TestCase):
                            "codex": {"agent": "codex", "state": "working", "text": None}}
             rc, out, _ = self.mvm("result", "a1", "--agent", "claude", env=env)
             self.assertEqual(out.strip(), "PR を作りました: #12")
-            rc, out, _ = self.mvm("result", "a1", env=env, check=False)
-            self.assertEqual(rc, 1, "応答がまだないエージェントがあれば 1")
+            rc, out, err = self.mvm("result", "a1", env=env, check=False)
+            self.assertEqual(rc, 2, "作業中のエージェントがあれば 2 (mvm wait のタイムアウトと同じ)")
             self.assertIn("--- claude (done) ---\nPR を作りました: #12", out.replace("\r\n", "\n"))  # Windows は改行が CRLF
+            self.assertIn("a1 (codex) はまだ作業中です。mvm wait a1", err)
+            self.assertNotIn("まだ codex の応答がありません", out)
+            rc, out, err = self.mvm("result", "a1", "--agent", "codex", "--json", env=env, check=False)
+            self.assertEqual((rc, json.loads(out)["state"]), (2, "working"), "--json は中身をそのまま出し、終了コードだけ 2")
+            self.assertIn("mvm wait a1", err)
+            api.results["codex"] = {"agent": "codex", "state": "done", "text": None}
+            rc, out, _ = self.mvm("result", "a1", env=env, check=False)
+            self.assertEqual(rc, 1, "応答がまだないだけなら 1")
             self.assertIn("(まだ codex の応答がありません)", out)
             _, out, _ = self.mvm("result", "a1", "--json", "--agent", "claude", env=env)
             self.assertEqual(json.loads(out)["text"], "PR を作りました: #12")

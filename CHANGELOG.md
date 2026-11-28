@@ -69,6 +69,7 @@
 - `mvm doctor`: `mvm infra deploy` の直後でも「AWS の構成が、手元のテンプレートと違います」と出ていた。CloudFormation がテンプレートの日本語を `?` に置き換えて保存するため。比べる前に手元の側もそろえるようにした
 - `printf '...' | mvm shell <name>` のように標準入力をパイプやファイルにすると、コマンドは VM で動いても結果が表示されずに終わっていた。読み終えたら Ctrl-D でシェルを終わらせ、VM 側が閉じるまで出力を表示するようにした (`exit` を書かなくても終わる)
 - `mvm renew`: SSH 公開鍵なしで起動した後に鍵を作っても、鍵付きにならなかった (`mvm ssh` は「鍵を用意して `mvm renew`」と案内していた)。renew のときに `SSH_PUBLIC_KEY_FILE` を読み直す
+- VM の状態に合わない操作の案内: 終了済みの VM に `peek` / `send` / `result` / `ssh` / `shell` などを打つと `create-microvm-auth-token に失敗しました` や HTTP 4xx が出るだけだった。状態を確かめ、「終了しています。`mvm up <name>` で続きから」「サスペンド中です。`mvm resume <name>`」のように次の一手を出す。`mvm result` は作業中なら「`mvm wait` で待てます」を出して終了コード 2 (`--json` は中身をそのまま、終了コードだけ 2)。`mvm send` は、エージェントが終了済み (シェルに入力されてしまう) / 起動に失敗 / 起動の準備中なら送らず案内する (`--window` を付けたときは送る)。認証エラーの案内は `mvm stop --no-save` → `mvm up` ではなく、保存してから作り直す `mvm renew` にし、`interactive` で起動したセッションには続けて `mvm login` を案内する
 
 ### 変更
 
