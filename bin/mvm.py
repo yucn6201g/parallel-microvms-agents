@@ -3231,7 +3231,7 @@ def cmd_watch(args):
 
 # ---------------------------------------------------------------- ブラウザの画面 (mvm ui)
 
-UI_LONG_ACTIONS = {"stop": "保存して停止", "renew": "作り直し (renew)"}
+UI_LONG_ACTIONS = {"stop": "保存して停止", "renew": "作り直し (renew)", "up": "起動"}
 UI_MAX_BODY = 64 * 1024
 
 
@@ -3288,10 +3288,29 @@ def ui_resume(name):
     return {"message": f"{name} を再開しました"}
 
 
-def ui_run_job(ui, name, action):
+def ui_up_args(body):
+    """起動フォームの内容を mvm up の引数にする。おかしな内容なら、利用者に見せる文を返す。"""
+    if not isinstance(body, dict):
+        return "JSON のオブジェクトで送ってください"
+    name, repo, agent, prompt = (body.get(k, "") for k in ("name", "repo", "agent", "prompt"))
+    if not all(isinstance(v, str) for v in (name, repo, agent, prompt)):
+        return "名前・リポジトリ・エージェント・指示は文字列で送ってください"
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,30}", name):   # valid_name と同じ決まり
+        return f"名前は英小文字・数字・ハイフン (31 文字以内) にしてください: {name}"
+    if agent and agent not in AGENTS:
+        return f"エージェントは {' / '.join(AGENTS)} のどれかにしてください"
+    # "-" で始まる指示や URL をオプションと取り違えないように = でつなぐ
+    argv = ["up", name] + [f"--{k}={v.strip()}" for k, v in (("repo", repo), ("agent", agent), ("prompt", prompt))
+                           if v.strip()]
+    return build_parser().parse_args(argv + (["--fresh"] if body.get("fresh") is True else []))
+
+
+def ui_run_job(ui, name, action, args=None):
     try:
         if action == "stop":
             stop(name, save=True)
+        elif action == "up":
+            cmd_up(args)
         else:
             cmd_renew(argparse.Namespace(name=name))
         ui.jobs[name].update(state="done", message=f"{name}: {UI_LONG_ACTIONS[action]}が終わりました")
@@ -3378,7 +3397,14 @@ def ui_handler(ui, token):
             action = self.path.rsplit("/", 1)[-1]
             if not self.path.startswith("/api/") or action not in ("send", "resume", *UI_LONG_ACTIONS):
                 return self.reply(404, {"error": "not found"})
-            name = self.target(body.get("name") if isinstance(body, dict) else None)
+            args = None
+            if action == "up":   # まだ無い名前でもよい。動いている名前なら、裏の起動が「既に起動しています」で止める
+                args = ui_up_args(body)
+                if isinstance(args, str):
+                    return self.reply(400, {"error": args})
+                name = args.name
+            else:
+                name = self.target(body.get("name") if isinstance(body, dict) else None)
             if not name:
                 return None
             if action == "send":
@@ -3392,7 +3418,7 @@ def ui_handler(ui, token):
                 if ui.busy(name):
                     return self.reply(409, {"error": f"{name} は {ui.jobs[name]['message']} です"})
                 ui.jobs[name] = {"action": action, "state": "running", "message": f"{UI_LONG_ACTIONS[action]}の途中"}
-            job = threading.Thread(target=ui_run_job, args=(ui, name, action), daemon=True)
+            job = threading.Thread(target=ui_run_job, args=(ui, name, action, args), daemon=True)
             ui.threads.append(job)
             job.start()
             self.reply(202, {"message": f"{name} の{UI_LONG_ACTIONS[action]}を始めました (数分かかります)"})
@@ -3476,12 +3502,27 @@ white-space:pre-wrap;word-break:break-all;font:12px/1.45 ui-monospace,Consolas,"
 textarea{width:100%;min-height:72px;font:inherit;padding:8px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--text)}
 #msg{min-height:20px}#msg.err{color:var(--red)}
 .grid2{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+summary{cursor:pointer}.form{display:grid;gap:10px;margin-top:10px;grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
+.form label{display:grid;gap:4px;font-size:12px;color:var(--muted)}.form .wide{grid-column:1/-1}
+.form label.check{display:flex;align-items:center;gap:6px}
+input,select{font:inherit;padding:6px 8px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--text)}
+#umsg.err{color:var(--red)}
 </style></head><body>
 <header><h1>mvm</h1><span class="muted" id="stamp">読み込み中…</span><span class="muted">10 秒ごとに更新 (このタブを表示している間だけ)</span></header>
 <main>
 <section><h2>セッション</h2><div class="scroll"><table><thead><tr><th>名前</th><th>状態</th><th>経過</th><th>メモリ</th><th>最後の出来事</th></tr></thead>
-<tbody id="rows"></tbody></table></div><p class="muted" id="empty" hidden>動いているセッションはありません。起動は mvm up &lt;名前&gt; です。</p>
+<tbody id="rows"></tbody></table></div><p class="muted" id="empty" hidden>動いているセッションはありません。下の「新しく起動」から始められます。</p>
 <div id="notes"></div><div id="jobs"></div></section>
+<section><details id="upbox"><summary><h2 style="display:inline">新しく起動</h2></summary>
+<form id="up" class="form">
+<label>名前 (英小文字・数字・ハイフン)<input id="u-name" required pattern="[a-z0-9][a-z0-9\\-]{0,30}" placeholder="feat-login"></label>
+<label>リポジトリ URL<input id="u-repo" placeholder="空欄: 前回の同じ名前の続き。無ければ mvm ui を起動したフォルダの origin"></label>
+<label>エージェント<select id="u-agent"><option value="">既定 (config.env の DEFAULT_AGENT)</option>
+<option>claude</option><option>codex</option><option>both</option><option>none</option></select></label>
+<label class="wide">最初の指示 (省略可)<textarea id="u-prompt"></textarea></label>
+<label class="check"><input type="checkbox" id="u-fresh"> 前回の同じ名前の続きにしない (--fresh)</label>
+<div><button class="primary" id="b-up">起動</button> <span id="umsg" role="status"></span></div>
+</form><p class="muted">細かい設定 (認証方式、--idle など) は mvm up のオプションで指定してください。</p></details></section>
 <section id="detail" hidden><h2 id="dname"></h2>
 <div class="bar"><button id="b-load">画面と結果を見る</button><button id="b-resume">再開</button>
 <button id="b-renew">作り直す (renew)</button><button id="b-stop" class="danger">保存して停止</button></div>
@@ -3568,6 +3609,17 @@ $("b-resume").onclick = () => act("resume", "再開");
 $("b-renew").onclick = () => act("renew", "作り直し (保存してから新しい VM で復元)");
 $("b-stop").onclick = () => act("stop", "保存して停止");
 $("b-send").onclick = send;
+$("up").onsubmit = async e => {
+  e.preventDefault();
+  const body = {name: $("u-name").value.trim(), repo: $("u-repo").value, agent: $("u-agent").value,
+                prompt: $("u-prompt").value, fresh: $("u-fresh").checked};
+  $("b-up").disabled = true;
+  try {
+    $("umsg").textContent = (await api("/api/up", body)).message; $("umsg").className = "";
+    $("u-name").value = $("u-prompt").value = ""; refresh();
+  } catch (err) { $("umsg").textContent = err.message; $("umsg").className = "err"; }
+  finally { $("b-up").disabled = false; }
+};
 $("text").onkeydown = e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) send(); };
 // タブが裏にある間は問い合わせない (問い合わせている VM は自動でサスペンドされず、課金が続くため)
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
@@ -4282,7 +4334,7 @@ def build_parser():
     x.add_argument("--json", action="store_true", help="台ごとの状態を JSON で 1 回出力する (--once を含む)")
     x.add_argument("--log", metavar="CSV", help="毎回、台ごとの状態とメモリを CSV に追記する")
     x.set_defaults(func=cmd_watch)
-    x = sub.add_parser("ui", help="手元のブラウザで全セッションの状態を見て操作する (送信、再開、renew、停止)")
+    x = sub.add_parser("ui", help="手元のブラウザで全セッションの状態を見て操作する (起動、送信、再開、renew、停止)")
     x.add_argument("--port", type=int, default=0, help="待ち受けるポート (既定は空いている番号)")
     x.add_argument("--no-open", action="store_true", help="ブラウザを開かず、URL を表示するだけにする")
     x.set_defaults(func=cmd_ui)

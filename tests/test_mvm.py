@@ -1620,6 +1620,34 @@ class CliTest(unittest.TestCase):
         self.assertIn("/snapshot", [p for p, _ in api.received])
         self.assertTrue(list(self.stub_dir.glob("*.term")), "VM を終了した")
 
+    def test_ui_starts_session_from_form(self):
+        _, base, token = self.start_ui(self.env)
+        for bad in ({"name": "Bad_Name"}, {"name": "b1", "agent": "x"}, {"name": "b1", "repo": 1}, [1]):
+            code, text = self.ui_call(base, "/api/up", token, bad)
+            self.assertEqual(code, 400, (bad, text))
+        code, text = self.ui_call(base, "/api/up", token,
+                                  {"name": "b1", "agent": "codex", "prompt": "-h を直して", "repo": "", "fresh": True})
+        self.assertEqual(code, 202, text)
+        deadline = time.time() + 60
+        while True:
+            d = json.loads(self.ui_call(base, "/api/rows", token)[1])
+            if d["jobs"].get("b1", {}).get("state") != "running" or time.time() > deadline:
+                break
+            time.sleep(0.2)
+        self.assertEqual(d["jobs"]["b1"]["state"], "done", d["jobs"])
+        self.assertEqual([r["name"] for r in d["rows"]], ["b1"])
+        payload = json.loads((Path(self.env["PMVA_STATE_DIR"]) / "sessions" / "b1.json").read_text(encoding="utf-8"))["payload"]
+        self.assertEqual((payload["agent"], payload["prompt"], payload.get("repo")), ("codex", "-h を直して", None))
+        # 動いている名前でもう一度起動すると、裏の処理がエラーを jobs に出す
+        self.assertEqual(self.ui_call(base, "/api/up", token, {"name": "b1"})[0], 202)
+        deadline = time.time() + 60
+        while True:
+            job = json.loads(self.ui_call(base, "/api/rows", token)[1])["jobs"]["b1"]
+            if job["state"] != "running" or time.time() > deadline:
+                break
+            time.sleep(0.2)
+        self.assertEqual(job["state"], "error", job)
+
     def test_ui_rejects_bad_port(self):
         rc, _, err = self.mvm("ui", "--no-open", "--port", "70000", check=False)
         self.assertNotEqual(rc, 0)
