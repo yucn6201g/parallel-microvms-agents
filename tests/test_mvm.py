@@ -930,6 +930,43 @@ class CliTest(unittest.TestCase):
         self.assertEqual(list(Path(self.env["PMVA_STATE_DIR"]).glob("payload-*")), [], "一時ファイルが残っていない")
         self.assertEqual(json.loads(args[args.index("--idle-policy") + 1])["maxIdleDurationSeconds"], 1800)
 
+    def test_help_groups_common_commands(self):
+        """mvm -h は約 30 個のコマンドを平たく並べていた。よく使うものとその他に分け、全部を 1 回ずつ載せる。"""
+        _, out, _ = self.mvm("-h")
+        common, _, other = out.partition("その他のコマンド:")
+        self.assertIn("よく使うコマンド:", common)
+        names = lambda text: re.findall(r"^  (\S+) ", text, re.M)
+        self.assertEqual(names(common), ["setup", "up", "ui", "ls", "send", "result", "ssh", "stop"])
+        self.assertIn("memory", names(other))
+        self.assertIn("doctor", names(other))
+        self.assertNotIn("_ssh-proxy", out)
+        sub = next(a for a in mvm.build_parser()._actions if isinstance(a, mvm.argparse._SubParsersAction))
+        self.assertEqual(sorted(names(common) + names(other)), sorted(a.dest for a in sub._choices_actions))
+        _, out, _ = self.mvm("up", "-h")
+        self.assertIn("--fresh", out, "サブコマンドの help は今までどおり")
+
+    def test_bare_mvm_without_config(self):
+        env = dict(self.env, PMVA_CONFIG=str(Path(self.tmp.name) / "none.env"))
+        _, out, _ = self.mvm(env=env)
+        self.assertIn("config.example.env", out)
+        self.assertIn("mvm setup", out)
+        self.assertIn("よく使うコマンド:", out)
+
+    def test_bare_mvm_suggests_next_step(self):
+        _, out, _ = self.mvm()
+        self.assertIn("次の一手: mvm setup", out, "この PC でまだ何もしていない")
+        self.mvm("up", "a1", "--repo", "https://github.com/o/r.git")
+        _, out, _ = self.mvm()
+        self.assertIn("a1 (RUNNING)", out)
+        self.assertIn("次の一手: mvm ui", out)
+        _, out, err = self.mvm(env=dict(self.env, PMVA_STUB_GET_ERROR="Error loading SSO Token"))
+        self.assertIn("mvm doctor", out)
+        self.assertIn("aws sso login", err, "認証切れなら、何をすればよいかを出す")
+        (self.stub_dir / "microvm-0000.term").touch()
+        _, out, _ = self.mvm()
+        self.assertIn("動いているセッションはありません", out)
+        self.assertIn("次の一手: mvm up <名前>", out)
+
     def previous_session(self, name, saved, **payload):
         """前に起動して終了した name のセッションを .state に置く。saved なら S3 に保存したワークスペースも置く。"""
         sessions = Path(self.env["PMVA_STATE_DIR"]) / "sessions"

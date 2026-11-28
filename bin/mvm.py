@@ -4079,9 +4079,58 @@ def add_up_options(p):
                         "(--claude-auth interactive で起動し、mvm login でログインする)")
 
 
+COMMON_COMMANDS = ("setup", "up", "ui", "ls", "send", "result", "ssh", "stop")
+
+
+def command_lines(parser, names=None):
+    """サブコマンドの名前と help を 1 行ずつ。names を省くと COMMON_COMMANDS 以外の全部。"""
+    sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    helps = {a.dest: a.help for a in sub._choices_actions}   # help の無い内部用 (_ssh-proxy) は入らない
+    names = names or [n for n in helps if n not in COMMON_COMMANDS]
+    return "".join(f"  {n:<13} {helps[n]}\n" for n in names)
+
+
+class MvmParser(argparse.ArgumentParser):
+    """mvm -h で、約 30 個のコマンドを「よく使うコマンド」と「その他」に分けて出す。"""
+    def format_help(self):
+        return (f"{self.format_usage()}\n{self.description}\n\n"
+                f"よく使うコマンド:\n{command_lines(self, COMMON_COMMANDS)}\n"
+                f"その他のコマンド:\n{command_lines(self)}\n"
+                "各コマンドの使い方は mvm <command> -h。引数なしの mvm で今の状態と次の一手を表示します\n")
+
+
+def cmd_home(parser):
+    """引数なしの mvm: 今の状態と次の一手、よく使うコマンドを出す。動いているはずのセッションだけ AWS に問い合わせる。"""
+    if not CONFIG_FILE.exists():
+        print(f"設定ファイル {CONFIG_FILE} がまだありません。")
+        print("次の一手: config.example.env をコピーして config.env を作り、mvm setup を実行する (docs/quickstart.md)")
+    else:
+        load_config()
+        states = {n: vm_state(n) for n in session_names() if not load_session(n).get("terminated")}
+        running = [f"{n} ({s})" for n, s in states.items() if s not in ("TERMINATED", "TERMINATING", "GONE", "UNKNOWN")]
+        unknown = [n for n, s in states.items() if s == "UNKNOWN"]
+        if running:
+            print("動いているセッション: " + "、".join(running))
+            print('次の一手: mvm ui (ブラウザで様子を見て操作する) / mvm send <名前> "指示" / mvm stop <名前>')
+        elif unknown:
+            print("セッションの状態を AWS から取得できませんでした。")
+            print("次の一手: 下の案内に従ってから mvm doctor で確かめる")
+        elif not session_names() and not (STATE_DIR / "stack-outputs.json").exists():
+            print("この PC からはまだ起動していません。")
+            print("次の一手: mvm setup (導入の残りを確かめて順に実行する。済んでいれば mvm up <名前> で起動)")
+        else:
+            print("動いているセッションはありません。")
+            print("次の一手: mvm up <名前> (リポジトリのフォルダで打つと origin を clone、前と同じ名前なら続きから)")
+        sys.stdout.flush()   # 一覧を出し切ってから警告を出す
+        for line in unknown_notes(unknown):
+            print(line, file=sys.stderr)
+    print(f"\nよく使うコマンド:\n{command_lines(parser, COMMON_COMMANDS)}\n全部のコマンド: mvm -h")
+    return 0
+
+
 def build_parser():
-    p = argparse.ArgumentParser(prog="mvm", description="Lambda MicroVMs で Claude Code / Codex を並列実行する")
-    sub = p.add_subparsers(dest="command", metavar="<command>")
+    p = MvmParser(prog="mvm", description="Lambda MicroVMs で Claude Code / Codex を並列実行する")
+    sub = p.add_subparsers(dest="command", metavar="<command>", parser_class=argparse.ArgumentParser)
 
     x = sub.add_parser("setup", help="導入の手順 (AWS の構成・普段使う IAM ユーザー・認証情報・SSH 鍵・イメージ) のうち、"
                                      "済んでいないものを順に聞いて実行する (何度実行してもよい)")
@@ -4295,8 +4344,7 @@ def main(argv=None):
         return subprocess.call([sys.executable, str(ROOT / "scripts" / "estimate_cost.py"), *argv[1:]])
     args = parser.parse_args(argv)
     if not args.command:
-        parser.print_help()
-        return 0
+        return cmd_home(parser)
     if args.command == "secret" and args.action == "set" and not args.kind:
         parser.error("secret set には kind が必要です")
     if args.command != "orchestrator":   # 手元のエージェントの設定だけなので、config.env がなくても使える
