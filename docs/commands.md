@@ -37,6 +37,7 @@ mvm setup [--profile <プロファイル名>]
 | 3 | 既定の認証方式・`USE_GITHUB_TOKEN`・`NOTIFY_WEBHOOK` に要るシークレットが無い | 値の用意のしかたを表示して `mvm secret set <kind>`。`github-token` を断ると `config.env` を `USE_GITHUB_TOKEN=false` にする |
 | 4 | `SSH_PUBLIC_KEY_FILE` が無い | `ssh-keygen -t ed25519` (`ssh-keygen` があるときだけ) |
 | 5 | イメージ (`IMAGE_NAME`) が無いか、使える版が無いか、`image/` や設定が最後のビルドから変わった | `mvm image build` |
+| 6 | `claude` / `codex` のコマンドが手元にあるのに、利用者全体の skill (`mvm-orchestrator`) が入っていない | `mvm orchestrator install claude` / `codex` ([orchestrator](#orchestrator))。断っても「まだ残っている手順」には数えない。どちらも無ければ飛ばす |
 
 - `--profile`: そのプロファイルを `config.env` の `AWS_PROFILE` に書いてから始めます。初回は管理者のプロファイルを渡します (1 と 2 に管理者の権限が要るため)。AWS CLI の設定にそのプロファイルが無ければ、何も書かずに止まります
 - AWS の認証情報が無い・切れているときは、理由と `mvm setup --profile <管理者>` を案内して止まります
