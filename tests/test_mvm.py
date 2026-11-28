@@ -1728,6 +1728,65 @@ class CliTest(unittest.TestCase):
         finally:
             api.shutdown()
 
+    def test_peek_warns_about_unpushed_work(self):
+        """VM の作業ツリーに未コミット・未 push があると、GitHub にはまだ無いことを peek が知らせる。"""
+        api = StatusApi()
+        self.addCleanup(api.shutdown)
+        self.mvm("up", "a1")
+        env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}")
+        api.statuses = [dict(self.status(claude="done"), git={"branch": "pmva/a1", "uncommitted": 2, "unpushed": 1})]
+        _, out, _ = self.mvm("peek", "a1", env=env)
+        self.assertIn("!! 未コミット 2 ファイル・未 push 1 コミット (VM を終了しても S3 の保存には残りますが、GitHub にはありません)", out)
+        for git in ({"branch": "pmva/a1", "uncommitted": 0, "unpushed": 0}, None):   # 無ければ何も出さない (git: null は git でない作業場所)
+            api.statuses = [dict(self.status(claude="done"), git=git)]
+            _, out, _ = self.mvm("peek", "a1", env=env)
+            self.assertNotIn("未コミット", out)
+
+    def test_stop_warns_about_unpushed_work_but_still_stops(self):
+        api = StatusApi()
+        self.addCleanup(api.shutdown)
+        env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}")
+        api.statuses = [dict(self.status(claude="done"), git={"branch": "pmva/a1", "uncommitted": 2, "unpushed": 1})]
+        self.mvm("up", "w1", env=env)
+        _, _, err = self.mvm("stop", "w1", env=env)
+        self.assertIn("未コミット 2 ファイル・未 push 1 コミット", err)
+        self.assertIn("保存 (S3) には含まれますが、GitHub にはありません", err)
+        self.assertTrue((self.stub_dir / "microvm-0000.term").exists(), "警告しても止める")
+        self.mvm("up", "w2", env=env)
+        _, _, err = self.mvm("stop", "w2", "--no-save", env=env)
+        self.assertIn("保存もされず、止めると失われます", err)
+        self.assertTrue((self.stub_dir / "microvm-0001.term").exists())
+        api.statuses = [self.status(claude="done")]   # git が無い (古いイメージ) / きれいなときは黙る
+        self.mvm("up", "w3", env=env)
+        _, _, err = self.mvm("stop", "w3", env=env)
+        self.assertNotIn("未コミット", err)
+
+    def test_result_reads_last_answer_from_s3_when_vm_is_gone(self):
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            closed = s.getsockname()[1]
+        env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{closed}")   # VM に届かない
+        self.mvm("up", "a1", env=env)
+        _, _, err = self.mvm("result", "a1", env=env, check=False)
+        self.assertIn("mvm up a1 --restore latest", err, "S3 にも無ければ、次の一手を添えたエラー")
+        obj = self.stub_dir / "s3" / "pmva-bucket" / "workspaces" / "a1" / "result.json"
+        obj.parent.mkdir(parents=True)
+        obj.write_text(json.dumps({"name": "a1", "updatedAt": 1793201909.5, "agents": {
+            "claude": {"agent": "claude", "state": "done", "since": 1793201900.0, "text": "PR を作りました: #12"}}},
+            ensure_ascii=False), encoding="utf-8")
+        for terminated in (False, True):   # 届かないだけのとき / 終了済みのとき
+            if terminated:
+                self.mvm("stop", "a1", "--no-save", env=env)
+            rc, out, _ = self.mvm("result", "a1", env=env)
+            self.assertIn("PR を作りました: #12", out)
+            self.assertRegex(out, r"\(VM は終了しています。\d{4}-\d{2}-\d{2} \d{2}:\d{2} に記録した最後の応答\)"
+                             if terminated else r"\(VM に届きません。\d{4}-\d{2}-\d{2} \d{2}:\d{2} に記録した最後の応答\)")
+            _, out, _ = self.mvm("result", "a1", "--agent", "claude", "--json", env=env)
+            r = json.loads(out)
+            self.assertEqual((r["text"], r["state"], r["source"], r["updatedAt"]), ("PR を作りました: #12", "done", "s3", 1793201909.5))
+        rc, _, err = self.mvm("result", "a1", "--agent", "codex", env=env, check=False)
+        self.assertEqual(rc, 1, "S3 の記録にないエージェント")
+
     def test_vm_commands_on_terminated_vm_point_to_up(self):
         self.mvm("up", "t1")
         self.mvm("stop", "t1", "--no-save")

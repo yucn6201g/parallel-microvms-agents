@@ -47,6 +47,8 @@
 - CI の `agents-e2e`: 固定した版の Claude Code / Codex を LLM API の代わりにつないで動かし、フックと会話の記録の読み取りを確かめる
 - MicroVM の寿命の残りを見えるようにした。`mvm ls` (`REMAINING` 列と `--json` の `remainingSeconds`)、`mvm watch` (「残り」列、`--json`、`--log` の CSV の末尾の列 `remainingSeconds`)、`mvm ui` の一覧、引数なしの `mvm` の「動いているセッション」に `2h10m` の形で出す。1 時間を切ると `!!` を付け、`ls` と引数なしの `mvm` では「`mvm renew <名前>` で延長できます」と案内する。`mvm suspend` はサスペンドの前にワークスペースを保存し (失敗しても警告して続ける)、実行後に「サスペンド中も寿命に数えます。残り Xh、サスペンドのまま 6 時間 (`IDLE_SUSPENDED_SECONDS`) で終了します」と伝える。列が増えたので、前の版で書いた `mvm watch --log` の CSV には追記せず、別のパスを指定するよう案内する
 
+- VM の作業が失われる・読めなくなる事故を防ぐ。`/status` に作業ツリーの未コミット・未 push の数 (`git`) を足し、`mvm peek` が「未コミット N ファイル・未 push M コミット」を知らせ、`mvm stop` / `stop-all` は止める前に警告する (`--no-save` では「保存もされず失われる」)。エージェントの最後の応答は S3 (`workspaces/<name>/result.json`) にも書き、VM が終了した後や届かないときは `mvm result` がそれを読む (`--json` では `source: "s3"`)。イメージの作り直しが必要 (`mvm image build`)
+
 ### 修正
 
 - `mvm memory rm` で消したメモリを手元で同じ名前で作り直した後に、古い VM (イメージ 8.0 以前) が消された内容を S3 に送り直すと、そのメモリの同期が詰まっていた。`push` は「競合」や「S3 のほうが新しい。先に pull してください」と出して飛ばし、`pull` は消された内容を取得しないので何もせず、`--force` でも直らないことがあった。S3 にあるのが消された内容なら、手元が新しいものとして `push` で手元の内容に置き換える (`share: false` などの送らないファイルは置き換えない)。`status` は「手元が新しい (S3 にあるのは … 送り直されたもの …)」と表示する。VM 側はイメージの作り直し (`mvm image build`) で反映

@@ -103,7 +103,9 @@ flowchart LR
 
 ### エージェントの状態と通知
 
-Claude Code の hooks と Codex の `notify` から `image/notify.sh` を呼び、エージェントの状態を `~/.pmva/agents/<claude|codex>.json` に記録します。`supervisor.py` の `/status` がそれを返し、`mvm wait` / `peek` が使います。
+Claude Code の hooks と Codex の `notify` から `image/notify.sh` を呼び、エージェントの状態を `~/.pmva/agents/<claude|codex>.json` に記録します。`supervisor.py` の `/status` がそれを返し、`mvm wait` / `peek` が使います。`/status` は作業ツリーの `git` (`branch`、`uncommitted` = `git status --porcelain` の行数、`unpushed` = `git rev-list --count HEAD --not --remotes`。git でなければ `null`) も返し、`mvm peek` / `stop` が GitHub に無い変更を警告するのに使います。
+
+エージェントの状態が変わると、`supervisor.py` は 1 分ごとの書き出しのときに、最後の応答を S3 の `workspaces/<name>/result.json` にも書きます。VM が終了した後も `mvm result` が読めるようにするためです (`status/` には置きません。keepalive の Lambda が `status/` の全ファイルを VM の状態として読むため)。
 
 | きっかけ | 状態 |
 |---|---|
