@@ -327,6 +327,17 @@ Windows と macOS の両方で使う場合は、それぞれで確認します�
 - 確認中に見つけた不具合: 最初の版 (イメージ 12.0) は認証情報のファイルができた時点で claude を起動していた。`claude auth login` は `~/.claude.json` の `oauthAccount` を後で書くため、その前に起動した claude は画面に「Claude Pro」と出るのに Remote Control が黙って無効になり、一覧に出なかった (`oauthAccount` を消して起動すると再現)。`oauthAccount` もそろうまで待つよう直した。`remoteDialogSeen` / `hasUsedRemoteControl` / `remoteControlMachineId` の有無は関係なかった
 - [ ] サスペンド中に指示を送ったときの振る舞い、レジューム後に Remote Control がつなぎ直すか: 未確認
 
+## L. 導入と利用の負担を減らす機能 (2026-11-28)
+
+`mvm infra operator` (#79)、`mvm up <name>` の続き (#80)、`mvm ui` (#81)、`mvm setup` (#82) の実機の確認。Windows 11、イメージ 13.0、main の 7da9700 で確認した。
+
+- [x] `mvm setup --profile <管理者>` が、空の `PMVA_STATE_DIR` で最後まで通ること: 既にあるスタック `pmva`・シークレット 2 つ・SSH 鍵・イメージ 13.0 は「ok」で飛ばした。管理者 (AdministratorAccess を付けたグループのユーザー) と判定して operator の作成を聞き、y で IAM ユーザー `pmva-operator` とアクセスキーを作った。プロファイル `pmva` に保存して config.env を切り替え、続くシークレットの確認と doctor は `pmva-operator` の権限で通って「準備 OK」になった (#79 の `infra_operator` もこの経路で確認)。doctor の「この PC からイメージをビルドした記録がありません」は、状態フォルダが空なので想定どおり
+- [x] `mvm up <name>` が今いるフォルダの `origin` を clone すること: 同じリポジトリの別の worktree で `mvm up v82` を打つと、「今のフォルダの origin を使います」と出て、VM の `~/work/parallel-microvms-agents` に 7da9700 が clone された
+- [x] stop の後に同じ名前で up すると前回の続きから始まること: ワークスペースに目印のファイルを置いて `mvm stop v82` (保存してから終了) し、もう一度 `mvm up v82` を打つと「前回の v82 の続きから始めます (… 保存したワークスペースを復元)」と出て、目印のファイルが戻った
+- [x] `mvm ui` で本物の VM を一覧・送信・停止できること: 一覧は 10 秒ごとに更新され、行を開くと画面の末尾と最後の応答が出た。指示を送ると約 47 秒で「応答が終わった」になり、最後の応答に結果が出た。「保存して停止」は裏で進み、約 1 分で終わって一覧から消えた。ブラウザのコンソールにページのエラーは無かった
+- [x] Windows で `mvm ui` が Ctrl-C で止まること: PowerShell で Ctrl-C を送るとプロンプトに戻った
+- 気づいたこと (不具合ではない): 開いたままの詳細 (画面の末尾・最後の応答) は自動では更新されず、読み込みのボタンを押すと更新される (問い合わせた VM が自動でサスペンドされなくなるのを避けるため)。Claude アプリの組み込みブラウザは `confirm()` を自動で「いいえ」にするので、停止・renew のボタンを押しても何も起きない。普通のブラウザで開く
+
 ## 結果
 
 | 項目 | 結果 / メモ |
