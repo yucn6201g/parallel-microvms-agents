@@ -1,14 +1,14 @@
-﻿# Windows 用のセットアップ: 前提ツールの確認、config.env の作成、mvm エイリアスの登録。
-# 何度実行しても同じ結果になる (エイリアスの行は書き換える)。
+﻿# Windows 用のセットアップ: 前提ツールの確認、config.env の作成、bin フォルダのユーザー PATH への追加。
+# 何度実行しても同じ結果になる。
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\install.ps1
-#   powershell -ExecutionPolicy Bypass -File scripts\install.ps1 -ProfilePath <ファイル>   # 登録先を指定
-#   powershell -ExecutionPolicy Bypass -File scripts\install.ps1 -NoAlias                  # 登録しない
+#   powershell -ExecutionPolicy Bypass -File scripts\install.ps1 -NoPath                 # PATH を書き換えない
+#   (古い mvm エイリアスの行を消す先は -ProfilePath <ファイル> で指定できる)
 #
 # 日本語版 Windows PowerShell 5.1 でも読めるよう、このファイルは UTF-8 (BOM 付き) で保存している。
 param(
-    [string]$ProfilePath = $PROFILE.CurrentUserAllHosts,
-    [switch]$NoAlias
+    [string]$ProfilePath = $PROFILE.CurrentUserAllHosts,  # 古いエイリアスを消す先
+    [switch]$NoPath
 )
 # 'Stop' にすると、Windows PowerShell 5.1 では外部コマンドの stderr 出力 (py が見つからない等) で止まってしまう
 $ErrorActionPreference = 'Continue'
@@ -54,22 +54,37 @@ if (Test-Path $config) {
     Ok "config.env を作成しました。AWS_REGION などを確認してください: $config"
 }
 
-if (-not $NoAlias) {
-    $ProfilePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ProfilePath)
-    $line = "Set-Alias mvm '" + (Join-Path $Root 'bin\mvm.cmd') + "' # pmva"
-    $dir = Split-Path -Parent $ProfilePath
-    if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-    $lines = @()
-    if (Test-Path $ProfilePath) {
-        $lines = @(Get-Content -LiteralPath $ProfilePath -Encoding UTF8 | Where-Object { $_ -notmatch ' # pmva$' })
+# bin フォルダをユーザーの PATH に足す (HKCUEnvironment)。PowerShell 5.1 / 7 (pwsh) / cmd.exe のどれからでも mvm で呼べる
+if (-not $NoPath) {
+    $bin = Join-Path $Root 'bin'
+    if ([Environment]::OSVersion.Platform -ne 'Win32NT') {
+        Ng "PATH への登録は Windows 用です。bin フォルダ ($bin) を PATH に足してください"
+    } else {
+        $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+        # 展開前の値のまま読み書きして、%USERPROFILE% などを展開済みの文字列に変えない
+        $cur = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $entries = @($cur -split ';' | Where-Object { $_ })
+        if ($entries | Where-Object { $_.TrimEnd('\') -ieq $bin.TrimEnd('\') }) {
+            Ok "bin フォルダはすでにユーザーの PATH にあります: $bin"
+        } else {
+            $key.SetValue('Path', (($entries + $bin) -join ';'), [Microsoft.Win32.RegistryValueKind]::ExpandString)
+            # 変数を 1 つ消す操作で、エクスプローラーなどに環境変数の変更を通知する (新しい端末にすぐ反映される)
+            [Environment]::SetEnvironmentVariable('PMVA_PATH_NOTIFY', $null, 'User')
+            Ok "bin フォルダをユーザーの PATH に追加しました: $bin"
+        }
+        $key.Close()
+        Write-Output '     いま開いている PowerShell / コマンドプロンプト / VS Code の端末は、閉じて開き直すと mvm が使えます'
     }
-    $lines += $line
-    # BOM 付き UTF-8 で保存 (Windows PowerShell 5.1 は BOM なしを ANSI として読むため)
-    [System.IO.File]::WriteAllLines($ProfilePath, [string[]]$lines, (New-Object System.Text.UTF8Encoding $true))
-    Ok "エイリアスを登録しました: $ProfilePath (新しい PowerShell を開くと有効になります)"
-    $policy = Get-ExecutionPolicy -Scope CurrentUser
-    if ($policy -eq 'Restricted' -or ($policy -eq 'Undefined' -and (Get-ExecutionPolicy) -eq 'Restricted')) {
-        Write-Output '     プロファイルを読み込むには次を 1 回実行してください: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned'
+}
+
+# 以前のバージョンが書いた mvm エイリアスの行を消す (PATH の mvm.cmd と二重になり、フォルダを動かすと壊れるため)
+$ProfilePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ProfilePath)
+if (Test-Path -LiteralPath $ProfilePath) {
+    $old = @(Get-Content -LiteralPath $ProfilePath -Encoding UTF8)
+    $kept = @($old | Where-Object { $_ -notmatch ' # pmva$' })
+    if ($kept.Count -ne $old.Count) {
+        [System.IO.File]::WriteAllLines($ProfilePath, [string[]]$kept, (New-Object System.Text.UTF8Encoding $true))
+        Ok "古い mvm エイリアスの行を消しました: $ProfilePath"
     }
 }
 

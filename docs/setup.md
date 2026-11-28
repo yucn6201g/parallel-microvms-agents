@@ -18,10 +18,10 @@ AWS の構成、操作用の IAM ユーザー、イメージの更新、片付�
 
 ### インストールスクリプト
 
-前提ツールの確認、`config.env` の作成、`mvm` エイリアスの登録をまとめて行います。何度実行しても大丈夫です。
+前提ツールの確認、`config.env` の作成、`mvm` コマンドの登録をまとめて行います。何度実行しても大丈夫です。
 
 ```powershell
-# Windows (PowerShell)。エイリアスは $PROFILE に書く
+# Windows。bin フォルダをユーザーの PATH (HKCU の環境変数) に足す。PowerShell 5.1 / 7 (pwsh) / コマンドプロンプトのどれでも mvm で呼べる
 powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 ```
 
@@ -30,8 +30,9 @@ powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 scripts/install.sh
 ```
 
-登録先は `-ProfilePath <ファイル>` / `--rc <ファイル>` で変えられ、`-NoAlias` / `--no-alias` で登録しないこともできます。登録した行には `# pmva` が付いていて、再実行するとその行だけを書き換えます。
-Windows で「このシステムではスクリプトの実行が無効になっている」と出たら、`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` を 1 回実行します。
+Windows は `-NoPath` で PATH を書き換えません。以前のバージョンが `$PROFILE` に書いた `mvm` エイリアスの行 (`# pmva` 付き) は、実行すると消します (PATH の `mvm.cmd` と二重になるため)。実行したあとは、**開いている端末を閉じて開き直す**と `mvm` が使えます。
+macOS / Linux は登録先を `--rc <ファイル>` で変えられ、`--no-alias` で登録しません。登録した行には `# pmva` が付いていて、再実行するとその行だけを書き換えます。zsh / bash 以外のシェルでは `bin` フォルダを PATH に足してください。
+Python が無い、または 3.9 未満のときは、`mvm` を実行した時点で入れ方を案内して終了コード 1 で止まります (Windows は `py -3`、無ければ `python` の順に探します)。
 
 ### mvm の呼び出し方
 
@@ -39,7 +40,7 @@ Windows で「このシステムではスクリプトの実行が無効になっ
 
 | OS | 実行方法 | 毎回 `mvm` と打てるようにする |
 |---|---|---|
-| Windows (PowerShell) | `.\bin\mvm.cmd <command>` | `Set-Alias mvm "$PWD\bin\mvm.cmd"` を `$PROFILE` に書く |
+| Windows (PowerShell) | `.\bin\mvm.cmd <command>` | `bin` フォルダをユーザーの PATH に追加 (インストールスクリプトが行う) |
 | Windows (コマンドプロンプト) | `bin\mvm <command>` | `bin` フォルダを PATH に追加 |
 | macOS / Linux | `bin/mvm <command>` | `alias mvm="$PWD/bin/mvm"` を `~/.zshrc` に書く |
 
