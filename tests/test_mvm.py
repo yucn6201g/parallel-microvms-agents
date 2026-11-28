@@ -325,6 +325,38 @@ class ParseEnvFileTest(unittest.TestCase):
         self.assertEqual(r["URL"], "https://example.com/#anchor")
 
 
+class AwsProfileOverrideTest(unittest.TestCase):
+    """PMVA_AWS_PROFILE は config.env の AWS_PROFILE より優先される (環境変数 AWS_PROFILE ではない)。"""
+
+    def load(self, env_value, config_profile="pmva-op"):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d) / "config.env"
+            cfg.write_text(f"AWS_PROFILE={config_profile}\n", encoding="utf-8")
+            env = {"PMVA_AWS_PROFILE": env_value, "AWS_PROFILE": "admin-from-shell"}
+            with mock.patch.object(mvm, "CONFIG_FILE", cfg), mock.patch.object(mvm, "STATE_DIR", Path(d) / "state"), \
+                    mock.patch.dict(os.environ, env), mock.patch.dict(mvm.C, clear=False):
+                mvm.load_config()
+                return mvm.aws_env()["AWS_PROFILE"], mvm.aws_profile_override_note()
+
+    def test_env_overrides_config(self):
+        profile, note = self.load("pmva")
+        self.assertEqual(profile, "pmva")
+        self.assertEqual(note, "PMVA_AWS_PROFILE=pmva で config.env の AWS_PROFILE=pmva-op を上書きしています")
+
+    def test_empty_keeps_config(self):
+        profile, note = self.load("")
+        self.assertEqual(profile, "pmva-op")
+        self.assertEqual(note, "")
+
+    def test_auth_expired_hint_names_profile(self):
+        with mock.patch.dict(mvm.C, {"AWS_PROFILE": "pmva-op"}):
+            hint = mvm.aws_error_hint("Token has expired")
+        self.assertIn("aws sso login --profile pmva-op", hint)
+        self.assertIn("PMVA_AWS_PROFILE=<名前>", hint)
+        with mock.patch.dict(mvm.C, {"AWS_PROFILE": ""}):
+            self.assertNotIn("--profile", mvm.aws_error_hint("Token has expired"))
+
+
 class WsTargetTest(unittest.TestCase):
     def test_default_and_override(self):
         self.assertEqual(mvm.ws_target("x.on.aws"), ("x.on.aws", 443, True))
@@ -1584,6 +1616,12 @@ class CliTest(unittest.TestCase):
         env["PMVA_STUB_ERROR"] = "Could not connect to the endpoint URL"
         _, out, _ = self.mvm("doctor", env=env, check=False)
         self.assertIn("AWS に接続できません", out)
+
+    def test_doctor_shows_pmva_aws_profile_override(self):
+        _, out, _ = self.mvm("doctor", check=False)
+        self.assertNotIn("PMVA_AWS_PROFILE", out)
+        _, out, _ = self.mvm("doctor", env=dict(self.env, PMVA_AWS_PROFILE="other"), check=False)
+        self.assertIn("PMVA_AWS_PROFILE=other で config.env の AWS_PROFILE=", out)
 
     def test_doctor_warns_when_safety_nets_are_off(self):
         _, out, _ = self.mvm("doctor", check=False)
