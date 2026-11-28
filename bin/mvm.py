@@ -2233,10 +2233,10 @@ def print_json(obj):
 
 
 def cmd_ls(args):
-    fmt = "{:<16} {:<11} {:<7} {:<22} {:<22} {}"
-    rows, unknown = [], []
+    fmt = "{:<16} {:<11} {:<7} {:<22} {:<22} {:<10} {}"
+    rows, unknown, low = [], [], []
     if not args.json:
-        print(fmt.format("NAME", "STATE", "AGENT", "AUTH", "STARTED", "MICROVM"))
+        print(fmt.format("NAME", "STATE", "AGENT", "AUTH", "STARTED", "REMAINING", "MICROVM"))
     for name in session_names():
         s = load_session(name)
         if s.get("terminated") and not args.all:
@@ -2251,16 +2251,22 @@ def cmd_ls(args):
         started = s.get("startedAt") or "-"
         if isinstance(started, (int, float)):  # AWS CLI v1 は UNIX 秒で返す
             started = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(started))
+        left = None if state in ("TERMINATED", "GONE") else remaining_seconds(s)
+        low.append((name, left))
         if args.json:
             rows.append({"name": name, "state": state, "agent": p.get("agent"), "claudeAuth": p.get("claudeAuth"),
                          "codexAuth": p.get("codexAuth"), "repo": p.get("repo"), "branch": p.get("branch"),
-                         "startedAt": started if started != "-" else None, "microvmId": s["microvmId"]})
+                         "startedAt": started if started != "-" else None, "remainingSeconds": left,
+                         "microvmId": s["microvmId"]})
             if state == "UNKNOWN":
                 rows[-1]["stateError"] = state_error(name)
         else:
-            print(fmt.format(name, state, p.get("agent", "-"), auth, started, s["microvmId"]))
+            print(fmt.format(name, state, p.get("agent", "-"), auth, started, format_remaining(left), s["microvmId"]))
     if args.json:
         print_json(rows)
+    else:
+        for line in renew_notes(low):
+            print(line)
     sys.stdout.flush()   # 一覧を出し切ってから警告を出す (パイプでも順番を保つ)
     for line in unknown_notes(unknown):
         print(line, file=sys.stderr)
@@ -2377,8 +2383,20 @@ def cmd_renew(args):
 
 
 def cmd_suspend(args):
-    lmv("suspend-microvm", "--microvm-identifier", load_session(args.name)["microvmId"])
+    s = load_session(args.name)
+    if vm_state(args.name) == "RUNNING":   # サスペンド中は保存できない (起こしてしまう) ので、動いているときだけ
+        try:
+            saved = save_workspace(args.name)
+        except SystemExit as e:
+            print(e.code, file=sys.stderr)
+            saved = False
+        if not saved:
+            log("警告: 保存に失敗しましたが、サスペンドは続けます (原因は mvm save でもう一度確かめられます)")
+    lmv("suspend-microvm", "--microvm-identifier", s["microvmId"])
     log(f"サスペンドしました: {args.name}")
+    left = remaining_seconds(s)
+    log("サスペンド中も寿命に数えます。" + (f"残り {format_remaining(left).replace('!! ', '')}、" if left is not None else "")
+        + f"サスペンドのまま {format_elapsed(int(C['IDLE_SUSPENDED_SECONDS']))} (IDLE_SUSPENDED_SECONDS) で終了します")
     return 0
 
 
@@ -2961,9 +2979,9 @@ WATCH_IDLE_LIMIT = 300      # stalled とみなす、画面と CPU が動かな�
 WATCH_EVENT_CHARS = 200     # /events で受け取る 1 件の文字数の上限
 WATCH_LABELS = dict(AGENT_STATE_LABELS, stalled="動きが止まった", suspended="一時停止中", terminated="終了",
                     unreachable="応答なし", starting="起動の準備中")
-WATCH_HEADS = ("名前", "状態", "経過", "メモリ (使用/全体 最大)", "最後の出来事")
+WATCH_HEADS = ("名前", "状態", "経過", "残り", "メモリ (使用/全体 最大)", "最後の出来事")
 WATCH_COLORS = {"red": "\x1b[31m", "yellow": "\x1b[33m", "green": "\x1b[32m"}
-WATCH_LOG_COLUMNS = ("time", "name", "vm", "state", "usedMiB", "totalMiB", "peakMiB", "oomKills")
+WATCH_LOG_COLUMNS = ("time", "name", "vm", "state", "usedMiB", "totalMiB", "peakMiB", "oomKills", "remainingSeconds")
 CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
@@ -3004,6 +3022,40 @@ def format_elapsed(seconds):
         return f"{seconds // 60}分"
     hours, minutes = divmod(seconds // 60, 60)
     return f"{hours}時間{minutes}分" if minutes else f"{hours}時間"
+
+
+REMAINING_WARN_SECONDS = 3600   # 寿命の残りがこれを切ったら目立たせる
+
+
+def remaining_seconds(s, now=None):
+    """セッションの寿命の残り秒数 (startedAt + maxDuration - 今)。startedAt が無い・読めないときは None。"""
+    started = s.get("startedAt")
+    try:
+        if isinstance(started, str):   # AWS CLI v2 は ISO 8601 (Z 付きのことがある)
+            try:
+                started = float(started)
+            except ValueError:
+                import datetime
+                dt = datetime.datetime.fromisoformat(started.replace("Z", "+00:00"))
+                started = (dt if dt.tzinfo else dt.astimezone()).timestamp()
+        return int(float(started) + int(s["maxDuration"]) - (time.time() if now is None else now))
+    except (TypeError, ValueError, KeyError, OverflowError):
+        return None
+
+
+def format_remaining(seconds):
+    """寿命の残りを 2h10m / 45m の形にする。1 時間を切ると先頭に !! を付ける。"""
+    if seconds is None:
+        return "-"
+    minutes = max(0, seconds) // 60
+    text = f"{minutes // 60}h{minutes % 60:02d}m" if minutes >= 60 else f"{minutes}m"
+    return f"!! {text}" if seconds < REMAINING_WARN_SECONDS else text
+
+
+def renew_notes(rows):
+    """残りが 1 時間を切った台の延長の案内。rows は (名前, 残り秒) の並び。"""
+    return [f"!! {n}: 寿命まで残り {format_remaining(r)[3:]} です。mvm renew {n} で延長できます"
+            for n, r in rows if r is not None and r < REMAINING_WARN_SECONDS]
 
 
 class WatchBoard:
@@ -3096,7 +3148,9 @@ def watch_notes(name, row, summary):
 def watch_row(board, name, now):
     """1 台分の表示用データ。VM が止まっているときは /status も /events も呼ばない (起こして課金されるため)。"""
     row = {"name": name, "vm": board.vm_state(name, now), "state": "", "agents": {}, "sinceSeconds": None,
-           "memory": None, "oomKills": 0, "lastEvent": "", "notes": []}
+           "remainingSeconds": None, "memory": None, "oomKills": 0, "lastEvent": "", "notes": []}
+    if row["vm"] not in ("TERMINATED", "TERMINATING", "GONE"):
+        row["remainingSeconds"] = remaining_seconds(load_session(name), now)
     if row["vm"] != "RUNNING":
         row["state"] = row["vm"]
         row["notes"] = watch_notes(name, row, {})
@@ -3145,7 +3199,7 @@ def watch_cells(row):
     if row["oomKills"]:
         memory = (memory if mem else "") + f" !!OOM×{row['oomKills']}"
     return (row["name"], WATCH_LABELS.get(row["state"], row["state"]), format_elapsed(row["sinceSeconds"]),
-            memory.strip(), row["lastEvent"] or "-")
+            format_remaining(row["remainingSeconds"]), memory.strip(), row["lastEvent"] or "-")
 
 
 def format_watch(rows, width, color, stamp, interval):
@@ -3162,11 +3216,11 @@ def format_watch(rows, width, color, stamp, interval):
                  f" / 完了 {count(lambda r: r['state'] == 'done')})  {interval} 秒ごと / Ctrl-C で終了")]
     if rows:
         cells = [tuple(CONTROL_CHARS.sub(" ", c) for c in watch_cells(r)) for r in rows]
-        widths = [max(display_width(c[i]) for c in cells + [WATCH_HEADS]) for i in range(4)]
+        widths = [max(display_width(c[i]) for c in cells + [WATCH_HEADS]) for i in range(5)]
         widths[0] = min(widths[0], 24)
         rest = max(10, width - sum(w + 2 for w in widths))
         for c, level in [(WATCH_HEADS, "")] + [(c, watch_level(r)) for c, r in zip(cells, rows)]:
-            parts = [pad_width(cut_width(c[i], widths[i]), widths[i]) for i in range(4)] + [cut_width(c[4], rest)]
+            parts = [pad_width(cut_width(c[i], widths[i]), widths[i]) for i in range(5)] + [cut_width(c[5], rest)]
             lines.append(paint(cut_width("  ".join(parts), width).rstrip(), level))
     else:
         lines.append("表示するセッションがありません (mvm ls で確認)")
@@ -3182,6 +3236,11 @@ def watch_open_log(path):
     """--log の CSV を開けるか確かめ、無ければ見出しの行を書く。"""
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and path.stat().st_size:
+            with open(path, encoding="utf-8", newline="") as f:
+                head = next(csv.reader(f), [])
+            if tuple(head) != WATCH_LOG_COLUMNS:   # 列の違う行を混ぜると、表計算で読めなくなる
+                die(f"--log のファイル {path} は列が今の mvm と違います (古い mvm で書いたもの)。別のパスを --log に指定してください")
         with open(path, "a", encoding="utf-8", newline="") as f:
             if f.tell() == 0:
                 csv.writer(f).writerow(WATCH_LOG_COLUMNS)
@@ -3200,7 +3259,8 @@ def watch_append_log(path, rows, now):
             for r in rows:
                 mem = r["memory"] or {}
                 w.writerow([stamp, r["name"], r["vm"], r["state"], mem.get("usedMiB", ""), mem.get("totalMiB", ""),
-                            mem.get("peakMiB", ""), r["oomKills"]])
+                            mem.get("peakMiB", ""), r["oomKills"],
+                            "" if r["remainingSeconds"] is None else r["remainingSeconds"]])
     except OSError as e:
         die(f"--log のファイル {path} に書き込めません ({e})。Excel などで開いていれば閉じてから、もう一度実行してください")
 
@@ -3267,7 +3327,7 @@ def ui_rows(ui):
         if ui.busy(name):   # 停止・renew の途中は .state を書き換えているので読まない
             job = ui.jobs[name]
             rows.append({"name": name, "vm": "", "level": "yellow", "notes": [],
-                         "cells": [name, job["message"], "-", "-", "-"]})
+                         "cells": [name, job["message"], "-", "-", "-", "-"]})
             continue
         if load_session(name).get("terminated"):
             continue
@@ -3524,7 +3584,7 @@ input,select{font:inherit;padding:6px 8px;border-radius:6px;border:1px solid var
 </style></head><body>
 <header><h1>mvm</h1><span class="muted" id="stamp">読み込み中…</span><span class="muted">10 秒ごとに更新 (このタブを表示している間だけ)</span></header>
 <main>
-<section><h2>セッション</h2><div class="scroll"><table><thead><tr><th>名前</th><th>状態</th><th>経過</th><th>メモリ</th><th>最後の出来事</th></tr></thead>
+<section><h2>セッション</h2><div class="scroll"><table><thead><tr><th>名前</th><th>状態</th><th>経過</th><th>残り</th><th>メモリ</th><th>最後の出来事</th></tr></thead>
 <tbody id="rows"></tbody></table></div><p class="muted" id="empty" hidden>動いているセッションはありません。下の「新しく起動」から始められます。</p>
 <div id="notes"></div><div id="jobs"></div></section>
 <section><details id="upbox"><summary><h2 style="display:inline">新しく起動</h2></summary>
@@ -3576,8 +3636,8 @@ async function refresh() {
       rowsByName[r.name] = r;
       const tr = el("tr"); tr.tabIndex = 0; if (r.name === selected) tr.className = "sel";
       const c = r.cells, st = el("td"); st.append(el("span", c[1], "badge lv-" + r.level));
-      tr.append(el("td", c[0]), st, el("td", c[2]), el("td", c[3]), el("td", c[4], "last"));
-      tr.title = c[4]; tr.onclick = () => select(r.name);
+      tr.append(el("td", c[0]), st, el("td", c[2]), el("td", c[3]), el("td", c[4]), el("td", c[5], "last"));
+      tr.title = c[5]; tr.onclick = () => select(r.name);
       tr.onkeydown = e => { if (e.key === "Enter") select(r.name); };
       tb.append(tr);
     }
@@ -4183,10 +4243,15 @@ def cmd_home(parser):
     else:
         load_config()
         states = {n: vm_state(n) for n in session_names() if not load_session(n).get("terminated")}
-        running = [f"{n} ({s})" for n, s in states.items() if s not in ("TERMINATED", "TERMINATING", "GONE", "UNKNOWN")]
+        alive = [n for n, s in states.items() if s not in ("TERMINATED", "TERMINATING", "GONE", "UNKNOWN")]
+        left = {n: remaining_seconds(load_session(n)) for n in alive}
+        running = [f"{n} ({states[n]}、残り {format_remaining(left[n])})" if left[n] is not None
+                   else f"{n} ({states[n]})" for n in alive]
         unknown = [n for n, s in states.items() if s == "UNKNOWN"]
         if running:
             print("動いているセッション: " + "、".join(running))
+            for line in renew_notes(left.items()):
+                print(line)
             print('次の一手: mvm ui (ブラウザで様子を見て操作する) / mvm send <名前> "指示" / mvm stop <名前>')
         elif unknown:
             print("セッションの状態を AWS から取得できませんでした。")

@@ -44,6 +44,7 @@
 - `mvm forward <name> <port>`: VM の中のポート (開発サーバーなど) を手元の PC のポートにつなぐ
 - CI の `image` ワークフロー: 本物のイメージを ARM64 でビルドし、ツール、headless の Chromium、起動時の初期化を確かめる
 - CI の `agents-e2e`: 固定した版の Claude Code / Codex を LLM API の代わりにつないで動かし、フックと会話の記録の読み取りを確かめる
+- MicroVM の寿命の残りを見えるようにした。`mvm ls` (`REMAINING` 列と `--json` の `remainingSeconds`)、`mvm watch` (「残り」列、`--json`、`--log` の CSV の末尾の列 `remainingSeconds`)、`mvm ui` の一覧、引数なしの `mvm` の「動いているセッション」に `2h10m` の形で出す。1 時間を切ると `!!` を付け、`ls` と引数なしの `mvm` では「`mvm renew <名前>` で延長できます」と案内する。`mvm suspend` はサスペンドの前にワークスペースを保存し (失敗しても警告して続ける)、実行後に「サスペンド中も寿命に数えます。残り Xh、サスペンドのまま 6 時間 (`IDLE_SUSPENDED_SECONDS`) で終了します」と伝える。列が増えたので、前の版で書いた `mvm watch --log` の CSV には追記せず、別のパスを指定するよう案内する
 
 ### 修正
 
