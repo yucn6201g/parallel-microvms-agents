@@ -637,6 +637,36 @@ class SupervisorTest(unittest.TestCase):
         subprocess.run(git + ["update-ref", "refs/remotes/origin/main", "HEAD"], check=True, env=self.env)
         self.assertEqual(self.get("/status?lines=0")[1]["git"]["unpushed"], 0)
 
+    def test_diff_shows_uncommitted_untracked_and_unpushed_work(self):
+        self.hook("run", {"microvmId": "m", "runHookPayload": json.dumps({"name": "df", "agent": "none"})})
+        self.wait_ready()
+        self.assertEqual(self.get("/diff")[1], {"error": "not a git repository"})
+        work = self.home / "work"
+        git = ["git", "-C", str(work), "-c", "user.name=t", "-c", "user.email=t@example.com"]
+        subprocess.run(["git", "init", "-q", "-b", "main", str(work)], check=True, env=self.env)
+        # コミットが 0 件でも落ちない
+        code, d = self.get("/diff")
+        self.assertEqual((code, d["unpushed"], d["diff"], d["truncated"]), (200, [], "", False))
+        (work / "a.txt").write_text("a\n", encoding="utf-8")
+        subprocess.run(git + ["add", "-A"], check=True, env=self.env)
+        subprocess.run(git + ["commit", "-q", "-m", "初期化"], check=True, env=self.env)
+        (work / "a.txt").write_text("changed\n", encoding="utf-8")
+        (work / "b.txt").write_text("b", encoding="utf-8")
+        code, d = self.get("/diff")
+        self.assertEqual(code, 200)
+        self.assertEqual(d["branch"], "main")
+        self.assertEqual(d["untracked"], ["b.txt"])
+        self.assertEqual(len(d["unpushed"]), 1)
+        self.assertIn("初期化", d["unpushed"][0])
+        self.assertIn("a.txt", d["stat"])
+        self.assertIn("+changed", d["diff"])
+        self.assertFalse(d["truncated"])
+        _, d = self.get("/diff?max=10")
+        self.assertEqual((len(d["diff"]), d["truncated"]), (10, True))
+        self.assertEqual(self.get("/diff?max=x")[0], 400)
+        subprocess.run(git + ["update-ref", "refs/remotes/origin/main", "HEAD"], check=True, env=self.env)
+        self.assertEqual(self.get("/diff")[1]["unpushed"], [])
+
     def test_last_answer_is_published_to_s3_when_agent_state_changes(self):
         payload = {"name": "pr", "agent": "codex", "region": "ap-northeast-1", "snapshotBucket": "bkt"}
         self.hook("run", {"microvmId": "m", "runHookPayload": json.dumps(payload)})
