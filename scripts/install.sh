@@ -73,5 +73,5 @@ echo
 if [ "$missing" -gt 0 ]; then
   echo "足りないツールが $missing 個あります。入れてから mvm doctor で確認してください"
 else
-  echo "次は: mvm doctor → mvm infra deploy (docs/quickstart.md の手順 4)"
+  echo "次は: 管理者のプロファイルを用意して mvm setup --profile admin (docs/quickstart.md の手順 4)"
 fi

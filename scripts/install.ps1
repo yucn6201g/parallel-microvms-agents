@@ -77,5 +77,5 @@ Write-Output ''
 if ($script:Missing -gt 0) {
     Write-Output "足りないツールが $($script:Missing) 個あります。入れてから mvm doctor で確認してください"
 } else {
-    Write-Output '次は: mvm doctor → mvm infra deploy (docs\quickstart.md の手順 4)'
+    Write-Output '次は: 管理者のプロファイルを用意して mvm setup --profile admin (docs\quickstart.md の手順 4)'
 }

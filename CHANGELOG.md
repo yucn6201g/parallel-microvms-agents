@@ -6,6 +6,7 @@
 
 ### 追加
 
+- `mvm setup [--profile <名前>]`: 導入の手順のうち済んでいないもの (AWS の構成の作成、普段使う IAM ユーザーへの切り替え、既定の認証方式と GitHub のシークレットの登録、SSH 鍵の作成、イメージのビルド) を 1 つずつ聞いて実行し、最後に `mvm doctor` で確かめる。何度実行しても済んだ手順は飛ばす。`--profile` で `config.env` の `AWS_PROFILE` を書くので、`config.env` を手で書き換えなくてよい。GitHub のトークンを断ると `USE_GITHUB_TOKEN=false` にする。quickstart の手順 4〜7 を「管理者のプロファイルを用意する」と「`mvm setup --profile admin`」の 2 つにまとめた (全体で 9 手順 → 7 手順)。実機では未確認
 - `mvm ui [--port <番号>] [--no-open]`: 手元のブラウザで管理画面を開く。`mvm watch` と同じ一覧を 10 秒ごとに更新し (タブを表示している間だけ)、行をクリックすると画面の末尾と最後の応答を出す。指示の送信、再開、renew、保存して停止もボタンでできる (renew と停止は確認してから裏で進める)。127.0.0.1 でだけ待ち受け、起動のたびに作る合言葉と Host ヘッダーを確かめる。Python の標準ライブラリだけで動く
 - `mvm up <name>` だけで前回の続きから始める。`--repo` を省くと、同じ名前で前に起動したセッションの repo・ブランチ・起点のブランチを引き継ぎ、保存したワークスペースがあれば復元する (`--fresh` で引き継がない)。前のセッションが無ければ、今いるフォルダの git の `origin` を clone する (`ssh` の URL は `https` に直し、URL のトークンは取り除く。`mvm` 自身のフォルダでは使わない)。`mvm fleet` も `--repo` を省くと `origin` を使う。clone しないときは `--no-repo`。`--repo` を明示したときの動きは変わらない
 - `mvm infra operator [--user <名前>] [--profile <名前>]`: 普段使う IAM ユーザー (`pmva-operator` ポリシーだけを付ける) とアクセスキーを作り、AWS CLI のプロファイル (既定 `pmva`) に保存して `config.env` の `AWS_PROFILE` を切り替える。quickstart の手順 5 (ARN のコピー、`aws iam` を 3 回、`aws configure`、`config.env` の書き換え) が 1 回のコマンドになる。秘密のアクセスキーは画面にもコマンドライン引数にも出さない。管理者のプロファイルで実行する。実機では未確認

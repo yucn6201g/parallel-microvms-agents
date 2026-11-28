@@ -5,7 +5,7 @@
 
 | 分類 | コマンド |
 |---|---|
-| 準備 | [`doctor`](#doctor) / [`infra`](#infra) / [`secret`](#secret) / [`image`](#image) / [`profile`](#profile) / [`memory`](#memory) |
+| 準備 | [`setup`](#setup) / [`doctor`](#doctor) / [`infra`](#infra) / [`secret`](#secret) / [`image`](#image) / [`profile`](#profile) / [`memory`](#memory) |
 | 起動 | [`up`](#up) / [`fleet`](#fleet) |
 | 確認・指示 | [`ls`](#ls) / [`peek`](#peek) / [`follow`](#follow) / [`view`](#view) / [`top`](#top) / [`send`](#send) / [`wait`](#wait) / [`result`](#result) / [`watch`](#watch) / [`ui`](#ui) / [`logs`](#logs) |
 | 接続 | [`ssh`](#ssh) / [`forward`](#forward) / [`ssh-config`](#ssh-config) / [`shell`](#shell) / [`token`](#token) |
@@ -18,6 +18,28 @@
 ---
 
 ## 準備
+
+### setup
+
+```bash
+mvm setup [--profile <プロファイル名>]
+```
+
+導入の手順のうち済んでいないものを、次の順に 1 つずつ聞いて (`[Y/n]`、Enter で「はい」) 実行し、最後に `mvm doctor` で確かめます。済んだ手順は聞かずに飛ばすので、何度実行しても構いません (途中で止めたときや、設定を変えた後に)。
+
+| 順番 | 済んでいないと判断するとき | 実行すること |
+|---|---|---|
+| 1 | スタック (`STACK_NAME`) が無い | `mvm infra deploy`。断ると中止する。スタックがあれば、`mvm doctor` と同じ確認の結果 (テンプレートとの違いなど) を表示するだけ |
+| 2 | 今の認証情報がルートユーザーか管理者権限 (`AdministratorAccess`) | `mvm infra operator` (ユーザー `pmva-operator`、プロファイル `pmva`)。プロファイル `pmva` が既にあれば、作らずに `config.env` をそれに切り替える。切り替えた後、新しいキーが使えるまで最長 1 分待つ |
+| 3 | 既定の認証方式・`USE_GITHUB_TOKEN`・`NOTIFY_WEBHOOK` に要るシークレットが無い | 値の用意のしかたを表示して `mvm secret set <kind>`。`github-token` を断ると `config.env` を `USE_GITHUB_TOKEN=false` にする |
+| 4 | `SSH_PUBLIC_KEY_FILE` が無い | `ssh-keygen -t ed25519` (`ssh-keygen` があるときだけ) |
+| 5 | イメージ (`IMAGE_NAME`) が無いか、使える版が無いか、`image/` や設定が最後のビルドから変わった | `mvm image build` |
+
+- `--profile`: そのプロファイルを `config.env` の `AWS_PROFILE` に書いてから始めます。初回は管理者のプロファイルを渡します (1 と 2 に管理者の権限が要るため)。AWS CLI の設定にそのプロファイルが無ければ、何も書かずに止まります
+- AWS の認証情報が無い・切れているときは、理由と `mvm setup --profile <管理者>` を案内して止まります
+- 答えを読めない (標準入力が端末ではない) ときは、何もせずに止まります
+- 断った手順や、スタックの確認で `!!` が出た項目があれば、最後に「まだ残っている手順」として一覧します。何も残っていないときだけ「準備ができました」と出します
+- スタックの作成に失敗して出力が無い (`ROLLBACK_COMPLETE` など) ときと、AWS への問い合わせに失敗したときは、作り直しを勧めずに理由を出して止まります
 
 ### doctor
 

@@ -2559,6 +2559,98 @@ class CliTest(unittest.TestCase):
         self.assertIn("[profile ops]", (t / "awsconfig").read_text(encoding="utf-8"))
         self.assertIn("AWS_PROFILE=ops", cfg.read_text(encoding="utf-8"))
 
+    def setup_env(self, **extra):
+        """mvm setup 用。AWS CLI のプロファイルのファイルを一時フォルダに置き、管理者のプロファイル admin を用意する。"""
+        t = Path(self.tmp.name)
+        (t / "awsconfig").write_text("[profile admin]\nregion = ap-northeast-1\n", encoding="utf-8")
+        return dict(self.env, AWS_SHARED_CREDENTIALS_FILE=str(t / "creds"), AWS_CONFIG_FILE=str(t / "awsconfig"), **extra)
+
+    def test_setup_from_scratch(self):
+        """mvm setup: quickstart の手順 4〜7 (config.env の手での書き換え、infra deploy、操作用ユーザー、
+        シークレットの登録) を、済んでいないものだけ聞いて順に実行する。2 回目は何もしない。"""
+        env = self.setup_env(PMVA_STUB_IAM="admin", PMVA_STUB_NO_STACK="1")
+        self.stub_dir.mkdir()
+        (self.stub_dir / "secret-pmva_github-token").write_text("ghp_x", encoding="utf-8")
+        # deploy → operator → claude-oauth-token の登録 (イメージは既にある)
+        _, out, err = self.mvm("setup", "--profile", "admin", input=b"y\ny\ny\nsk-ant-oat01-abc\n", env=env)
+        cmds = [c[:2] for c in self.calls()]
+        self.assertIn(["cloudformation", "deploy"], cmds)
+        self.assertLess(cmds.index(["cloudformation", "deploy"]), cmds.index(["iam", "create-access-key"]),
+                        "管理者のうちに deploy してから切り替える")
+        self.assertEqual((self.stub_dir / "secret-pmva_claude-oauth-token").read_text(encoding="utf-8"), "sk-ant-oat01-abc")
+        self.assertIn("claude setup-token", err)
+        self.assertIn("AWS_PROFILE=pmva", Path(self.env["PMVA_CONFIG"]).read_text(encoding="utf-8"))
+        self.assertNotIn(["lambda-microvms", "create-microvm-image"], cmds)
+        self.assertIn("準備ができました", err)
+        # 2 回目: 済んだ手順は聞かずに飛ばす (答えを渡さなくても止まらない)
+        n = len(self.calls())
+        _, _, err = self.mvm("setup", input=b"", env=env)
+        later = [c[:2] for c in self.calls()[n:]]
+        self.assertNotIn(["cloudformation", "deploy"], later)
+        self.assertNotIn(["iam", "create-access-key"], later)
+        self.assertIn("プロファイル pmva が管理者権限", err, "切り替えた先のプロファイルが管理者権限なら知らせる")
+        self.assertNotIn("準備ができました", err, "残っている手順があるのに完了と言わない")
+        self.assertIn("残っている", err)
+
+    def test_setup_builds_image_and_can_skip_github(self):
+        env = self.setup_env(PMVA_STUB_NO_IMAGE="1")
+        self.stub_dir.mkdir()
+        (self.stub_dir / "secret-pmva_claude-oauth-token").write_text("sk-ant-oat01-x", encoding="utf-8")
+        # GitHub は使わない (n) → イメージをビルドする (y)
+        self.mvm("setup", input=b"n\ny\n", env=env)
+        self.assertIn("USE_GITHUB_TOKEN=false", Path(self.env["PMVA_CONFIG"]).read_text(encoding="utf-8"))
+        self.assertIn(["lambda-microvms", "create-microvm-image"], [c[:2] for c in self.calls()])
+        self.assertTrue((Path(self.env["PMVA_STATE_DIR"]) / "image-build.json").exists())
+        self.assertNotIn(["iam", "create-access-key"], [c[:2] for c in self.calls()], "管理者でなければユーザーを作らない")
+
+    def test_setup_does_not_claim_done_after_skips(self):
+        """断った手順があれば「準備ができました」と言わず、残りを案内する (doctor は !! でも 0 を返すため)。"""
+        env = self.setup_env(PMVA_STUB_NO_IMAGE="1")
+        self.stub_dir.mkdir()
+        (self.stub_dir / "secret-pmva_github-token").write_text("ghp_x", encoding="utf-8")
+        # claude-oauth-token の登録を断り (n)、イメージのビルドも断る (n)
+        _, _, err = self.mvm("setup", input=b"n\nn\n", env=env)
+        self.assertNotIn("準備ができました", err)
+        self.assertIn("mvm secret set claude-oauth-token", err.split("残っている")[-1])
+        self.assertIn("mvm image build", err.split("残っている")[-1])
+
+    def test_setup_lookup_failures_are_not_missing(self):
+        """失敗したスタックや、問い合わせの失敗を「無い」「ある」と取り違えて先へ進まない。"""
+        # 作成に失敗して出力の無いスタック: 手順 2 以降 (operator はスタックの出力を使う) に進まない
+        rc, _, err = self.mvm("setup", env=self.setup_env(PMVA_STUB_STACK_FAILED="ROLLBACK_COMPLETE",
+                                                          PMVA_STUB_IAM="admin"), check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("ROLLBACK_COMPLETE", err)
+        self.assertNotIn(["iam", "create-user"], [c[:2] for c in self.calls()])
+        # イメージの問い合わせに失敗したら、ビルドを勧めずに理由を出す
+        self.stub_dir.mkdir(exist_ok=True)
+        for kind in ("claude-oauth-token", "github-token"):
+            (self.stub_dir / f"secret-pmva_{kind}").write_text("x", encoding="utf-8")
+        rc, _, err = self.mvm("setup", input=b"y\n", env=self.setup_env(
+            PMVA_STUB_ERROR="Could not connect to the endpoint URL", PMVA_STUB_ERROR_CMDS="lambda-microvms get-microvm-image"),
+            check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("ネットワーク", err)
+        self.assertNotIn(["lambda-microvms", "update-microvm-image"], [c[:2] for c in self.calls()])
+
+    def test_setup_stops_with_guidance(self):
+        # 答えを読めない (端末ではない) なら、何も作らずに止める
+        rc, _, err = self.mvm("setup", input=b"", env=self.setup_env(PMVA_STUB_NO_STACK="1"), check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("端末", err)
+        self.assertNotIn(["cloudformation", "deploy"], [c[:2] for c in self.calls()])
+        # 無いプロファイルは書き込まない
+        cfg = Path(self.env["PMVA_CONFIG"])
+        before = cfg.read_text(encoding="utf-8")
+        rc, _, err = self.mvm("setup", "--profile", "nope", env=self.setup_env(), check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("aws configure sso --profile nope", err)
+        self.assertEqual(cfg.read_text(encoding="utf-8"), before)
+        # 認証情報が無ければ、管理者のプロファイルを --profile で渡すよう案内する
+        rc, _, err = self.mvm("setup", env=self.setup_env(PMVA_STUB_ERROR="Unable to locate credentials"), check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("mvm setup --profile", err)
+
     SSO_EXPIRED = ("Error when retrieving token from sso: Token has expired and refresh failed\n")
 
     ACCESS_DENIED = ("\nAn error occurred (AccessDeniedException) when calling the DescribeSecret operation: User: "

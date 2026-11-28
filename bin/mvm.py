@@ -973,6 +973,19 @@ def image_findings():
 
 def auth_findings():
     """既定の認証方式 (config.env) に要るシークレットと設定がそろっているかを doctor 用の行で返す。"""
+    lines, secrets = auth_requirements()
+    for name, kind, setting, why in secrets:
+        if aws("secretsmanager", "describe-secret", "--secret-id", name, check=False):
+            lines.append(f"  ok   シークレット {name} ({setting})")
+        elif not aws_not_found(last_aws_error()):
+            lines.append(f"  !!   {why} のシークレット {name} を確かめられません: {aws_error_hint(last_aws_error())}")
+        else:
+            lines.append(f"  !!   {why} のシークレット {name} がありません。mvm secret set {kind} で登録してください")
+    return lines
+
+
+def auth_requirements():
+    """既定の認証方式などに要る設定の注意 (doctor 用の行) と、要るシークレット (名前, 種類, 設定, 理由) の一覧。"""
     agent = C["DEFAULT_AGENT"]
     checks = []   # (設定の説明, 認証方式の表, 認証方式, 実行ロールに Bedrock が要る方式)
     if agent in ("claude", "both"):
@@ -999,14 +1012,7 @@ def auth_findings():
         secrets.append((f"{C['PMVA_PREFIX']}/github-token", "github-token", "USE_GITHUB_TOKEN=true", "USE_GITHUB_TOKEN=true"))
     if as_bool(C["NOTIFY_WEBHOOK"]):
         secrets.append((f"{C['PMVA_PREFIX']}/notify-webhook", "notify-webhook", "NOTIFY_WEBHOOK=true", "NOTIFY_WEBHOOK=true"))
-    for name, kind, setting, why in secrets:
-        if aws("secretsmanager", "describe-secret", "--secret-id", name, check=False):
-            lines.append(f"  ok   シークレット {name} ({setting})")
-        elif not aws_not_found(last_aws_error()):
-            lines.append(f"  !!   {why} のシークレット {name} を確かめられません: {aws_error_hint(last_aws_error())}")
-        else:
-            lines.append(f"  !!   {why} のシークレット {name} がありません。mvm secret set {kind} で登録してください")
-    return lines
+    return lines, secrets
 
 
 ACCESS_KEY_MAX_AGE_DAYS = 90
@@ -1202,6 +1208,153 @@ def infra_operator(user, profile):
     log("管理者のアクセスキーをこのために作った場合は、IAM コンソールから削除してください。"
         "infra deploy をやり直すときは config.env の AWS_PROFILE を管理者のものに戻します")
     return 0
+
+
+# mvm setup がシークレットを聞く前に出す、値の用意のしかた
+SECRET_HOWTO = {
+    "claude-oauth-token": "手元に Claude Code を入れて claude setup-token を実行し、表示されたトークンを貼ってください",
+    "anthropic-api-key": "Claude Console で発行した API キーを貼ってください",
+    "openai-api-key": "OpenAI のダッシュボードで発行した API キーを貼ってください",
+    "github-token": "対象のリポジトリに絞った Fine-grained personal access token "
+                    "(Contents と Pull requests を Read and write) を貼ってください",
+}
+
+
+def ask(prompt):
+    """[Y/n] で聞く (Enter は「はい」)。答えを読めない (端末ではない) ときは、何もせずに止める。"""
+    try:
+        ans = input(f"{prompt} [Y/n] ")
+    except EOFError:
+        print(file=sys.stderr)
+        die("答えを読めなかったので止めました (標準入力が端末ではありません)。端末から mvm setup を実行してください")
+    return ans.strip().lower() not in ("n", "no")
+
+
+def cmd_setup(args):
+    """導入の手順 (AWS の構成、普段使う IAM ユーザー、認証情報、SSH 鍵、イメージ) のうち、
+    済んでいないものを順に聞いて実行し、最後に doctor で確かめる。何度実行してもよい (済んだ手順は飛ばす)。"""
+    if args.profile:
+        if not aws_profile_exists(args.profile):
+            die(f"AWS CLI のプロファイル {args.profile} がありません。aws configure sso --profile {args.profile} (SSO) か "
+                f"aws configure --profile {args.profile} で作ってから、もう一度実行してください")
+        set_config_value("AWS_PROFILE", args.profile)
+        C["AWS_PROFILE"] = args.profile
+        log(f"config.env を AWS_PROFILE={args.profile} にしました")
+    ident = aws("sts", "get-caller-identity", check=False)
+    if not ident:
+        die(f"AWS に接続できません: {aws_error_hint(last_aws_error())}\n"
+            "  初めてなら、管理者のプロファイルを用意して (aws configure sso --profile admin など。docs/quickstart.md の手順 4)、"
+            "mvm setup --profile admin で実行してください")
+    log(f"AWS の認証情報: {ident.get('Arn')}")
+
+    pending = []   # 済んでいない手順 (doctor は !! の行があっても 0 を返すので、完了と言ってよいかはこれで決める)
+    log("[1/5] AWS の構成 (S3・IAM ロール・ログ)")
+    r = aws("cloudformation", "describe-stacks", "--stack-name", C["STACK_NAME"], check=False)
+    stack = r["Stacks"][0] if r else {}
+    if r and stack.get("StackStatus") != "REVIEW_IN_PROGRESS":   # REVIEW_IN_PROGRESS の空のスタックは deploy が片付ける
+        if not stack.get("Outputs"):
+            die(f"スタック {C['STACK_NAME']} の状態が {stack.get('StackStatus')} で、使えません。CloudFormation のコンソールで"
+                "原因を確かめ、スタックを削除してから mvm setup をもう一度実行してください")
+        for line in infra_findings():
+            print(line, file=sys.stderr)
+            if line.startswith("  !!"):
+                pending.append(line.strip()[2:].strip())
+    else:
+        if not r:
+            die_unless_not_found(f"スタック {C['STACK_NAME']} ")
+        log("まだありません。管理者の権限で作ります (数分)")
+        if not ask("mvm infra deploy を実行しますか?"):
+            die("中止しました。もう一度 mvm setup を実行すると、ここから続けます")
+        if cmd_infra(argparse.Namespace(action="deploy")) != 0:
+            die("mvm infra deploy に失敗しました。上のエラーを確かめてください。"
+                "AccessDenied なら、管理者のプロファイルで mvm setup --profile <名前> を実行してください")
+
+    log("[2/5] 普段使う IAM ユーザー")
+    user, profile = "pmva-operator", "pmva"
+    if not any("AdministratorAccess" in x or "ルートユーザー" in x for x in credential_findings(ident.get("Arn", ""))):
+        log("ok 今の認証情報は管理者権限ではありません")
+    elif C["AWS_PROFILE"] == profile:
+        pending.append(f"プロファイル {profile} が管理者権限です。IAM コンソールで、そのユーザーに pmva-operator ポリシーだけを付けてください")
+        log("!! " + pending[-1])
+    elif ask(f"今は管理者の権限です。普段の操作用に、pmva-operator ポリシーだけを付けたユーザー {user} を作り、"
+             f"プロファイル {profile} に切り替えますか?"):
+        if aws_profile_exists(profile):
+            set_config_value("AWS_PROFILE", profile)
+            log(f"既にあるプロファイル {profile} に切り替えました")
+        else:
+            infra_operator(user, profile)
+        C["AWS_PROFILE"] = profile
+        for _ in range(12):   # 作ったばかりのアクセスキーは、使えるまで少しかかる
+            if aws("sts", "get-caller-identity", check=False):
+                break
+            time.sleep(5)
+        else:
+            die(f"プロファイル {profile} の認証情報がまだ使えません: {aws_error_hint(last_aws_error())}\n"
+                "  1 分ほど待ってから mvm setup をもう一度実行してください")
+    else:
+        pending.append("管理者の権限のままです。漏れたときの影響が大きいので、mvm infra operator で切り替えてください")
+        log(pending[-1])
+
+    log("[3/5] エージェントなどの認証情報 (Secrets Manager)")
+    _, secrets = auth_requirements()
+    for name, kind, setting, _why in secrets:
+        if aws("secretsmanager", "describe-secret", "--secret-id", name, check=False):
+            log(f"ok シークレット {name} ({setting})")
+            continue
+        die_unless_not_found(f"シークレット {name} ")
+        log(f"{setting} のシークレット {name} がまだありません。{SECRET_HOWTO.get(kind, '値の用意のしかたは docs/auth.md を見てください')}")
+        if kind == "github-token":
+            question = "GitHub のトークンを登録しますか? (n なら USE_GITHUB_TOKEN=false にして、GitHub を使わずに進めます)"
+        else:
+            question = f"mvm secret set {kind} を実行しますか?"
+        if ask(question):
+            cmd_secret(argparse.Namespace(action="set", kind=kind, name=name, file=None))
+        elif kind == "github-token":
+            set_config_value("USE_GITHUB_TOKEN", "false")
+            C["USE_GITHUB_TOKEN"] = "false"
+            log("config.env を USE_GITHUB_TOKEN=false にしました")
+        else:
+            pending.append(f"{setting} のシークレットを mvm secret set {kind} で登録してください")
+            log("飛ばしました")
+
+    log("[4/5] SSH 鍵 (mvm ssh で使う)")
+    key = expand_path(C["SSH_PUBLIC_KEY_FILE"])
+    if key and key.exists():
+        log(f"ok {key}")
+    elif key and key.suffix == ".pub" and shutil.which("ssh-keygen") and ask(f"{key} がありません。ssh-keygen で作りますか?"):
+        key.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.call(["ssh-keygen", "-t", "ed25519", "-f", str(key.with_suffix(""))])
+    else:
+        log("SSH 鍵なしで続けます (mvm ssh は使えません。mvm shell は使えます)")
+
+    log("[5/5] エージェントの実行イメージ")
+    arn, active = find_image_arn(), None
+    if arn:
+        img = lmv("get-microvm-image", "--image-identifier", arn, check=False)
+        if img is None:
+            die(f"イメージ {C['IMAGE_NAME']} を AWS に問い合わせられませんでした: {aws_error_hint(last_aws_error())}")
+        active = img.get("latestActiveImageVersion")
+    stale = [x.strip()[2:].strip() for x in image_findings() if x.startswith("  !!")] if active else []
+    if active and not stale:
+        log(f"ok イメージ {C['IMAGE_NAME']} (バージョン {active})")
+    else:
+        log(stale[0] if stale else f"イメージ {C['IMAGE_NAME']} に使える版がありません (前のビルドが失敗した)" if arn
+            else f"イメージ {C['IMAGE_NAME']} がまだありません")
+        if ask("mvm image build を実行しますか? (10〜20 分。待つだけです)"):
+            cmd_image(argparse.Namespace(action="build"))
+        else:
+            pending.append("mvm image build でイメージをビルドしてください")
+            log("飛ばしました")
+
+    log("最後に mvm doctor で確かめます")
+    rc = cmd_doctor(args)
+    if rc == 0 and not pending:
+        log("準備ができました。mvm up <名前> で 1 台目を起動します (docs/quickstart.md の手順 6)")
+    elif pending:
+        log("まだ残っている手順があります (済ませたら mvm setup をもう一度実行すると確かめられます):")
+        for item in pending:
+            print(f"  - {item}", file=sys.stderr)
+    return rc
 
 
 def delete_stack_retaining_failed(max_rounds=5):
@@ -3930,6 +4083,11 @@ def build_parser():
     p = argparse.ArgumentParser(prog="mvm", description="Lambda MicroVMs で Claude Code / Codex を並列実行する")
     sub = p.add_subparsers(dest="command", metavar="<command>")
 
+    x = sub.add_parser("setup", help="導入の手順 (AWS の構成・普段使う IAM ユーザー・認証情報・SSH 鍵・イメージ) のうち、"
+                                     "済んでいないものを順に聞いて実行する (何度実行してもよい)")
+    x.add_argument("--profile", help="この AWS CLI のプロファイルを config.env の AWS_PROFILE に書いてから始める "
+                                     "(初回は管理者のプロファイル)")
+    x.set_defaults(func=cmd_setup)
     sub.add_parser("doctor", help="前提ツール・認証・リージョン対応を確認").set_defaults(func=cmd_doctor)
     x = sub.add_parser("infra", help="CloudFormation で S3 / IAM ロール / ログを作成・確認・削除")
     x.add_argument("action", choices=("deploy", "outputs", "delete", "operator"))
