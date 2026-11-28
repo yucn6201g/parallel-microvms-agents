@@ -3105,6 +3105,81 @@ class CliTest(unittest.TestCase):
     def calls(self):
         return [json.loads(x) for x in (self.stub_dir / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
 
+    def forget_fixture(self, name, local=True):
+        """終了済みセッション name の記録 (手元の json とトークン、S3 の保存と履歴) を置く。"""
+        bucket = self.stub_dir / "s3" / "pmva-bucket"
+        if local:
+            self.previous_session(name, True)
+            tokens = Path(self.env["PMVA_STATE_DIR"]) / "tokens"
+            tokens.mkdir(parents=True, exist_ok=True)
+            (tokens / f"{name}.8080.json").write_text("{}", encoding="utf-8")
+        else:
+            (bucket / "workspaces" / name).mkdir(parents=True)
+            (bucket / "workspaces" / name / "latest.tar.gz").write_bytes(b"tar")
+        (bucket / "workspaces" / name / "result.json").write_text("{}", encoding="utf-8")
+        (bucket / "workspace-history" / name).mkdir(parents=True)
+        (bucket / "workspace-history" / name / "1.tar.gz").write_bytes(b"tar")
+
+    def forget_paths(self, name):
+        """name の記録のうち残っているファイル (手元の json、トークン、S3)。"""
+        state, s3 = Path(self.env["PMVA_STATE_DIR"]), self.stub_dir / "s3" / "pmva-bucket"
+        found = list(state.glob(f"sessions/{name}.json")) + list(state.glob(f"tokens/{name}.*.json"))
+        return found + [p for d in ("workspaces", "workspace-history") for p in (s3 / d / name).rglob("*") if p.is_file()]
+
+    def test_forget_removes_s3_and_local_records(self):
+        self.forget_fixture("old1")
+        self.forget_fixture("keep", local=False)
+        _, out, err = self.mvm("forget", "old1", "--yes")
+        rm = [c[2] for c in self.calls() if c[:2] == ["s3", "rm"]]
+        self.assertEqual(sorted(rm), ["s3://pmva-bucket/workspace-history/old1/", "s3://pmva-bucket/workspaces/old1/"])
+        self.assertEqual(self.forget_paths("old1"), [])
+        self.assertNotEqual(self.forget_paths("keep"), [], "ほかの名前は消さない")
+        _, out, _ = self.mvm("forget", "keep", "--yes")   # 手元に記録が無くても、S3 に保存があれば消せる
+        self.assertEqual(self.forget_paths("keep"), [])
+
+    def test_forget_without_name_lists_finished_sessions(self):
+        self.forget_fixture("old1")
+        _, out, _ = self.mvm("forget")
+        self.assertIn("old1", out)
+        self.assertFalse((self.stub_dir / "calls.jsonl").exists(), "一覧は AWS に問い合わせない")
+
+    def test_forget_unknown_name_fails(self):
+        rc, _, err = self.mvm("forget", "nothing", "--yes", check=False)
+        self.assertEqual(rc, 1)
+        self.assertIn("ありません", err)
+
+    def test_forget_refuses_running_session(self):
+        self.mvm("up", "a1", "--repo", "https://github.com/o/r.git")
+        self.forget_fixture("old1")
+        rc, _, err = self.mvm("forget", "old1", "a1", "--yes", check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("mvm stop a1", err)
+        self.assertEqual([c for c in self.calls() if c[:2] == ["s3", "rm"]], [], "1 つでも動いていれば何も消さない")
+        self.assertNotEqual(self.forget_paths("old1"), [])
+        self.assertTrue((Path(self.env["PMVA_STATE_DIR"]) / "sessions" / "a1.json").exists())
+
+    def test_forget_keeps_local_records_when_s3_delete_fails(self):
+        self.forget_fixture("old1")
+        env = dict(self.env, PMVA_STUB_ERROR="An error occurred (AccessDenied) when calling the DeleteObject operation",
+                   PMVA_STUB_ERROR_CMDS="s3 rm")
+        rc, _, err = self.mvm("forget", "old1", "--yes", env=env, check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("削除の権限がありません", err)
+        self.assertIn("mvm infra deploy", err)
+        self.assertTrue((Path(self.env["PMVA_STATE_DIR"]) / "sessions" / "old1.json").exists(), "やり直せるよう手元を残す")
+        self.assertTrue(list((Path(self.env["PMVA_STATE_DIR"]) / "tokens").glob("old1.*")))
+
+    def test_forget_asks_before_deleting(self):
+        self.forget_fixture("old1")
+        rc, out, err = self.mvm("forget", "old1", input=b"n\n", check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("s3://pmva-bucket/workspaces/old1/", out)
+        self.assertIn("元に戻せません", out)
+        self.assertEqual([c for c in self.calls() if c[:2] == ["s3", "rm"]], [])
+        self.assertEqual(len(self.forget_paths("old1")), 5)
+        self.mvm("forget", "old1", input=b"y\n")
+        self.assertEqual(self.forget_paths("old1"), [])
+
     def test_infra_operator_creates_user_and_profile(self):
         """mvm infra operator: 操作用の IAM ユーザーとアクセスキーを作り、AWS CLI のプロファイルと config.env を切り替える。
 

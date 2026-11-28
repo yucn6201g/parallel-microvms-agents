@@ -420,6 +420,14 @@ Resources:
             Effect: Allow
             Action: s3:DeleteObject
             Resource: !Sub "${ArtifactBucket.Arn}/memory/*"
+          # 終了したセッションの保存と履歴を消す (mvm forget。workspaces/ には期限切れのルールが無く、残ると保管料がかかる)。
+          # VM の実行ロールには付けない
+          - Sid: DeleteSessionRecords
+            Effect: Allow
+            Action: s3:DeleteObject
+            Resource:
+              - !Sub "${ArtifactBucket.Arn}/workspaces/*"
+              - !Sub "${ArtifactBucket.Arn}/workspace-history/*"
           - Sid: ManageAgentSecrets
             Effect: Allow
             Action:

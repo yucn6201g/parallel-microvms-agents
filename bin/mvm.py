@@ -2681,6 +2681,48 @@ def cmd_stop_all(args):
     return 1 if save_failed or stop_failed else 0
 
 
+def cmd_forget(args):
+    """終了したセッションの記録 (S3 の保存と履歴、手元の json とトークン) を消す。"""
+    if not args.names:
+        done = [n for n in session_names() if load_session(n).get("terminated")]
+        print("\n".join(done) if done else "手元に終了済みのセッションはありません")
+        if done:
+            print("消すには mvm forget <名前>...", file=sys.stderr)
+        return 0
+    for n in args.names:
+        valid_name(n)   # 空や .. が S3 の prefix に入ると、ほかのセッションまで消える
+        if session_path(n).exists() and not load_session(n).get("terminated"):
+            die(f"セッション {n} は終了していません。先に mvm stop {n} を実行してください")
+    bucket = stack_output("ArtifactBucketName")
+    plan = []   # (名前, S3 の prefix, 手元のファイル)
+    for n in args.names:
+        prefixes = [f"s3://{bucket}/{d}/{n}/" for d in ("workspaces", "workspace-history")
+                    if (aws("s3api", "list-objects-v2", "--bucket", bucket, "--prefix", f"{d}/{n}/", "--max-keys", "1")
+                        .get("Contents"))]
+        files = [p for p in [session_path(n), *sorted((STATE_DIR / "tokens").glob(f"{n}.*.json"))] if p.exists()]
+        if not prefixes and not files:
+            die(f"{n} の記録は手元にも S3 にもありません")
+        plan.append((n, prefixes, files))
+    print("次を削除します:")
+    for n, prefixes, files in plan:
+        for x in prefixes + [str(f) for f in files]:
+            print(f"  {x}")
+    print("保存したワークスペースと会話の履歴は元に戻せません。")
+    if not args.yes:
+        confirm("削除してよろしいですか? [y/N] ", "削除してよければ、--yes を付けて実行してください")
+    for n, prefixes, files in plan:
+        for uri in prefixes:   # S3 を先に消す。失敗したら手元の記録は残し、やり直せるようにする
+            if aws("s3", "rm", uri, "--recursive", "--only-show-errors", check=False, output=None) is None:
+                if "AccessDenied" in last_aws_error():
+                    die("普段使うプロファイルに削除の権限がありません。管理者のプロファイルで mvm infra deploy を実行して、"
+                        "OperatorPolicy を更新してください")
+                die(f"{uri} を削除できませんでした。{aws_error_hint(last_aws_error())}")
+        for f in files:
+            f.unlink()
+        log(f"{n} の記録を削除しました")
+    return 0
+
+
 def cmd_renew(args):
     s = load_session(args.name)
     bucket = stack_output("ArtifactBucketName")
@@ -4857,6 +4899,10 @@ def build_parser():
     x = sub.add_parser("stop-all", help="全セッションを保存してから終了")
     x.add_argument("--no-save", action="store_true")
     x.set_defaults(func=cmd_stop_all)
+    x = sub.add_parser("forget", help="終了したセッションの保存 (S3) と手元の記録を削除 (名前を省くと終了済みの一覧)")
+    x.add_argument("names", nargs="*", metavar="name")
+    x.add_argument("--yes", action="store_true", help="確認しない")
+    x.set_defaults(func=cmd_forget)
     for name, func, text in (("suspend", cmd_suspend, "サスペンド"), ("resume", cmd_resume, "レジューム"),
                              ("save", cmd_save, "ワークスペースを S3 に保存"),
                              ("renew", cmd_renew, "保存 → 終了 → 同じ設定で再起動して復元 (8 時間制限の延長)")):
