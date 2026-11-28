@@ -69,6 +69,7 @@
 - `mvm doctor`: `mvm infra deploy` の直後でも「AWS の構成が、手元のテンプレートと違います」と出ていた。CloudFormation がテンプレートの日本語を `?` に置き換えて保存するため。比べる前に手元の側もそろえるようにした
 - `printf '...' | mvm shell <name>` のように標準入力をパイプやファイルにすると、コマンドは VM で動いても結果が表示されずに終わっていた。読み終えたら Ctrl-D でシェルを終わらせ、VM 側が閉じるまで出力を表示するようにした (`exit` を書かなくても終わる)
 - `mvm renew`: SSH 公開鍵なしで起動した後に鍵を作っても、鍵付きにならなかった (`mvm ssh` は「鍵を用意して `mvm renew`」と案内していた)。renew のときに `SSH_PUBLIC_KEY_FILE` を読み直す
+- 手元で `mvm` を起動するまわりのつまずきを減らした。`bin/mvm` と `bin/mvm.cmd` が Python の有無と版 (3.9 以上) を確かめ、無いときは「command not found」や「'python' is not recognized」の代わりに入れ方 (`winget install Python.Python.3.12`、`brew install python` など) を出して終了コード 1 で止まる (Windows は `py -3` を先に試し、Microsoft Store の python スタブは版の確認で外れる)。`scripts/install.ps1` はエイリアスを `$PROFILE` に書くのをやめて `bin` フォルダをユーザーの PATH に足すようにした (これまでは Windows PowerShell 5.1 でしか `mvm` が使えず、`pwsh` とコマンドプロンプトでは使えなかった)。古いエイリアスの行は消し、実行後は端末を開き直すよう表示する。`-NoAlias` は `-NoPath` になった。`scripts/install.sh` は `python3` が無いとき `python` も探し、zsh / bash 以外のシェル向けに PATH の案内を足した。
 
 ### 変更
 

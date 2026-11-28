@@ -3082,6 +3082,23 @@ class CliTest(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("fleet", p.stdout.decode("utf-8", "replace"))
 
+    def test_launcher_without_usable_python(self):
+        # Python が無い、または 3.9 未満 (python3 が失敗する) とき、案内を出して終了コード 1 で止まる
+        empty = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, empty, True)
+        if IS_WINDOWS:
+            cmd = [os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "cmd.exe"), "/c", str(ROOT / "bin" / "mvm.cmd"), "--help"]
+            env = dict(self.env, PATH=os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32"))
+        else:
+            fake = empty / "python3"
+            fake.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            fake.chmod(0o755)
+            cmd = ["/bin/sh", str(ROOT / "bin" / "mvm"), "--help"]
+            env = dict(self.env, PATH=str(empty))
+        p = subprocess.run(cmd, capture_output=True, env=env, stdin=subprocess.DEVNULL, timeout=60)
+        self.assertEqual(p.returncode, 1, p.stdout)
+        self.assertIn("Python 3.9 以上".encode("utf-8"), p.stderr)
+
     def test_cost(self):
         _, out, _ = self.mvm("cost", "--agents", "2")
         self.assertIn("2 台", out)
@@ -3170,7 +3187,7 @@ class DockerfileVersionsTest(unittest.TestCase):
 
 
 class InstallScriptTest(unittest.TestCase):
-    """scripts/install.sh / install.ps1 が config.env を作り、エイリアスを 1 行だけ登録すること。"""
+    """scripts/install.sh が config.env を作ってエイリアスを 1 行だけ登録し、install.ps1 が config.env を作ること。"""
 
     def run_twice(self, cmd, rc, env):
         for _ in range(2):
@@ -3195,19 +3212,32 @@ class InstallScriptTest(unittest.TestCase):
         self.assertEqual(last, f"alias mvm='{ROOT / 'bin' / 'mvm'}' # pmva")
         self.assertTrue((self.tmp / "config.env").exists())
 
-    def test_install_ps1(self):
+    def ps_shell(self):
         shell = shutil.which("powershell") if IS_WINDOWS else None
         shell = shell or shutil.which("pwsh")
         if not shell:
             self.skipTest("PowerShell がありません")
+        return shell
+
+    def test_install_ps1(self):
+        # -NoPath: 本物のユーザー PATH (レジストリ) は書き換えない。古いエイリアスの行だけが消える
         rc = self.tmp / "profile.ps1"
-        rc.write_text("# existing\n", encoding="utf-8")
-        cmd = [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ROOT / "scripts" / "install.ps1"),
-               "-ProfilePath", str(rc)]
-        text, last = self.run_twice(cmd, rc, self.env)
-        self.assertTrue(text.startswith(b"\xef\xbb\xbf"), "Windows PowerShell 5.1 向けに BOM 付きで書く")
-        self.assertTrue(last.startswith("Set-Alias mvm '") and last.endswith("mvm.cmd' # pmva"), last)
+        rc.write_text("# existing\nSet-Alias mvm 'C:\\old\\bin\\mvm.cmd' # pmva\n", encoding="utf-8")
+        cmd = [self.ps_shell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ROOT / "scripts" / "install.ps1"),
+               "-ProfilePath", str(rc), "-NoPath"]
+        for _ in range(2):
+            p = subprocess.run(cmd, capture_output=True, env=self.env, timeout=120)
+            self.assertEqual(p.returncode, 0, p.stdout.decode("utf-8", "replace") + p.stderr.decode("utf-8", "replace"))
+        self.assertEqual(rc.read_bytes().decode("utf-8-sig").splitlines(), ["# existing"])
         self.assertTrue((self.tmp / "config.env").exists())
+
+    def test_install_ps1_adds_bin_to_user_path(self):
+        # 実際にレジストリを書き換えるテストは書かない。登録の仕組みが入っていることだけ確かめる
+        text = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("[switch]$NoPath", text)
+        self.assertIn("OpenSubKey('Environment'", text)
+        self.assertIn("DoNotExpandEnvironmentNames", text)
+        self.assertIn("Join-Path $Root 'bin'", text)
 
 
 if __name__ == "__main__":
