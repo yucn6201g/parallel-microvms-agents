@@ -1,3 +1,9 @@
 #!/bin/sh
 # macOS / Linux 用の起動スクリプト。本体は bin/mvm.py (Windows は bin\mvm.cmd)
-exec python3 "$(dirname "$0")/mvm.py" "$@"
+for py in python3 python; do
+  if command -v "$py" >/dev/null 2>&1 && "$py" -c 'import sys; sys.exit(sys.version_info < (3, 9))' >/dev/null 2>&1; then
+    exec "$py" "$(dirname "$0")/mvm.py" "$@"
+  fi
+done
+echo "mvm には Python 3.9 以上が要ります。入れてから、もう一度実行してください (macOS: brew install python / Linux: sudo apt install python3 など / https://www.python.org/downloads/)" >&2
+exit 1

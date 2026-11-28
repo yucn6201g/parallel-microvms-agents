@@ -620,6 +620,37 @@ class SupervisorTest(unittest.TestCase):
         _, busy = self.get("/status?lines=0")
         self.assertLess(busy["idleSeconds"], 3)
 
+    def test_status_counts_uncommitted_and_unpushed_work(self):
+        self.hook("run", {"microvmId": "m", "runHookPayload": json.dumps({"name": "gt", "agent": "none"})})
+        self.wait_ready()
+        self.assertIsNone(self.get("/status?lines=0")[1]["git"], "git のリポジトリでなければ null")
+        work = self.home / "work"
+        git = ["git", "-C", str(work), "-c", "user.name=t", "-c", "user.email=t@example.com"]
+        subprocess.run(["git", "init", "-q", "-b", "main", str(work)], check=True, env=self.env)
+        (work / "a.txt").write_text("a", encoding="utf-8")
+        subprocess.run(git + ["add", "-A"], check=True, env=self.env)
+        subprocess.run(git + ["commit", "-q", "-m", "init"], check=True, env=self.env)
+        (work / "b.txt").write_text("b", encoding="utf-8")
+        (work / "a.txt").write_text("changed", encoding="utf-8")
+        self.assertEqual(self.get("/status?lines=0")[1]["git"], {"branch": "main", "uncommitted": 2, "unpushed": 1})
+        # リモート追跡ブランチが HEAD に追いつけば、未 push は 0
+        subprocess.run(git + ["update-ref", "refs/remotes/origin/main", "HEAD"], check=True, env=self.env)
+        self.assertEqual(self.get("/status?lines=0")[1]["git"]["unpushed"], 0)
+
+    def test_last_answer_is_published_to_s3_when_agent_state_changes(self):
+        payload = {"name": "pr", "agent": "codex", "region": "ap-northeast-1", "snapshotBucket": "bkt"}
+        self.hook("run", {"microvmId": "m", "runHookPayload": json.dumps(payload)})
+        self.wait_ready()
+        published = self.s3_out / "result.json"
+        self.notify("codex", json.dumps({"type": "agent-turn-complete", "last-assistant-message": "直しました"}))
+        for _ in range(50):
+            if published.exists() and "直しました" in published.read_text(encoding="utf-8"):
+                break
+            time.sleep(0.2)
+        r = json.loads(published.read_text(encoding="utf-8"))
+        self.assertEqual((r["name"], r["agents"]["codex"]["state"], r["agents"]["codex"]["text"]), ("pr", "done", "直しました"))
+        self.assertLess(time.time() - r["updatedAt"], 30)
+
     def test_notifications(self):
         payload = {"name": "nt", "agent": "none", "notifySecret": "pmva/notify-webhook"}
         self.hook("run", {"microvmId": "m", "runHookPayload": json.dumps(payload)})
