@@ -155,7 +155,7 @@ MicroVM の寿命は最大 8 時間 (`MAX_DURATION_SECONDS`) です。その前�
 mvm renew <name>      # 保存 → 終了 → 新しい VM で復元。ブランチと設定は引き継ぐ
 ```
 
-保存に失敗したときは終了せずに止まるので、作業を失いません。会話の履歴 (`~/.claude`、`~/.codex`) も復元されるので、Claude Code なら `claude --continue` で前の会話の続きから再開できます。
+保存に失敗したときは終了せずに止まるので、作業を失いません。会話の履歴 (`~/.claude`、`~/.codex`) も復元され、エージェントは前の会話の続きから起動します (Claude Code は `claude --continue`、Codex は `codex resume --last`)。`mvm up <name> --restore latest` でも同じです。
 
 ## 画面に入って一緒に作業する
 
