@@ -528,6 +528,16 @@ if [ "$REMOTE_CONTROL" = true ]; then
   claude_cmd="$claude_cmd; until $rc_ready; do sleep 2; done; fi; claude --remote-control pmva-$rc_name"
   claude_cmd="$claude_cmd${CLAUDE_ARGS:+ $CLAUDE_ARGS}"
 fi
+# renew / --restore で会話の履歴 (snapshot.sh が保存した ~/.claude と ~/.codex) が戻っていれば、前回の会話を続ける。
+# Claude Code は作業フォルダのパスの英数字以外を - にしたフォルダに会話を残す
+if compgen -G "$HOME/.claude/projects/${WORKDIR//[^A-Za-z0-9]/-}/*.jsonl" > /dev/null; then
+  log "continue the previous claude conversation"
+  claude_cmd="$claude_cmd --continue"
+fi
+if [ -n "$(find "$HOME/.codex/sessions" -name 'rollout-*.jsonl' -print -quit 2>/dev/null)" ]; then
+  log "resume the previous codex conversation"
+  codex_cmd="codex resume --last${CODEX_ARGS:+ $CODEX_ARGS}"
+fi
 if [ -n "$PROMPT_TEXT" ]; then
   claude_cmd="$claude_cmd $(printf '%q' "$PROMPT_TEXT")"
   codex_cmd="$codex_cmd $(printf '%q' "$PROMPT_TEXT")"
