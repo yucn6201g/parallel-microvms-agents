@@ -61,7 +61,7 @@ git clone https://github.com/yucn6201g/parallel-microvms-agents.git
 cd parallel-microvms-agents
 ```
 
-インストールスクリプトが、ツールの確認、設定ファイル `config.env` の作成、`mvm` コマンドの登録を行います。
+インストールスクリプトが、ツールの確認、設定ファイル `config.env` の作成、`mvm` コマンドの登録を行います (Windows は `bin` フォルダをユーザーの PATH に足し、macOS / Linux は `~/.zshrc` か `~/.bashrc` にエイリアスを書きます)。
 
 **Windows (PowerShell)**
 
@@ -76,7 +76,7 @@ scripts/install.sh
 ```
 
 すべて `[OK]` なら成功です。`[NG]` が出たら、表示に従ってツールを入れてからもう一度実行してください。
-**ここで新しいターミナルを開き直します** (開き直すと `mvm` と打つだけで動くようになります。Windows で「スクリプトの実行が無効」と出たら `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` を 1 回実行)。以降は `parallel-microvms-agents` フォルダで作業します。
+**ここで新しいターミナルを開き直します** (開き直すと、PowerShell でもコマンドプロンプトでも `mvm` と打つだけで動くようになります)。Python が 3.9 未満のときも、`mvm` が入れ方を案内します。以降は `parallel-microvms-agents` フォルダで作業します。
 
 ## 4. 管理者のプロファイルを用意する
 
