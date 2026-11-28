@@ -2385,7 +2385,24 @@ def stop(name, save=True, require_save=False):
     log(f"終了しました: {name}")
 
 
+def warn_unpushed(name, save):
+    """止める前に、VM の作業が GitHub に無ければ知らせる (止めるのは止めない。読めなければ黙る)。"""
+    if load_session(name).get("terminated"):
+        return
+    try:
+        note = git_note(vm_api(name, "GET", "/status?lines=0", timeout=10))
+    except SystemExit:
+        return
+    if note and save:
+        log(f"!! {name}: {note}があります。保存 (S3) には含まれますが、GitHub にはありません。"
+            f"残すなら先に mvm send {name} \"変更を commit して push して\" で push させてください")
+    elif note:
+        log(f"!! {name}: {note}があります。--no-save なので保存もされず、止めると失われます。"
+            f"残すなら先に push するか、--no-save を付けずに止めてください")
+
+
 def cmd_stop(args):
+    warn_unpushed(args.name, not args.no_save)
     stop(args.name, save=not args.no_save)
     return 0
 
@@ -2393,6 +2410,7 @@ def cmd_stop(args):
 def cmd_stop_all(args):
     for name in session_names():
         if not load_session(name).get("terminated"):
+            warn_unpushed(name, not args.no_save)
             try:
                 stop(name, save=not args.no_save)
             except SystemExit as e:
@@ -2490,7 +2508,16 @@ def format_status(st):
             continue
         lines.append(f"--- {w.get('name')} ({w.get('command')}) ---")
         lines.append(w.get("screen") or "")
+    if git_note(st):
+        lines.append(f"!! {git_note(st)} (VM を終了しても S3 の保存には残りますが、GitHub にはありません)")
     return "\n".join(lines)
+
+
+def git_note(st):
+    """VM の作業ツリーに GitHub に無い変更があるときの 1 句。無ければ空。"""
+    g = st.get("git") or {}
+    n, m = g.get("uncommitted") or 0, g.get("unpushed") or 0
+    return f"未コミット {n} ファイル・未 push {m} コミット" if n or m else ""
 
 
 def cmd_peek(args):
@@ -2509,20 +2536,46 @@ def session_agents(name, agent=None):
         load_session(name)["payload"].get("agent"), [])
 
 
+def s3_results(name, agents, reason):
+    """VM に届かないとき、supervisor が S3 に残した最後の応答を読む。(エージェントごとの結果, 添える一文) を返す。"""
+    uri = f"s3://{stack_output('ArtifactBucketName')}/workspaces/{name}/result.json"
+    out = aws("s3", "cp", "--only-show-errors", uri, "-", check=False, output=None)
+    try:
+        rec = json.loads(out) if out else None
+    except ValueError:
+        rec = None
+    if not isinstance(rec, dict) or not isinstance(rec.get("agents"), dict):
+        die(f"{name}: VM に届かず、S3 にも最後の応答の記録がありません ({reason})。"
+            f"VM が動いているか mvm ls --all で確かめるか、mvm up {name} --restore latest で保存した作業を戻してください")
+    ended = "VM は終了しています" if vm_state(name) in ("TERMINATED", "TERMINATING", "GONE") else "VM に届きません"
+    at = time.strftime("%Y-%m-%d %H:%M", time.localtime(rec.get("updatedAt") or 0))
+    results = [dict(rec["agents"].get(a) or {"agent": a, "state": "unknown", "text": None},
+                    source="s3", updatedAt=rec.get("updatedAt")) for a in agents]
+    return results, f"({ended}。{at} に記録した最後の応答)"
+
+
 def cmd_result(args):
     agents = session_agents(args.name, args.agent)
     if not agents:
         die(f"{args.name} ではエージェントを起動していません (--agent none)")
-    results = []
-    for agent in agents:
-        r = vm_api(args.name, "GET", f"/result?agent={agent}")
+    results, unreachable = [], load_session(args.name).get("terminated") and "終了しています"
+    for agent in ([] if unreachable else agents):
+        try:
+            r = vm_api(args.name, "GET", f"/result?agent={agent}")
+        except SystemExit as e:
+            unreachable, results = e.code, []
+            break
         if "agent" not in r:
             die(f"{args.name}: 最後の応答を取得できません ({r.get('error') or r})。"
                 "イメージが古い場合は mvm image build で作り直してください")
         results.append(r)
+    if unreachable:
+        results, note = s3_results(args.name, agents, unreachable)
     if args.json:
         print_json(results if len(results) > 1 else results[0])
     else:
+        if unreachable:
+            print(note)
         for r in results:
             if len(results) > 1:
                 print(f"--- {r['agent']} ({r.get('state')}) ---")

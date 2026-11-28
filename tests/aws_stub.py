@@ -5,7 +5,7 @@
   <microvmId>.payload  run-microvm の --run-hook-payload
   <microvmId>.term     terminate 済みの印
   secret-<name>        create-secret / put-secret-value で受け取った値
-  s3/<bucket>/<key>    s3 cp / s3api put-object で S3 に置いたファイル (s3api delete-object で消える)
+  s3/<bucket>/<key>    s3 cp / s3api put-object で S3 に置いたファイル (s3api delete-object で消える。s3 cp <S3> - は標準出力に読む)
   deployed.json        cloudformation deploy で受け取ったテンプレートとパラメータ (describe-stacks / get-template が返す)
 """
 
@@ -233,6 +233,9 @@ if cmd == "s3 cp" and len(paths) == 2 and paths[0].startswith("s3://"):   # S3 �
     src = D / "s3" / paths[0][len("s3://"):]
     if not src.is_file():
         fail("An error occurred (404) when calling the HeadObject operation: Key \"%s\" does not exist" % paths[0])
+    if paths[1] == "-":   # 標準出力へ (mvm result が VM 終了後に最後の応答を読む)
+        sys.stdout.buffer.write(src.read_bytes())
+        sys.exit(0)
     Path(paths[1]).write_bytes(src.read_bytes())
     sys.exit(0)
 if cmd in ("s3api put-object", "s3api get-object"):
