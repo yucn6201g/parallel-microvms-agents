@@ -2134,17 +2134,45 @@ def launch(name, payload, idle, max_duration):
 
 
 def continue_previous(a):
-    """前回の同じ名前のセッションの repo とブランチを引き継ぎ、保存したワークスペースがあれば復元する。
+    """前回の同じ名前のセッションの設定 (prompt 以外) を引き継ぎ、保存したワークスペースがあれば復元する。
 
-    前回のセッションが無い (または起動中の) ときは False。起動中なら launch が「既に起動しています」で止める。
+    コマンドラインで指定した値が優先。前回のセッションが無い (または起動中の) ときは False。
     """
     if not session_path(a.name).exists() or is_active(a.name):
         return False
-    prev = load_session(a.name).get("payload", {})
+    s = load_session(a.name)
+    prev = s.get("payload", {})
     if prev.get("repo"):
         a.repo = prev["repo"]
         a.branch = a.branch or prev.get("branch")
         a.base_branch = a.base_branch or prev.get("baseBranch")
+    # 別のエージェントで起こし直すときは、前回の認証方式や追加引数は合わないので引き継がない
+    same_agent = a.agent in (None, prev.get("agent"))
+    a.agent = a.agent or prev.get("agent")
+    a.idle = a.idle or s.get("idle")
+    a.max_duration = a.max_duration or s.get("maxDuration")
+    a.model = a.model or prev.get("claudeModel")
+    a.bedrock_region = a.bedrock_region or prev.get("bedrockRegion")
+    if same_agent:
+        for attr, key in (("claude_auth", "claudeAuth"), ("claude_secret", "claudeSecret"), ("codex_auth", "codexAuth"),
+                          ("codex_secret", "codexSecret")):
+            setattr(a, attr, getattr(a, attr) or prev.get(key))
+        for attr, key in (("claude_args", "claudeArgs"), ("codex_args", "codexArgs")):
+            if getattr(a, attr) is None:
+                setattr(a, attr, prev.get(key, ""))   # 空の値は payload から省かれるので、無ければ「空」を引き継ぐ
+        a.remote_control = a.remote_control or bool(prev.get("remoteControl"))
+    a.github_secret = a.github_secret or prev.get("githubSecret")
+    if not a.github_secret:
+        a.no_github = True   # 前回は GitHub トークンを使っていない
+    if a.notify is None:
+        a.notify = bool(prev.get("notifySecret"))
+    if a.memory is None:
+        a.memory = bool(prev.get("memory"))
+    a.no_setup = a.no_setup or bool(prev.get("skipSetup"))
+    if not a.profile and not a.no_profile:
+        uri = prev.get("profile", "")
+        a.profile = uri.rsplit("/", 1)[-1][:-len(".tar.gz")] if uri else None
+        a.no_profile = not uri
     if a.restore is None:
         bucket = stack_output("ArtifactBucketName")
         if aws("s3api", "head-object", "--bucket", bucket, "--key", f"workspaces/{a.name}/latest.tar.gz", check=False):
@@ -2152,13 +2180,15 @@ def continue_previous(a):
         else:
             die_unless_not_found("保存したワークスペース")
     what = "保存したワークスペースを復元" if a.restore == "latest" else "保存は無いので clone から"
-    log(f"前回の {a.name} の続きから始めます (repo={a.repo or 'なし'}、{what})。新しく始めるなら --fresh を付けてください")
+    log(f"前回の {a.name} の続きから始めます (agent={a.agent or C['DEFAULT_AGENT']}、repo={a.repo or 'なし'}、{what})。"
+        "前回の設定を引き継ぎました (prompt を除く)。新しく始めるなら --fresh を付けてください")
     return True
 
 
 def cwd_repo_url():
     """今いるフォルダの git の origin を、VM が clone できる https の URL にする。使えなければ空文字。"""
     if Path.cwd().resolve().is_relative_to(ROOT):
+        log("mvm 自身のフォルダで打ったので、リポジトリなしで起動します (clone するなら --repo <URL> を付けてください)")
         return ""   # mvm 自身のフォルダ (config.env の置き場所) で打ったときに、mvm のリポジトリを clone しない
     try:
         p = subprocess.run(["git", "remote", "get-url", "origin"], capture_output=True, text=True,
@@ -2167,6 +2197,7 @@ def cwd_repo_url():
         return ""
     url = p.stdout.strip() if p.returncode == 0 else ""
     if not url:
+        log("今のフォルダに git の origin が無いので、リポジトリなしで起動します (clone するなら --repo <URL> を付けてください)")
         return ""
     if re.match(r"^https?://", url):
         url = re.sub(r"^(https?://)[^/]*@", r"\1", url)   # URL に入ったトークンは VM にも .state にも送らない
@@ -2184,6 +2215,9 @@ def cwd_repo_url():
 
 def cmd_up(args):
     valid_name(args.name)
+    if is_active(args.name):   # 設定の案内より先に止める
+        die(f"セッション {args.name} は既に起動しています。様子は mvm peek {args.name}、接続は mvm ssh {args.name}、"
+            f"サスペンド中なら mvm resume {args.name} で再開してください")
     if args.no_repo:
         if args.repo:
             die("--no-repo と --repo は一緒に使えません。どちらかを外してください")
