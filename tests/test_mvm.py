@@ -1472,6 +1472,23 @@ class CliTest(unittest.TestCase):
         rc, _, err = self.mvm("fleet", "11", env=env, check=False)
         self.assertNotEqual(rc, 0)
 
+    def test_fleet_exit_code_lists_failed_and_skipped(self):
+        env = dict(self.env, PMVA_STUB_QUOTA_GB="100")
+        self.mvm("up", "g-01", env=env)
+        bad = dict(env, PMVA_STUB_ERROR="boom", PMVA_STUB_ERROR_CMDS="lambda-microvms run-microvm")
+        rc, _, err = self.mvm("fleet", "3", "--prefix", "g", "--no-repo", env=bad, check=False)
+        self.assertEqual(rc, 1)
+        self.assertIn("起動に失敗: g-02, g-03", err)
+        self.assertIn("起動済みのためスキップ: g-01", err)
+        self.assertNotIn("起動に失敗: g-01", err, "起動中でスキップした台は失敗に数えない")
+        # 前回の記録がある名前は、ブランチを引き継ぐ旨を出す
+        rc, _, err = self.mvm("fleet", "1", "--prefix", "g", "--no-repo", env=env, check=False)
+        self.assertEqual(rc, 0)
+        self.assertNotIn("前回の記録があります", err, "--no-repo ではブランチを使わない")
+        self.mvm("stop", "g-01", "--no-save", env=env)
+        _, _, err = self.mvm("fleet", "1", "--prefix", "g", "--repo", "https://github.com/o/r.git", env=env)
+        self.assertIn("前回の記録があります。ブランチ pmva/g-01", err)
+
     def test_ls_stop_renew(self):
         self.mvm("up", "r1", "--prompt", "first")
         _, out, _ = self.mvm("ls")
@@ -1668,6 +1685,22 @@ class CliTest(unittest.TestCase):
         self.assertEqual(jobs["a1"]["state"], "done", jobs)
         self.assertIn("/snapshot", [p for p, _ in api.received])
         self.assertTrue(list(self.stub_dir.glob("*.term")), "VM を終了した")
+
+    def test_ui_stop_reports_save_failure_as_error(self):
+        api = StatusApi()
+        self.addCleanup(api.shutdown)
+        api.snapshot_ok = False
+        self.mvm("up", "a1")
+        _, base, token = self.start_ui(dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}"))
+        self.assertEqual(self.ui_call(base, "/api/stop", token, {"name": "a1"})[0], 202)
+        deadline = time.time() + 60
+        while True:
+            job = json.loads(self.ui_call(base, "/api/rows", token)[1])["jobs"]["a1"]
+            if job["state"] != "running" or time.time() > deadline:
+                break
+            time.sleep(0.2)
+        self.assertEqual(job["state"], "error", job)
+        self.assertIn("保存に失敗", job["message"])
 
     def test_ui_starts_session_from_form(self):
         _, base, token = self.start_ui(self.env)
@@ -3046,7 +3079,9 @@ class CliTest(unittest.TestCase):
             api.received.clear()
             api.snapshot_ok = False
             self.mvm("up", "s2", env=env)
-            self.mvm("stop", "s2", env=env)
+            rc, _, err = self.mvm("stop", "s2", env=env, check=False)
+            self.assertEqual(rc, 1, "保存に失敗したまま終了したら非 0")
+            self.assertIn("workspaces/s2/latest.tar.gz", err)
             self.assertEqual([p for p, _ in api.received], ["/snapshot"])
             self.assertTrue((self.stub_dir / "microvm-0001.term").exists())
             # renew も同じ
@@ -3055,6 +3090,23 @@ class CliTest(unittest.TestCase):
             self.mvm("up", "s3", env=env)
             self.mvm("renew", "s3", env=env)
             self.assertEqual([p for p, _ in api.received], ["/snapshot", "/terminate-save"])
+        finally:
+            api.shutdown()
+
+    def test_stop_all_reports_save_failures(self):
+        api = StatusApi()
+        try:
+            env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}")
+            self.mvm("up", "a1", env=env)
+            self.mvm("up", "b2", env=env)
+            api.snapshot_ok = False
+            rc, _, err = self.mvm("stop-all", env=env, check=False)
+            self.assertEqual(rc, 1)
+            self.assertIn("保存に失敗: a1, b2", err)
+            self.assertEqual(len(list(self.stub_dir.glob("*.term"))), 2, "保存に失敗しても終了は続ける")
+            api.snapshot_ok = True
+            self.mvm("up", "c3", env=env)
+            self.assertEqual(self.mvm("stop-all", env=env)[0], 0)
         finally:
             api.shutdown()
 
