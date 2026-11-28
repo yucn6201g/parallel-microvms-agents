@@ -1731,16 +1731,27 @@ class CliTest(unittest.TestCase):
         self.assertEqual(api.received[-1][1]["text"], "echo hi")
         self.mvm("send", "a1", "echo", env=env)
         self.assertEqual(api.received[-1][1]["text"], "echo")
+        # オプションをはさんでも、名前と指示に分かれる (省略できる name に a1 が入らず、残りが余る argparse の動きを補う)
+        self.mvm("send", "--no-enter", "echo", "--window", "shell", "hi", env=env)
+        self.assertEqual(api.received[-1][1]["text"], "echo hi")
+        code, _, err = self.mvm("send", "a1", "--windw", "shell", "hi", env=env, check=False)
+        self.assertNotEqual(code, 0, "打ち間違えたオプションは指示に混ぜない")
+        self.assertIn("unrecognized arguments", err)
         self.assertIn("こんにちは", self.mvm("peek", "5", env=env)[1], "数字は行数")
         parser = mvm.build_parser()
-        with mock.patch.object(mvm, "session_names", return_value=["a1"]),                 mock.patch.object(mvm, "live_session_names", return_value=["a1"]):
-            for argv, attr, want in (["login", "codex"], "agent", "codex"), (["login", "a1"], "agent", None),                     (["token", "9000"], "port", 9000):
+        with mock.patch.object(mvm, "session_names", return_value=["a1"]), \
+                mock.patch.object(mvm, "live_session_names", return_value=["a1"]):
+            for argv, attr, want in ((["login", "codex"], "agent", "codex"), (["login", "a1"], "agent", None),
+                                     (["token", "9000"], "port", 9000)):
                 args = parser.parse_args(argv)
                 mvm.fill_name(args)
                 self.assertEqual((args.name, getattr(args, attr)), ("a1", want), argv)
             args = parser.parse_args(["forward", "8080:3000", "3001"])
             mvm.fill_name(args)
             self.assertEqual((args.name, args.ports), ("a1", ["8080:3000", "3001"]))
+            args = mvm.parse_argv(parser, ["forward", "a1", "--no-reconnect", "3000"])
+            mvm.fill_name(args)
+            self.assertEqual((args.name, args.ports, args.no_reconnect), ("a1", ["3000"], True))
         # 終了していないセッションが 2 つなら止まる。終了済みは数えない
         self.mvm("up", "b2", env=env)
         code, _, err = self.mvm("peek", check=False, env=env)

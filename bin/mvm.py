@@ -368,10 +368,29 @@ NAME_OPTIONAL = ("stop", "suspend", "resume", "save", "renew", "peek", "forward"
                  "result", "send", "ssh", "shell", "token")
 
 
+# name の後ろに 1 つ以上の位置引数を取るコマンド (オプションをはさむと argparse が name に値を入れないので main で補う)
+TRAILING_ARGS = {"send": "text", "forward": "ports"}
+
+
+def parse_argv(parser, argv):
+    """send / forward は name を省略できるので、`send a1 --window shell echo hi` の a1 が text に入り、echo hi が余る。
+    余りは後ろの位置引数の続きとして受け取る (先頭のセッション名は fill_name が name に戻す)。"""
+    args, extra = parser.parse_known_args(argv)
+    rest = TRAILING_ARGS.get(args.command)
+    if extra and (not rest or any(a.startswith("-") for a in extra)):
+        parser.error(f"unrecognized arguments: {' '.join(extra)}")
+    if extra:
+        getattr(args, rest).extend(extra)
+    return args
+
+
 def fill_name(args):
     """name を省略したコマンドに、終了していないセッションが 1 つだけならそれを補う。"""
     if args.command not in NAME_OPTIONAL:
         return
+    rest = getattr(args, TRAILING_ARGS.get(args.command, ""), None)
+    if args.name is None and rest and len(rest) > 1 and rest[0] in session_names():
+        args.name = rest.pop(0)
     n = args.name
     if n is not None and n not in session_names():
         # 後ろの位置引数に食われた値を戻す。send は最初の単語、peek の行数と token のポートは数字、
@@ -4615,7 +4634,7 @@ def main(argv=None):
         return cmd_cost_actual(cp.parse_args(argv[1:]))
     if argv[:1] == ["cost"]:
         return subprocess.call([sys.executable, str(ROOT / "scripts" / "estimate_cost.py"), *argv[1:]])
-    args = parser.parse_args(argv)
+    args = parse_argv(parser, argv)
     if not args.command:
         return cmd_home(parser)
     if args.command == "secret" and args.action == "set" and not args.kind:
