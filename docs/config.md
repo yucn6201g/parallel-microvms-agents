@@ -120,3 +120,5 @@ IMAGE_NAME=pmva2-agent
 ```
 
 別のフォルダに clone したリポジトリで使うか、`PMVA_CONFIG` と `PMVA_STATE_DIR` で設定ファイルと記録の置き場所を分けます ([commands.md](commands.md#環境変数))。
+
+`config.env` を書き換えずに AWS のプロファイルだけ一時的に替えるには、環境変数 `PMVA_AWS_PROFILE` を設定します (空でなければ `AWS_PROFILE` より優先。環境変数 `AWS_PROFILE` では替わりません)。
