@@ -6,6 +6,7 @@
 import http.server
 import json
 import os
+import re
 import shlex
 import shutil
 import socket
@@ -543,6 +544,24 @@ class SupervisorTest(unittest.TestCase):
                 break
             time.sleep(0.2)
         self.assertIn("claude started: --remote-control pmva-rc2", screen)
+
+    def test_restored_history_continues_previous_conversation(self):
+        # renew / --restore で会話の履歴が戻っていれば、claude は --continue、codex は resume --last で続きから始める
+        project = self.home / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(self.home / "work"))
+        project.mkdir(parents=True)
+        (project / "s1.jsonl").write_text("{}\n", encoding="utf-8")
+        rollout = self.home / ".codex" / "sessions" / "2026" / "11" / "28"
+        rollout.mkdir(parents=True)
+        (rollout / "rollout-x.jsonl").write_text("{}\n", encoding="utf-8")
+        payload = {"name": "cont", "agent": "both", "claudeAuth": "none", "codexAuth": "none",
+                   "prompt": "続けて", "snapshotIntervalSeconds": 0}
+        self.hook("run", {"microvmId": "m", "runHookPayload": json.dumps(payload)})
+        self.wait_ready()
+        time.sleep(1)
+        _, st = self.get("/status?lines=5")
+        screens = {w["name"]: w.get("screen", "") for w in st["windows"]}
+        self.assertIn("claude started: --continue 続けて", screens["claude"])
+        self.assertIn("codex started: resume --last 続けて", screens["codex"])
 
     def test_without_remote_control_env_sh_keeps_image_settings(self):
         payload = {"name": "norc", "agent": "claude", "claudeAuth": "none", "snapshotIntervalSeconds": 0}
