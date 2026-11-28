@@ -72,6 +72,7 @@
 - `printf '...' | mvm shell <name>` のように標準入力をパイプやファイルにすると、コマンドは VM で動いても結果が表示されずに終わっていた。読み終えたら Ctrl-D でシェルを終わらせ、VM 側が閉じるまで出力を表示するようにした (`exit` を書かなくても終わる)
 - `mvm renew`: SSH 公開鍵なしで起動した後に鍵を作っても、鍵付きにならなかった (`mvm ssh` は「鍵を用意して `mvm renew`」と案内していた)。renew のときに `SSH_PUBLIC_KEY_FILE` を読み直す
 - 失敗が後になってから分かる箇所に、早めの確認を足した。`mvm up` / `mvm fleet` は、起動の前にシークレットの登録を確かめる (無いまま起動すると、課金が始まってから bootstrap が失敗していた)。`mvm image build` の完成待ちは、AWS の呼び出しが 3 回続けて失敗したら (SSO の期限切れなど) ドットを出し続けずに理由を出して止まる。`mvm doctor` は、クォータで 1 台も起動できないときを `NG` にし、AWS 認証の失敗の理由 (期限切れ・プロファイル・ネットワーク) を出し、`NIGHTLY_STOP_TIME` が空か `BUDGET_MONTHLY_USD` が 0 のときに安全網が無効だと `!!` で知らせる
+- VM の状態に合わない操作の案内: 終了済みの VM に `peek` / `send` / `result` / `ssh` / `shell` などを打つと `create-microvm-auth-token に失敗しました` や HTTP 4xx が出るだけだった。状態を確かめ、「終了しています。`mvm up <name>` で続きから」「サスペンド中です。`mvm resume <name>`」のように次の一手を出す。`mvm result` は作業中なら「`mvm wait` で待てます」を出して終了コード 2 (`--json` は中身をそのまま、終了コードだけ 2)。`mvm send` は、エージェントが終了済み (シェルに入力されてしまう) / 起動に失敗 / 起動の準備中なら送らず案内する (`--window` を付けたときは送る)。認証エラーの案内は `mvm stop --no-save` → `mvm up` ではなく、保存してから作り直す `mvm renew` にし、`interactive` で起動したセッションには続けて `mvm login` を案内する
 - 保存や起動の失敗が成功に見えていた箇所を直した。`mvm stop` は保存に失敗したまま終了したとき、最後に保存できた時点 (`workspaces/<name>/latest.tar.gz`) に戻ることを表示して終了コード 1 で終わる。`stop-all` は最後に「保存に失敗: ...」「終了に失敗: ...」を出し、1 台でも失敗すれば終了コード 1。`mvm ui` の保存して停止も、保存に失敗したら「終わりました」ではなくエラーとして表示する。`mvm fleet` は起動に失敗した台と、起動済みでスキップした台を最後にまとめて出し、失敗があれば終了コード 1 (スキップは失敗に数えない)。前回の記録がある名前でブランチ `pmva/<名前>` を引き継ぐときはその旨も表示する
 - `mvm up <名前>` で前回の続きから始めるとき、repo / ブランチと復元しか引き継がず、`--agent codex` で起動したセッションが既定の claude で起動していた (`mvm renew` は前回の設定を丸ごと引き継ぐので、結果が違った)。agent、認証方式とシークレット、`--claude-args` / `--codex-args`、`--model`、`--bedrock-region`、通知、メモリ共有、`--remote-control`、`--no-setup`、`--profile`、`--idle`、`--max-duration` も引き継ぎ (prompt は除く)、コマンドラインの指定を優先する。別の `--agent` を指定したときは認証方式などを引き継がない。引き継いだ agent と repo は 1 行で表示する
 - `mvm up` が、mvm 自身のフォルダで打ったときや origin が無いときに、理由を言わずにリポジトリなしで起動していた。理由と `--repo` で指定できることを表示する
@@ -88,6 +89,8 @@
 - 同時に動かす台数の目標を 10 台から「AWS アカウントのクォータの範囲内」に変更。`MAX_AGENTS` の既定を `0` (クォータで決まる台数まで) にし、`mvm doctor` はクォータに対して何台動かせるかを表示する。コストの試算 (`mvm cost`) の既定も 2 台にした
 - `mvm cost` (試算) の単価を、東京リージョンの 2026 年 11 月の実際の請求に合わせた。low / high の 2 行をやめて 1 行 (`tokyo`) にし、スナップショットの読み込みと書き込みを別の単価 (`--snapshot-read-gb` / `--snapshot-write-gb`) で計算する。日本の消費税 10% を含めた税込の額も表示する (`--tax-rate 0` で除外)。`docs/cost.md` に実費との比較を追加
 - MicroVM イメージの Claude Code を 2.1.312 から 2.1.330 に、Codex を 0.165.0 から 0.171.0 に更新。新しいイメージ (`mvm image build`) が必要で、起動中の VM は `mvm renew` で移れる
+- `mvm setup` の初回のつまずきを減らした。SSO の管理者には、Enter だけで長期のアクセスキーができる質問をやめて、権限セットを作る案内を出す。lambda-microvms が使えるか (AWS CLI の版とリージョン) を最初に確かめて止まる。端末で認証方式が既定のままなら、Pro/Max・API キー・Bedrock・Codex を番号で聞いて `config.env` に書く。予算アラートが未設定なら、deploy の前に金額と通知先を聞く。スタックが古いときは `mvm infra deploy --admin-profile ...` をそのまま案内する
+- `mvm infra deploy` / `delete` / `operator` に `--admin-profile` を追加。そのコマンドの間だけ管理者のプロファイルで AWS CLI を呼ぶ (`config.env` の `AWS_PROFILE` が環境変数より優先されるため、これまでは切り替えられなかった)。`deploy` / `delete` に `--profile` を付けると、使われないまま通っていたのをエラーにして `--admin-profile` を案内する
 
 ## [0.1.0] - 2026-10-29
 
