@@ -410,6 +410,8 @@ class AgentE2ETest(unittest.TestCase):
                              PMVA_STUB_DIR=str(stub), PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}",
                              CODEX_HOME=str(self.home / ".codex"), MOCK_API_KEY="x")
         mvm = str(ROOT / "bin" / "mvm")
+        stub.mkdir()   # mvm up は起動の前にシークレットの登録を確かめるので、既定の Claude のシークレットを登録済みにする
+        (stub / "secret-pmva_claude-oauth-token").write_text("x", encoding="utf-8")
         subprocess.run([mvm, "up", "s1", "--no-github"], env=env, check=True, capture_output=True)
         out = subprocess.run([sys.executable, str(MVM), "orchestrator", "install", "codex"], env=env,
                              check=True, capture_output=True, text=True).stdout
