@@ -945,6 +945,16 @@ class CliTest(unittest.TestCase):
         _, out, _ = self.mvm("up", "-h")
         self.assertIn("--fresh", out, "サブコマンドの help は今までどおり")
 
+    def test_typo_suggests_command(self):
+        """打ち間違えたコマンドには、近い名前を出す (英語の invalid choice と 30 個の一覧だけだった)。"""
+        rc, _, err = self.mvm("pek", check=False)
+        self.assertEqual(rc, 2)
+        self.assertIn("もしかして: mvm peek", err)
+        self.assertNotIn("_ssh-proxy", err, "内部用のコマンドは出さない")
+        rc, _, err = self.mvm("zzzzzz", check=False)
+        self.assertEqual(rc, 2)
+        self.assertIn("mvm -h", err, "近いものが無ければ一覧の出し方を案内する")
+
     def test_bare_mvm_without_config(self):
         env = dict(self.env, PMVA_CONFIG=str(Path(self.tmp.name) / "none.env"))
         _, out, _ = self.mvm(env=env)
@@ -2628,7 +2638,39 @@ class CliTest(unittest.TestCase):
         """mvm setup 用。AWS CLI のプロファイルのファイルを一時フォルダに置き、管理者のプロファイル admin を用意する。"""
         t = Path(self.tmp.name)
         (t / "awsconfig").write_text("[profile admin]\nregion = ap-northeast-1\n", encoding="utf-8")
-        return dict(self.env, AWS_SHARED_CREDENTIALS_FILE=str(t / "creds"), AWS_CONFIG_FILE=str(t / "awsconfig"), **extra)
+        # 手元に入っている本物の claude / codex を見せない (見えると setup が skill を入れるか聞いてくる)
+        path = os.pathsep.join(d for d in self.env["PATH"].split(os.pathsep)
+                               if not any(shutil.which(a, path=d) for a in ("claude", "codex")))
+        return dict(self.env, PATH=path, AWS_SHARED_CREDENTIALS_FILE=str(t / "creds"),
+                    AWS_CONFIG_FILE=str(t / "awsconfig"), **extra)
+
+    def test_setup_offers_orchestrator_skill(self):
+        """手元に Claude Code があれば、司令塔の skill を入れるか聞く (コマンドを覚えずに日本語で頼めるように)。"""
+        env = self.setup_env()
+        fake = Path(self.tmp.name) / "agents"
+        fake.mkdir()
+        if IS_WINDOWS:
+            (fake / "claude.cmd").write_text("@exit /b 0\r\n", encoding="utf-8")
+        else:
+            (fake / "claude").write_text("#!/bin/sh\n", encoding="utf-8")
+            (fake / "claude").chmod(0o755)
+        env["PATH"] = str(fake) + os.pathsep + env["PATH"]
+        self.stub_dir.mkdir()
+        for kind in ("claude-oauth-token", "github-token"):
+            (self.stub_dir / f"secret-pmva_{kind}").write_text("x", encoding="utf-8")
+        skill = self.home / ".claude" / "skills" / "mvm-orchestrator" / "SKILL.md"
+        # 断っても、残りの手順には数えない (入れなくても使える)。後から入れる方法を出す
+        _, _, err = self.mvm("setup", input=b"n\n", env=env)
+        self.assertIn("Claude Code", err)
+        self.assertFalse(skill.exists())
+        self.assertIn("mvm orchestrator install claude", err)
+        self.assertIn("準備ができました", err)
+        self.assertNotIn("Codex に mvm-orchestrator", err, "入っていない Codex のことは聞かない")
+        _, _, err = self.mvm("setup", input=b"y\n", env=env)
+        self.assertTrue(skill.exists())
+        # 2 回目: 入っていれば聞かない (答えを渡さなくても止まらない)
+        _, _, err = self.mvm("setup", input=b"", env=env)
+        self.assertIn("準備ができました", err)
 
     def test_setup_from_scratch(self):
         """mvm setup: quickstart の手順 4〜7 (config.env の手での書き換え、infra deploy、操作用ユーザー、

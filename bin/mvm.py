@@ -12,6 +12,7 @@ import argparse
 import base64
 import collections
 import csv
+import difflib
 import errno
 import getpass
 import hashlib
@@ -1231,7 +1232,7 @@ def ask(prompt):
 
 
 def cmd_setup(args):
-    """導入の手順 (AWS の構成、普段使う IAM ユーザー、認証情報、SSH 鍵、イメージ) のうち、
+    """導入の手順 (AWS の構成、普段使う IAM ユーザー、認証情報、SSH 鍵、イメージ、司令塔の skill) のうち、
     済んでいないものを順に聞いて実行し、最後に doctor で確かめる。何度実行してもよい (済んだ手順は飛ばす)。"""
     if args.profile:
         if not aws_profile_exists(args.profile):
@@ -1248,7 +1249,7 @@ def cmd_setup(args):
     log(f"AWS の認証情報: {ident.get('Arn')}")
 
     pending = []   # 済んでいない手順 (doctor は !! の行があっても 0 を返すので、完了と言ってよいかはこれで決める)
-    log("[1/5] AWS の構成 (S3・IAM ロール・ログ)")
+    log("[1/6] AWS の構成 (S3・IAM ロール・ログ)")
     r = aws("cloudformation", "describe-stacks", "--stack-name", C["STACK_NAME"], check=False)
     stack = r["Stacks"][0] if r else {}
     if r and stack.get("StackStatus") != "REVIEW_IN_PROGRESS":   # REVIEW_IN_PROGRESS の空のスタックは deploy が片付ける
@@ -1269,7 +1270,7 @@ def cmd_setup(args):
             die("mvm infra deploy に失敗しました。上のエラーを確かめてください。"
                 "AccessDenied なら、管理者のプロファイルで mvm setup --profile <名前> を実行してください")
 
-    log("[2/5] 普段使う IAM ユーザー")
+    log("[2/6] 普段使う IAM ユーザー")
     user, profile = "pmva-operator", "pmva"
     if not any("AdministratorAccess" in x or "ルートユーザー" in x for x in credential_findings(ident.get("Arn", ""))):
         log("ok 今の認証情報は管理者権限ではありません")
@@ -1295,7 +1296,7 @@ def cmd_setup(args):
         pending.append("管理者の権限のままです。漏れたときの影響が大きいので、mvm infra operator で切り替えてください")
         log(pending[-1])
 
-    log("[3/5] エージェントなどの認証情報 (Secrets Manager)")
+    log("[3/6] エージェントなどの認証情報 (Secrets Manager)")
     _, secrets = auth_requirements()
     for name, kind, setting, _why in secrets:
         if aws("secretsmanager", "describe-secret", "--secret-id", name, check=False):
@@ -1317,7 +1318,7 @@ def cmd_setup(args):
             pending.append(f"{setting} のシークレットを mvm secret set {kind} で登録してください")
             log("飛ばしました")
 
-    log("[4/5] SSH 鍵 (mvm ssh で使う)")
+    log("[4/6] SSH 鍵 (mvm ssh で使う)")
     key = expand_path(C["SSH_PUBLIC_KEY_FILE"])
     if key and key.exists():
         log(f"ok {key}")
@@ -1327,7 +1328,7 @@ def cmd_setup(args):
     else:
         log("SSH 鍵なしで続けます (mvm ssh は使えません。mvm shell は使えます)")
 
-    log("[5/5] エージェントの実行イメージ")
+    log("[5/6] エージェントの実行イメージ")
     arn, active = find_image_arn(), None
     if arn:
         img = lmv("get-microvm-image", "--image-identifier", arn, check=False)
@@ -1345,6 +1346,19 @@ def cmd_setup(args):
         else:
             pending.append("mvm image build でイメージをビルドしてください")
             log("飛ばしました")
+
+    log("[6/6] 手元の Claude Code / Codex に司令塔の skill (コマンドを覚えずに日本語で頼めるようにする)")
+    agents = [(a, label) for a, label in (("claude", "Claude Code"), ("codex", "Codex")) if shutil.which(a)]
+    for agent, label in agents:
+        if (orchestrator_paths(agent, None)[0] / "SKILL.md").exists():
+            log(f"ok {label} に入っています")
+        elif ask(f"{label} に mvm-orchestrator の skill を入れますか? (「issue 3 件を MicroVM で並列に直して」のように頼むと、"
+                 f"{label} が mvm を打ちます)"):
+            cmd_orchestrator(argparse.Namespace(action="install", agent=agent, dir=None))
+        else:
+            log(f"飛ばしました (後から入れるなら mvm orchestrator install {agent})")
+    if not agents:
+        log("手元に Claude Code も Codex も見つからないので飛ばします (入れた後に mvm orchestrator install claude|codex)")
 
     log("最後に mvm doctor で確かめます")
     rc = cmd_doctor(args)
@@ -4150,6 +4164,16 @@ class MvmParser(argparse.ArgumentParser):
                 f"その他のコマンド:\n{command_lines(self)}\n"
                 "各コマンドの使い方は mvm <command> -h。引数なしの mvm で今の状態と次の一手を表示します\n")
 
+    def error(self, message):
+        """打ち間違えたコマンドには、30 個余りの一覧の代わりに近い名前を出す。"""
+        m = re.search(r"invalid choice: '([^']*)'", message)
+        if m:
+            sub = next(a for a in self._actions if isinstance(a, argparse._SubParsersAction))
+            close = difflib.get_close_matches(m.group(1), [n for n in sub.choices if not n.startswith("_")], n=3)
+            message = (f"{m.group(1)} というコマンドはありません。"
+                       + (f"もしかして: {' / '.join('mvm ' + c for c in close)}" if close else "全部のコマンドは mvm -h で見られます"))
+        super().error(message)
+
 
 def cmd_home(parser):
     """引数なしの mvm: 今の状態と次の一手、よく使うコマンドを出す。動いているはずのセッションだけ AWS に問い合わせる。"""
@@ -4184,7 +4208,7 @@ def build_parser():
     p = MvmParser(prog="mvm", description="Lambda MicroVMs で Claude Code / Codex を並列実行する")
     sub = p.add_subparsers(dest="command", metavar="<command>", parser_class=argparse.ArgumentParser)
 
-    x = sub.add_parser("setup", help="導入の手順 (AWS の構成・普段使う IAM ユーザー・認証情報・SSH 鍵・イメージ) のうち、"
+    x = sub.add_parser("setup", help="導入の手順 (AWS の構成・普段使う IAM ユーザー・認証情報・SSH 鍵・イメージ・司令塔の skill) のうち、"
                                      "済んでいないものを順に聞いて実行する (何度実行してもよい)")
     x.add_argument("--profile", help="この AWS CLI のプロファイルを config.env の AWS_PROFILE に書いてから始める "
                                      "(初回は管理者のプロファイル)")

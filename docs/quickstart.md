@@ -102,6 +102,7 @@ mvm setup --profile admin
 | 3 | エージェントの認証情報を Secrets Manager に登録する (`mvm secret set`) | 既定の Claude Pro / Max なら、手元に Claude Code を入れて `claude setup-token` を実行し、表示されたトークン。GitHub のリポジトリで作業させるなら、対象リポジトリに絞った Fine-grained personal access token (Contents と Pull requests を Read and write)。GitHub を使わないなら `n` と答える |
 | 4 | SSH 鍵が無ければ作る (`ssh-keygen`) | なし (質問はすべて Enter で構いません) |
 | 5 | Claude Code / Codex 入りのイメージをビルドする (`mvm image build`、10〜20 分) | なし。待つだけ |
+| 6 | 手元に Claude Code / Codex があれば、司令塔の skill を入れる (`mvm orchestrator install`) | なし。入れると、手元の Claude Code に「README を MicroVM で要約させて」のように頼むだけで、mvm のコマンドを代わりに打ちます ([orchestrator.md](orchestrator.md)) |
 
 最後に `mvm doctor` で確かめ、「準備ができました」と出れば完了です。`config.env` の `AWS_PROFILE` は `pmva` に書き換わっています。
 `mvm doctor` の「同時に何台まで」の行も見ておきます。この台数まで並列に動かせます。足りなければ引き上げを申請します (審査に数日かかることがあります。[setup.md](setup.md#前提の確認とクォータ))。
@@ -127,6 +128,7 @@ mvm send test-01 "テストを実行して結果を要約して"   # 指示を�
 mvm ssh test-01                          # 画面に入って直接操作する。抜けるときは Ctrl-b を押してから d
 ```
 
+手順 5 で司令塔の skill を入れたなら、コマンドを打たずに手元の Claude Code (または Codex) へ「test-01 という MicroVM でこのリポジトリの README を要約させて」と頼んでも同じことができます。起動と停止の前には確認を求めてきます。
 コマンドの代わりにブラウザで見るなら `mvm ui` です。全台の状態の一覧が開き、行をクリックすると画面と最後の応答が出て、指示もそこから送れます。「新しく起動」から次の台を起動することもできます。
 
 `mvm ssh` から抜けても、エージェントは AWS 上で作業を続けます。手元の PC を閉じても止まりません。
