@@ -364,7 +364,7 @@ def live_session_names():
 
 
 # name を省略できるコマンド。up は新しい名前を付けるので含めない
-NAME_OPTIONAL = ("stop", "suspend", "resume", "save", "renew", "peek", "forward", "login", "view",
+NAME_OPTIONAL = ("stop", "suspend", "resume", "save", "renew", "peek", "diff", "forward", "login", "view",
                  "result", "send", "ssh", "shell", "token")
 
 
@@ -2778,6 +2778,44 @@ def cmd_peek(args):
     return 0
 
 
+DIFF_MAX = 200000   # /diff の本文の上限 (文字数)。画面 (mvm ui) では DIFF_MAX_UI
+DIFF_MAX_UI = 100000
+DIFF_UNSUPPORTED = ("この VM のイメージは差分の表示に対応していません → mvm image build の後に mvm renew {name}")
+
+
+def vm_diff(name, limit):
+    """VM の作業ツリーの差分 (/diff)。古いイメージ (/diff が無い) では die する。"""
+    r = vm_api(name, "GET", f"/diff?max={limit}")
+    if r.get("error") == "not a git repository":
+        die(f"{name}: 作業場所が git のリポジトリではありません (差分はありません)")
+    if "diff" not in r:
+        die(DIFF_UNSUPPORTED.format(name=name))
+    return r
+
+
+def cmd_diff(args):
+    d = vm_diff(args.name, DIFF_MAX)
+    if args.json:
+        print_json(d)
+        return 0
+    body = d["stat"] if args.stat else d["diff"]
+    if not (d["unpushed"] or d["untracked"] or d["stat"] or d["diff"]):
+        print("未コミット・未 push の変更はありません")
+        return 0
+    print(f"ブランチ: {d.get('branch') or '(なし)'}")
+    for title, items in ((f"未 push のコミット ({len(d['unpushed'])})", d["unpushed"]),
+                         (f"未追跡のファイル ({len(d['untracked'])})", d["untracked"])):
+        if items:
+            print(f"{title}:")
+            print("\n".join(f"  {x}" for x in items))
+    if body:
+        print()
+        print(body.rstrip("\n"))
+    if d.get("truncated") and not args.stat:
+        print(f"… (先頭 {len(d['diff'])} 文字まで。全文は mvm ssh で)")
+    return 0
+
+
 def session_agents(name, agent=None):
     if agent:
         return [agent]
@@ -3705,6 +3743,13 @@ def ui_detail(name):
         elif r.get("state") == "error":
             r["hint"] = agent_error_hint(name, r.get("error"))
         detail["results"].append(r)
+    d = vm_api(name, "GET", f"/diff?max={DIFF_MAX_UI}")
+    if "diff" in d:
+        detail["diff"] = d
+    elif d.get("error") == "not a git repository":
+        detail["diff"] = {"error": "作業場所が git のリポジトリではありません"}
+    else:
+        detail["diff"] = {"error": DIFF_UNSUPPORTED.format(name=name)}
     return detail
 
 
@@ -3966,7 +4011,8 @@ input,select{font:inherit;padding:6px 8px;border-radius:6px;border:1px solid var
 <div class="bar" style="margin-top:8px"><textarea id="text" placeholder="エージェントへの指示 (Ctrl+Enter で送信)"></textarea>
 <button id="b-send" class="primary">送信</button></div>
 <div class="grid2"><div><h2>画面の末尾</h2><pre id="screen">(まだ読み込んでいません)</pre></div>
-<div><h2>最後の応答</h2><pre id="result">(まだ読み込んでいません)</pre></div></div></section>
+<div><h2>最後の応答</h2><pre id="result">(まだ読み込んでいません)</pre></div></div>
+<details style="margin-top:12px"><summary><h2 style="display:inline" id="diffsum">差分</h2></summary><pre id="diff">(まだ読み込んでいません)</pre></details></section>
 </main>
 <script>
 const T = new URLSearchParams(location.search).get("t");
@@ -4012,7 +4058,7 @@ async function refresh() {
 }
 function select(name) {
   selected = name; $("detail").hidden = false; $("dname").textContent = name;
-  $("screen").textContent = $("result").textContent = "(まだ読み込んでいません)"; say("");
+  $("screen").textContent = $("result").textContent = $("diff").textContent = "(まだ読み込んでいません)"; say("");
   refresh();
   if ((rowsByName[name] || {}).vm === "RUNNING") load(false);
 }
@@ -4026,6 +4072,14 @@ async function load(ask) {
     $("result").textContent = d.results.map(x => (d.results.length > 1 ? "--- " + x.agent + " ---\\n" : "") +
       (x.error && !x.text ? x.error : (x.state === "error" ? "(エラーで止まりました: " + x.error + ")\\n" : "") + (x.text || "(まだ応答がありません)")) +
       (x.hint ? "\\n→ " + x.hint : "")).join("\\n\\n") || "(エージェントを起動していません)";
+    const g = d.diff || {};   // textContent に入れるので、差分の中身は HTML として解釈されない
+    $("diff").textContent = g.error ? g.error : [
+      "ブランチ: " + (g.branch || "(なし)"),
+      g.unpushed.length ? "未 push のコミット:\\n" + g.unpushed.map(x => "  " + x).join("\\n") : "",
+      g.untracked.length ? "未追跡のファイル:\\n" + g.untracked.map(x => "  " + x).join("\\n") : "",
+      g.stat, g.diff, g.truncated ? "… (先頭 " + g.diff.length + " 文字まで。全文は mvm ssh で)" : ""
+    ].filter(Boolean).join("\\n\\n");
+    if (!g.error && !g.unpushed.length && !g.untracked.length && !g.diff) $("diff").textContent = "未コミット・未 push の変更はありません";
     say("");
   } catch (e) { say(e.message, true); }
 }
@@ -4753,6 +4807,11 @@ def build_parser():
     x.add_argument("lines", nargs="?", type=int, default=30)
     x.add_argument("--json", action="store_true", help="状態 API の応答を JSON のまま出力")
     x.set_defaults(func=cmd_peek)
+    x = sub.add_parser("diff", help="VM の作業ツリーの未コミットの差分、未追跡のファイル、未 push のコミットを表示")
+    x.add_argument("name", nargs="?", help="省略時は、動いているセッションが 1 つだけならそれ")
+    x.add_argument("--stat", action="store_true", help="本文の代わりに変更したファイルの一覧 (git diff --stat) を表示")
+    x.add_argument("--json", action="store_true", help="/diff の応答を JSON のまま出力")
+    x.set_defaults(func=cmd_diff)
     x = sub.add_parser("wait", help="エージェントの応答が終わるか、許可・入力待ちになるまで待つ")
     x.add_argument("names", nargs="*", metavar="name", help="待つセッション (省略時は動いている全セッション)")
     x.add_argument("--timeout", type=float, default=0, help="最大の待ち時間 (秒)。過ぎたら終了コード 2 で返る。0 で無制限 (既定)")

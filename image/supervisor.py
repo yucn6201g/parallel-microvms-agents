@@ -6,6 +6,7 @@
     GET  /healthz
     GET  /status?lines=N   セッション情報、エージェントの状態 (作業中・完了・入力待ちなど)、作業ツリーの未コミット・未 push、各画面の末尾 N 行
     GET  /result?agent=X   エージェント (claude / codex) の最後の応答の文章
+    GET  /diff?max=N       作業ツリーの未コミットの差分 (git diff HEAD)、未追跡のファイル、未 push のコミット (mvm diff)
     GET  /events?agent=X&file=F&offset=N&tail=N&max=N
                            会話記録 (指示・思考・ツールの実行と結果・応答) を、前回の続きから返す (mvm follow)
     POST /send             {"window": "claude", "text": "...", "enter": true} を tmux に送る
@@ -610,13 +611,42 @@ def check_oom():
         run(["/opt/pmva/notify.sh", "oom", str(kills)], timeout=30)
 
 
-def git_info(s):
-    """作業ツリー (bootstrap.sh と同じ場所) の、未コミットのファイル数と未 push のコミット数。git でなければ None。"""
+def git_workdir(s):
+    """作業ツリー (bootstrap.sh と同じ場所)。git のリポジトリでなければ None。"""
     repo = (s.get("repo") or "").rstrip("/")
     name = os.path.basename(repo)
     workdir = os.path.join(HOME, "work", name[:-4] if name.endswith(".git") and name != ".git" else name) if repo \
         else os.path.join(HOME, "work")
-    if not os.path.exists(os.path.join(workdir, ".git")):
+    return workdir if os.path.exists(os.path.join(workdir, ".git")) else None
+
+
+def diff_info(s, max_chars):
+    """未コミットの差分 (git diff HEAD)、未追跡のファイル、未 push のコミット。git でなければ error を返す。"""
+    workdir = git_workdir(s)
+    if workdir is None:
+        return {"error": "not a git repository"}
+    git = ["git", "-C", workdir, "-c", "core.quotepath=off"]
+    # コミットが 0 件 (HEAD が無い) のときは diff / log が失敗するので、その項目は空にする
+    rc, branch = run(git + ["branch", "--show-current"], timeout=5)
+    _, porcelain = run(git + ["status", "--porcelain"], timeout=10)
+    rc_log, log_out = run(git + ["log", "--oneline", "HEAD", "--not", "--remotes"], timeout=10)
+    rc_stat, stat = run(git + ["diff", "HEAD", "--stat", "--no-color"], timeout=20)
+    rc_diff, diff = run(git + ["diff", "HEAD", "--no-color", "--no-ext-diff"], timeout=20)
+    unpushed = log_out.splitlines()[:50] if rc_log == 0 else []
+    return {
+        "branch": (branch.strip() or None) if rc == 0 else None,
+        "untracked": [l[3:] for l in porcelain.splitlines() if l.startswith("?? ")],
+        "unpushed": unpushed,
+        "stat": stat if rc_stat == 0 else "",
+        "diff": diff[:max_chars] if rc_diff == 0 else "",
+        "truncated": rc_diff == 0 and len(diff) > max_chars,
+    }
+
+
+def git_info(s):
+    """作業ツリー (bootstrap.sh と同じ場所) の、未コミットのファイル数と未 push のコミット数。git でなければ None。"""
+    workdir = git_workdir(s)
+    if workdir is None:
         return None
     git = ["git", "-C", workdir]
     rc1, porcelain = run(git + ["status", "--porcelain"], timeout=5)
@@ -753,6 +783,12 @@ class ApiHandler(Handler):
             except ValueError:
                 return self.reply(400, {"error": "lines must be an integer"})
             return self.reply(200, status(max(0, min(lines, 500))))
+        if url.path == "/diff":
+            try:
+                limit = int(parse_qs(url.query).get("max", ["200000"])[0])
+            except ValueError:
+                return self.reply(400, {"error": "max must be an integer"})
+            return self.reply(200, diff_info(load_session(), max(0, limit)))
         if url.path == "/events":
             q = parse_qs(url.query)
             agent = q.get("agent", [""])[0]
