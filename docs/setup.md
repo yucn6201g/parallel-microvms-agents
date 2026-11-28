@@ -200,4 +200,6 @@ mvm infra delete      # スタックと S3 バケットの中身を削除 (管�
 mvm image delete      # イメージを全バージョンごと削除
 ```
 
+スタックは残して、終了したセッションの保存だけ消すなら `mvm forget <名前>` です ([commands.md](commands.md#forget))。
+
 シークレットは Secrets Manager のコンソールで個別に削除します。`mvm infra delete` が消せなかったリソースは、表示された削除コマンドで消します ([troubleshooting.md](troubleshooting.md))。

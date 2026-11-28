@@ -297,7 +297,12 @@ if cmd == "cloudformation deploy":
         "template": "".join(c if ord(c) < 128 else "?" for c in template),
         "parameters": dict(x.split("=", 1) for x in params)}), encoding="utf-8")
     sys.exit(0)
-if cmd == "s3 rm":
+if cmd == "s3 rm":   # s3://<バケット>/<prefix> の下のオブジェクトを消す (--recursive。mvm forget、infra delete)
+    root = D / "s3" / paths[0][len("s3://"):].split("/", 1)[0]
+    prefix = paths[0][len("s3://"):].partition("/")[2]
+    for f in sorted(root.rglob("*")) if root.exists() else []:
+        if f.is_file() and f.relative_to(root).as_posix().startswith(prefix):
+            f.unlink()
     sys.exit(0)
 if cmd == "ce get-cost-and-usage":  # 2 ページに分けて返す
     def group(service, amount):
