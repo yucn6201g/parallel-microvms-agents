@@ -679,8 +679,9 @@ mvm cost --actual [--days N] [--daily]      # Cost Explorer の実績
 |---|---|
 | `PMVA_CONFIG` | 設定ファイルの場所 (既定はリポジトリ直下の `config.env`) |
 | `PMVA_STATE_DIR` | セッションの記録やトークンのキャッシュの場所 (既定は `.state/`) |
+| `PMVA_AWS_PROFILE` | 空でなければ、`config.env` の `AWS_PROFILE` より優先して使う AWS のプロファイル (`config.env` は書き換えない)。SSO の期限が切れたときに、期限の無い別のプロファイルで一時的に動かす用途。`mvm doctor` と引数なしの `mvm` が上書きしていることを 1 行出す |
 | `PMVA_DEBUG` | ファイル名を指定すると、接続の詳細 (切断の理由など) を追記する |
 | `HTTPS_PROXY` / `NO_PROXY` | 社内プロキシを経由して MicroVM に接続する (CONNECT) |
 | `PMVA_NPM_REGISTRY` | `image versions` が参照する npm レジストリ (既定 `https://registry.npmjs.org`) |
 
-AWS のプロファイルやリージョンは環境変数ではなく `config.env` の `AWS_PROFILE` / `AWS_REGION` で指定します ([config.md](config.md))。
+AWS のプロファイルやリージョンは `config.env` の `AWS_PROFILE` / `AWS_REGION` で指定します ([config.md](config.md))。環境変数 `AWS_PROFILE` は `config.env` に負けます (普段使っている管理者のプロファイルで知らずに動くのを防ぐため)。その場だけ切り替えるには `PMVA_AWS_PROFILE` を使います (PowerShell は `$env:PMVA_AWS_PROFILE = "pmva"`)。

@@ -177,6 +177,8 @@ def load_config():
         die(f"{CONFIG_FILE} がありません。config.example.env をコピーして config.env を作成してください")
     C.update(DEFAULTS)
     C.update(parse_env_file(CONFIG_FILE))
+    if os.environ.get("PMVA_AWS_PROFILE"):   # config.env を書き換えずに、その場だけプロファイルを替える
+        C["AWS_PROFILE"] = os.environ["PMVA_AWS_PROFILE"]
     C["BASE_IMAGE_ARN"] = C["BASE_IMAGE_ARN"] or f"arn:aws:lambda:{C['AWS_REGION']}:aws:microvm-image:al2023-1"
     C["BEDROCK_REGION"] = C["BEDROCK_REGION"] or C["AWS_REGION"]
     C["ANTHROPIC_AWS_REGION"] = C["ANTHROPIC_AWS_REGION"] or C["AWS_REGION"]
@@ -216,6 +218,15 @@ def aws_env():
     if C.get("AWS_PROFILE"):
         env["AWS_PROFILE"] = C["AWS_PROFILE"]
     return env
+
+
+def aws_profile_override_note():
+    """PMVA_AWS_PROFILE で config.env の AWS_PROFILE を上書きしているときの 1 行 (していなければ空)。"""
+    name = os.environ.get("PMVA_AWS_PROFILE")
+    if not name:
+        return ""
+    base = parse_env_file(CONFIG_FILE).get("AWS_PROFILE") if CONFIG_FILE.exists() else ""
+    return f"PMVA_AWS_PROFILE={name} で config.env の AWS_PROFILE={base or '(未設定)'} を上書きしています"
 
 
 THROTTLE_MARKERS = ("ThrottlingException", "TooManyRequestsException", "Rate exceeded")
@@ -428,6 +439,10 @@ AWS_NETWORK = ("Could not connect", "Connect timeout", "Read timeout", "Endpoint
 def aws_error_hint(err):
     """AWS CLI のエラー文から、利用者向けの理由と次にやることを 1 行で返す。"""
     if any(m in err for m in AWS_AUTH_EXPIRED):
+        profile = C.get("AWS_PROFILE")
+        if profile:
+            return (f"AWS の認証が切れています → aws sso login --profile {profile} でログインし直し (SSO でなければアクセスキーを更新し)、"
+                    "mvm doctor で確かめてください。一時的に別のプロファイルを使うなら PMVA_AWS_PROFILE=<名前> を付けて実行します")
         return ("AWS の認証が切れています → aws sso login でログインし直し (SSO でなければアクセスキーを更新し)、"
                 "mvm doctor で確かめてください")
     if any(m in err for m in AWS_AUTH_MISSING):
@@ -934,6 +949,8 @@ def cmd_doctor(_args):
         ok = ok and bool(found or tool == "ssh")
     if not shutil.which("aws"):
         return 1
+    if aws_profile_override_note():
+        print("  --   " + aws_profile_override_note())
     print("  aws: " + (aws("--version", output=None, check=False) or "?"))
     ident = aws("sts", "get-caller-identity", check=False)
     if ident:
@@ -4657,6 +4674,8 @@ def cmd_home(parser):
         print("次の一手: config.example.env をコピーして config.env を作り、mvm setup を実行する (docs/quickstart.md)")
     else:
         load_config()
+        if aws_profile_override_note():
+            print(aws_profile_override_note())
         states = {n: vm_state(n) for n in session_names() if not load_session(n).get("terminated")}
         alive = [n for n, s in states.items() if s not in ("TERMINATED", "TERMINATING", "GONE", "UNKNOWN")]
         left = {n: remaining_seconds(load_session(n)) for n in alive}
