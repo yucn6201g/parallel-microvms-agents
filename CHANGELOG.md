@@ -6,6 +6,7 @@
 
 ### 追加
 
+- `mvm watch` と `mvm ui` の一覧に「費用(上限)」の列と全台の合計を出す。今の VM を起動してからの経過時間とメモリから求めた税抜 USD の上限の目安で、止め忘れに気づきやすくする (`mvm watch --json` は `costUsd`)。セッション記録に `memoryMib` を保存するようにした。実績は `mvm cost --actual`
 - `mvm diff [<name>] [--stat] [--json]`: VM の作業ツリーの未コミットの差分、未追跡のファイル、未 push のコミットを、`mvm ssh` で入らずに表示する (`peek` の「未コミット N ファイル・未 push M コミット」の中身)。`mvm ui` の詳細にも折りたためる「差分」を足した。VM の中に `GET /diff` を足したので、イメージの作り直し (`mvm image build` の後に `mvm renew <name>`) が要る
 - 環境変数 `PMVA_AWS_PROFILE` で、`config.env` を書き換えずにその場だけ AWS のプロファイルを切り替えられる (SSO の期限が切れたときに、別のプロファイルで動かす用途)。使っているときは `mvm doctor` と引数なしの `mvm` が上書きしていると表示し、認証切れの案内にはプロファイル名を入れる
 - `mvm renew` と `mvm up --restore` で会話の履歴が戻ったときは、エージェントを前の会話の続きから起動する (Claude Code は `--continue`、Codex は `codex resume --last`)。これまでは新しい会話で始まり、手で `claude --continue` を打ち直す必要があった
