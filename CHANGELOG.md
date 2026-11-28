@@ -88,6 +88,8 @@
 - 同時に動かす台数の目標を 10 台から「AWS アカウントのクォータの範囲内」に変更。`MAX_AGENTS` の既定を `0` (クォータで決まる台数まで) にし、`mvm doctor` はクォータに対して何台動かせるかを表示する。コストの試算 (`mvm cost`) の既定も 2 台にした
 - `mvm cost` (試算) の単価を、東京リージョンの 2026 年 11 月の実際の請求に合わせた。low / high の 2 行をやめて 1 行 (`tokyo`) にし、スナップショットの読み込みと書き込みを別の単価 (`--snapshot-read-gb` / `--snapshot-write-gb`) で計算する。日本の消費税 10% を含めた税込の額も表示する (`--tax-rate 0` で除外)。`docs/cost.md` に実費との比較を追加
 - MicroVM イメージの Claude Code を 2.1.312 から 2.1.330 に、Codex を 0.165.0 から 0.171.0 に更新。新しいイメージ (`mvm image build`) が必要で、起動中の VM は `mvm renew` で移れる
+- `mvm setup` の初回のつまずきを減らした。SSO の管理者には、Enter だけで長期のアクセスキーができる質問をやめて、権限セットを作る案内を出す。lambda-microvms が使えるか (AWS CLI の版とリージョン) を最初に確かめて止まる。端末で認証方式が既定のままなら、Pro/Max・API キー・Bedrock・Codex を番号で聞いて `config.env` に書く。予算アラートが未設定なら、deploy の前に金額と通知先を聞く。スタックが古いときは `mvm infra deploy --admin-profile ...` をそのまま案内する
+- `mvm infra deploy` / `delete` / `operator` に `--admin-profile` を追加。そのコマンドの間だけ管理者のプロファイルで AWS CLI を呼ぶ (`config.env` の `AWS_PROFILE` が環境変数より優先されるため、これまでは切り替えられなかった)。`deploy` / `delete` に `--profile` を付けると、使われないまま通っていたのをエラーにして `--admin-profile` を案内する
 
 ## [0.1.0] - 2026-10-29
 

@@ -1089,7 +1089,21 @@ def credential_findings(arn):
     return lines or ["  ok   認証情報: 管理者権限ではありません"]
 
 
+def use_admin_profile(name):
+    """このコマンドの間だけ、AWS CLI を管理者のプロファイルで呼ぶ (config.env は書き換えない)。
+    config.env の AWS_PROFILE は環境変数 AWS_PROFILE より優先されるので、一時的に切り替えるにはこちらを使う。"""
+    if not aws_profile_exists(name):
+        die(f"AWS CLI のプロファイル {name} がありません。aws configure sso --profile {name} (SSO) か "
+            f"aws configure --profile {name} で作ってから、もう一度実行してください")
+    C["AWS_PROFILE"] = name
+
+
 def cmd_infra(args):
+    if getattr(args, "profile", None) and args.action != "operator":
+        die("--profile は operator が作るプロファイルの名前です。deploy / delete を管理者のプロファイルで実行するには "
+            f"--admin-profile {args.profile} を使ってください")
+    if getattr(args, "admin_profile", None):
+        use_admin_profile(args.admin_profile)
     if args.action == "deploy":
         template = infra_template()
         declared = template_parameters(template)
@@ -1113,7 +1127,7 @@ def cmd_infra(args):
         log("普段使う IAM ユーザーは mvm infra operator で作れます "
             "(既にあるユーザー / ロールを使うなら、OperatorPolicyArn のポリシーをアタッチしてください)")
     elif args.action == "operator":
-        return infra_operator(args.user, args.profile)
+        return infra_operator(args.user, args.profile or "pmva")
     elif args.action == "outputs":
         (STATE_DIR / "stack-outputs.json").unlink(missing_ok=True)
         stack_output("ArtifactBucketName")
@@ -1229,7 +1243,7 @@ def infra_operator(user, profile):
         f"config.env を AWS_PROFILE={profile} に切り替えました")
     log("10 秒ほど待ってから mvm doctor で確かめてください (新しいキーが使えるまで少しかかります)")
     log("管理者のアクセスキーをこのために作った場合は、IAM コンソールから削除してください。"
-        "infra deploy をやり直すときは config.env の AWS_PROFILE を管理者のものに戻します")
+        "infra deploy をやり直すときは mvm infra deploy --admin-profile <管理者のプロファイル> を使います")
     return 0
 
 
@@ -1253,6 +1267,66 @@ def ask(prompt):
     return ans.strip().lower() not in ("n", "no")
 
 
+def ask_line(prompt):
+    """端末のときだけ 1 行聞く。端末ではない・答えを読めないときは None (聞かずに既定のまま進める)。"""
+    if not sys.stdin.isatty():
+        return None
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        return None
+
+
+def setup_auth_choice():
+    """認証方式が既定 (claude + oauth-token。Pro/Max 前提) のままなら、番号で聞いて config.env に書く。"""
+    if any(C[k] != DEFAULTS[k] for k in ("DEFAULT_AGENT", "DEFAULT_CLAUDE_AUTH", "DEFAULT_CODEX_AUTH")):
+        return
+    if aws("secretsmanager", "describe-secret", "--secret-id", default_secret(CLAUDE_AUTH_SECRETS, "oauth-token"),
+           check=False):
+        return   # 既定の方式で登録済みなら、毎回は聞かない
+    choices = {"1": {}, "2": {"DEFAULT_CLAUDE_AUTH": "api-key"}, "3": {"DEFAULT_CLAUDE_AUTH": "bedrock"},
+               "4": {"DEFAULT_AGENT": "codex", "DEFAULT_CODEX_AUTH": "chatgpt"}}
+    ans = ask_line("Claude の認証: 1) Pro/Max のサブスクリプション (oauth-token)  2) Anthropic の API キー  "
+                   "3) Amazon Bedrock  4) Codex (ChatGPT)  [1] ")
+    if ans is None:
+        return
+    if ans not in choices and ans:
+        log(f"{ans} は選べません。1〜4 の番号で答えてください。1 (Pro/Max) のまま進めます (後から config.env の DEFAULT_CLAUDE_AUTH を直せます)")
+    for key, value in choices.get(ans, {}).items():
+        set_config_value(key, value)
+        C[key] = value
+        log(f"config.env を {key}={value} にしました")
+
+
+def setup_budget():
+    """月の予算アラートが未設定なら、金額と通知先を聞いて config.env に書く (infra deploy の前に呼ぶ)。"""
+    try:
+        unset = float(C["BUDGET_MONTHLY_USD"] or 0) <= 0
+    except ValueError:
+        unset = False   # 読めない値は deploy が理由を出して止める
+    if C["INFRA_TEMPLATE"] == "minimal" or not unset:
+        return
+    amount = ask_line("月の予算アラートを作りますか? 金額 (USD、Enter で作らない): ")
+    if not amount:
+        return
+    try:
+        usd = float(amount)
+        if usd <= 0:
+            raise ValueError
+    except ValueError:
+        log(f"{amount} は金額として読めないので、予算アラートは作りません (後から config.env の BUDGET_MONTHLY_USD と BUDGET_EMAIL を書いて "
+            "mvm infra deploy をやり直せます)")
+        return
+    email = ask_line("通知先のメールアドレス: ")
+    if not email or "@" not in email:
+        log("通知先のメールアドレスが読めないので、予算アラートは作りません (BUDGET_EMAIL を config.env に書いて mvm infra deploy をやり直せます)")
+        return
+    for key, value in (("BUDGET_MONTHLY_USD", f"{usd:g}"), ("BUDGET_EMAIL", email)):
+        set_config_value(key, value)
+        C[key] = value
+    log(f"config.env を BUDGET_MONTHLY_USD={usd:g}、BUDGET_EMAIL={email} にしました")
+
+
 def cmd_setup(args):
     """導入の手順 (AWS の構成、普段使う IAM ユーザー、認証情報、SSH 鍵、イメージ、司令塔の skill) のうち、
     済んでいないものを順に聞いて実行し、最後に doctor で確かめる。何度実行してもよい (済んだ手順は飛ばす)。"""
@@ -1269,6 +1343,11 @@ def cmd_setup(args):
             "  初めてなら、管理者のプロファイルを用意して (aws configure sso --profile admin など。docs/quickstart.md の手順 4)、"
             "mvm setup --profile admin で実行してください")
     log(f"AWS の認証情報: {ident.get('Arn')}")
+    if lmv("list-managed-microvm-images", check=False) is None:   # cmd_doctor と同じ呼び出し
+        die(f"{C['AWS_REGION']} で Lambda MicroVMs を呼べません: {last_aws_error().strip()[:200]}\n"
+            "  AWS CLI が古いなら、aws --version で版を確かめて AWS CLI v2 を最新版に更新してください。"
+            "更新しても同じなら、config.env の AWS_REGION が MicroVMs に未対応のリージョンです (mvm doctor と docs/setup.md の「前提の確認とクォータ」)")
+    setup_auth_choice()   # Bedrock を選ぶと実行ロールの権限が要るので、infra deploy の前に聞く
 
     pending = []   # 済んでいない手順 (doctor は !! の行があっても 0 を返すので、完了と言ってよいかはこれで決める)
     log("[1/6] AWS の構成 (S3・IAM ロール・ログ)")
@@ -1282,10 +1361,13 @@ def cmd_setup(args):
             print(line, file=sys.stderr)
             if line.startswith("  !!"):
                 pending.append(line.strip()[2:].strip())
+        if any("mvm infra deploy" in x for x in pending):   # 普段用のプロファイルでは deploy できないので、そのまま打てる形で出す
+            pending.append(f"deploy は管理者のプロファイルで: mvm infra deploy --admin-profile {args.profile or '<管理者のプロファイル>'}")
     else:
         if not r:
             die_unless_not_found(f"スタック {C['STACK_NAME']} ")
         log("まだありません。管理者の権限で作ります (数分)")
+        setup_budget()
         if not ask("mvm infra deploy を実行しますか?"):
             die("中止しました。もう一度 mvm setup を実行すると、ここから続けます")
         if cmd_infra(argparse.Namespace(action="deploy")) != 0:
@@ -1298,6 +1380,10 @@ def cmd_setup(args):
         log("ok 今の認証情報は管理者権限ではありません")
     elif C["AWS_PROFILE"] == profile:
         pending.append(f"プロファイル {profile} が管理者権限です。IAM コンソールで、そのユーザーに pmva-operator ポリシーだけを付けてください")
+        log("!! " + pending[-1])
+    elif "assumed-role/AWSReservedSSO_" in ident.get("Arn", ""):   # 長期のアクセスキーを作らせない (docs/setup.md)
+        pending.append("SSO では、IAM Identity Center で pmva-operator ポリシーを付けた権限セットを作り、そのプロファイルを "
+                       "config.env の AWS_PROFILE に書いてください (docs/setup.md「操作用の IAM ユーザー」)")
         log("!! " + pending[-1])
     elif ask(f"今は管理者の権限です。普段の操作用に、pmva-operator ポリシーだけを付けたユーザー {user} を作り、"
              f"プロファイル {profile} に切り替えますか?"):
@@ -4442,7 +4528,9 @@ def build_parser():
     x = sub.add_parser("infra", help="CloudFormation で S3 / IAM ロール / ログを作成・確認・削除")
     x.add_argument("action", choices=("deploy", "outputs", "delete", "operator"))
     x.add_argument("--user", default="pmva-operator", help="operator: 作る IAM ユーザー名 (既定 pmva-operator)")
-    x.add_argument("--profile", default="pmva", help="operator: 書き込む AWS CLI のプロファイル名 (既定 pmva)")
+    x.add_argument("--profile", help="operator: 書き込む AWS CLI のプロファイル名 (既定 pmva)")
+    x.add_argument("--admin-profile", help="deploy / delete / operator: このコマンドの間だけ、この管理者の "
+                                           "AWS CLI のプロファイルで実行する (config.env の AWS_PROFILE は変えない)")
     x.set_defaults(func=cmd_infra)
     x = sub.add_parser("secret", help="認証情報を Secrets Manager に登録 (set) / 一覧 (ls)")
     x.add_argument("action", choices=("set", "ls"))
