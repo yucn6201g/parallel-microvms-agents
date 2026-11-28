@@ -87,6 +87,6 @@
 
 ## 費用の確認方法
 
-- `mvm cost --actual --days 7 --daily` で Cost Explorer の実績をサービス別・日別に表示する (アカウント全体の金額。反映は最大 24 時間ほど遅れる。操作用ポリシーに `ce:GetCostAndUsage` を含めている)
+- `mvm cost --actual --days 7 --daily` で Cost Explorer の実績をサービス別・日別に表示する (アカウント全体の金額。反映は最大 24 時間遅れる。操作用ポリシーに `ce:GetCostAndUsage` を含めている)
 - Cost Explorer のコンソールでサービス「Lambda」の利用料を日別に確認する
 - AWS Budgets で月額の予算アラートを設定する (例: $100 で通知)
