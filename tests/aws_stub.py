@@ -194,6 +194,9 @@ if cmd == "lambda-microvms terminate-microvm":
     (D / f"{opt('--microvm-identifier')}.term").touch()
     out({})
 if cmd in ("lambda-microvms create-microvm-auth-token", "lambda-microvms create-microvm-shell-auth-token"):
+    vid = opt("--microvm-identifier")   # PMVA_STUB_TOKEN_NEEDS_RUNNING=1 なら、終了済み・サスペンド中の VM には作れない (本物と同じ)
+    if os.environ.get("PMVA_STUB_TOKEN_NEEDS_RUNNING") and any((D / f"{vid}.{x}").exists() for x in ("term", "suspended")):
+        fail("An error occurred (ConflictException) when calling the CreateMicrovmAuthToken operation: MicroVM is not running")
     out({"authToken": {"X-aws-proxy-auth": "TOKEN-" + opt("--microvm-identifier")}})
 if cmd == "secretsmanager describe-secret":
     if (D / ("secret-" + opt("--secret-id").replace("/", "_"))).exists():

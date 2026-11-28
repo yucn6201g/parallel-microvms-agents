@@ -459,6 +459,29 @@ def clear_tokens(name):
         p.unlink()
 
 
+def vm_unavailable_hint(name):
+    """VM が操作を受け付けない状態なら、状態に合った次の一手の文。使える状態や状態不明なら None。"""
+    state = vm_state(name)
+    if state in ("TERMINATED", "GONE"):
+        return f"{name} は終了しています。mvm up {name} で、保存した時点の続きから始められます"
+    if state == "TERMINATING":
+        return f"{name} は終了処理中です。終わってから mvm up {name} で、保存した時点の続きから始められます"
+    if state == "SUSPENDED":
+        return f"{name} はサスペンド中です。mvm resume {name} で再開してからやり直してください"
+    if state not in ("RUNNING", "UNKNOWN"):
+        return f"{name} は起動の途中です ({state})。mvm wait {name} で準備が終わるのを待ってからやり直してください"
+    return None
+
+
+def microvm_token(name, command, *opts):
+    """create-microvm-auth-token / create-microvm-shell-auth-token を呼ぶ。失敗したら VM の状態に合った案内で終わる。"""
+    r = lmv(command, "--microvm-identifier", load_session(name)["microvmId"], *opts, check=False)
+    if r is None:
+        err = last_aws_error().strip()   # vm_state が上書きする前に控える
+        die(vm_unavailable_hint(name) or f"aws lambda-microvms {command} に失敗しました: {err}")
+    return r["authToken"]["X-aws-proxy-auth"]
+
+
 def auth_token(name, port):
     """アプリ用トークン (最大 60 分) をキャッシュして使い回す。"""
     f = STATE_DIR / "tokens" / f"{name}.{port}.json"
@@ -470,9 +493,8 @@ def auth_token(name, port):
                 return cached["token"]
         except (ValueError, KeyError):
             pass
-    r = lmv("create-microvm-auth-token", "--microvm-identifier", load_session(name)["microvmId"],
-            "--expiration-in-minutes", "60", "--allowed-ports", json.dumps([{"port": port}]))
-    token = r["authToken"]["X-aws-proxy-auth"]
+    token = microvm_token(name, "create-microvm-auth-token",
+                          "--expiration-in-minutes", "60", "--allowed-ports", json.dumps([{"port": port}]))
     f.write_text(json.dumps({"exp": now + 3600, "token": token}), encoding="utf-8")
     os.chmod(f, 0o600)
     return token
@@ -498,14 +520,14 @@ def vm_api(name, method, path, body=None, timeout=30):
         try:
             return json.loads(text)
         except ValueError:
-            die(f"{name}: HTTP {e.code} {text[:200]}")
+            die(vm_unavailable_hint(name) or f"{name}: HTTP {e.code} {text[:200]}")
     except (urllib.error.URLError, OSError) as e:
         # サンドボックスがネットワークを止めていると、接続そのものが許されない (EPERM / EACCES)
         reason = getattr(e, "reason", e)
         blocked = isinstance(reason, OSError) and reason.errno in (errno.EPERM, errno.EACCES)
         hint = (f"。エージェント (Codex など) のサンドボックスの中で動かしているなら、ネットワークを許してください{SANDBOX_HINT}"
                 if blocked else "")
-        die(f"{name}: 接続できません ({e}){hint}")
+        die(vm_unavailable_hint(name) or f"{name}: 接続できません ({e}){hint}")
 
 
 # ---------------------------------------------------------------- WebSocket クライアント
@@ -2483,8 +2505,11 @@ AGENT_STATE_LABELS = {
 
 def agent_error_hint(name, kind):
     """エージェントが API のエラー (Claude Code の StopFailure の error) で止まったときに、次にやること。"""
-    relogin = (f"mvm secret set <種類> で登録し直し、mvm stop {name} --no-save の後に"
-               " mvm up で起動し直します (認証情報は起動時に読み込むため)。詳しくは docs/auth.md")
+    relogin = (f"mvm secret set <種類> で登録し直し、mvm renew {name} で保存してから作り直します (認証情報は起動時に読み込むため)。"
+               "詳しくは docs/auth.md")
+    payload = load_session(name).get("payload", {}) if session_path(name).exists() else {}
+    if "interactive" in (payload.get("claudeAuth"), payload.get("codexAuth")):
+        relogin += f"。interactive で起動したセッションは作り直すとログインが切れるので、続けて mvm login {name} でログインしてください"
     if kind == "authentication_failed":
         return "認証情報を確かめてください。" + relogin
     if kind == "invalid_request":
@@ -2548,10 +2573,15 @@ def cmd_result(args):
             die(f"{args.name}: 最後の応答を取得できません ({r.get('error') or r})。"
                 "イメージが古い場合は mvm image build で作り直してください")
         results.append(r)
+    working = [r["agent"] for r in results if r.get("state") == "working"]
+    for agent in working:   # 作業中の「最後の応答」は 1 つ前の応答のことがあるので、代わりに待ち方を案内する
+        log(f"{args.name} ({agent}) はまだ作業中です。mvm wait {args.name} で終わるまで待てます")
     if args.json:
         print_json(results if len(results) > 1 else results[0])
     else:
         for r in results:
+            if r["agent"] in working:
+                continue
             if len(results) > 1:
                 print(f"--- {r['agent']} ({r.get('state')}) ---")
             if r.get("state") == "error":
@@ -2559,6 +2589,8 @@ def cmd_result(args):
                 log(agent_error_hint(args.name, r.get("error")))
             else:
                 print(r.get("text") if r.get("text") else f"(まだ {r['agent']} の応答がありません)")
+    if working:
+        return 2
     return 0 if all(r.get("text") and r.get("state") != "error" for r in results) else 1
 
 
@@ -3026,9 +3058,21 @@ def cmd_wait(args):
     return 0 if enough else 2
 
 
+# mvm send が送らないエージェントの状態と、次の一手 (exited のまま送ると、入力がシェルに入ってしまう)
+SEND_REFUSED = {
+    "exited": "送った文字はシェルに入力されてしまいます。mvm renew {name} で保存してから作り直してください (シェルに送るなら --window shell)",
+    "failed": "mvm peek {name} で原因を確かめ、mvm renew {name} で作り直してください",
+    "starting": "mvm wait {name} で準備が終わるまで待ってから送ってください",
+}
+
+
 def cmd_send(args):
     text = " ".join(args.text)
     window = args.window or ("codex" if load_session(args.name)["payload"].get("agent") == "codex" else "claude")
+    if not args.window:   # --window を明示したときは断らない (exited のシェルへ送る使い方もある)
+        state = ((vm_api(args.name, "GET", "/status?lines=0").get("agents") or {}).get(window) or {}).get("state")
+        if state in SEND_REFUSED:
+            die(f"{args.name} の {window} は{AGENT_STATE_LABELS[state]}状態なので送りません。{SEND_REFUSED[state].format(name=args.name)}")
     r = vm_api(args.name, "POST", "/send", {"window": window, "text": text, "enter": not args.no_enter})
     print("送信しました" if r.get("ok") else f"失敗: {r.get('error')}")
     return 0 if r.get("ok") else 1
@@ -3769,8 +3813,7 @@ refresh(); setInterval(() => { if (!document.hidden) refresh(); }, 10000);
 
 def cmd_shell(args):
     s = load_session(args.name)
-    r = lmv("create-microvm-shell-auth-token", "--microvm-identifier", s["microvmId"], "--expiration-in-minutes", "15")
-    token = r["authToken"]["X-aws-proxy-auth"]
+    token = microvm_token(args.name, "create-microvm-shell-auth-token", "--expiration-in-minutes", "15")
     log("接続します。入ったら agent-attach でエージェントの tmux に接続できます (切断は exit)")
     try:
         host, port, tls = ws_target(s["endpoint"])
