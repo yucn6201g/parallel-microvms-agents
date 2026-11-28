@@ -32,6 +32,10 @@
 |---|---|
 | `mvm peek` が 502 | 起動直後なら数秒待つ。続くなら `mvm shell` で入り、`bootstrap.log` を見る |
 | `mvm peek` が 401 / 403 | 手元のトークンの期限切れは、自動で取り直して 1 回だけやり直す。それでも出るなら、AWS の認証 (`mvm doctor`) と、`mvm ls` でセッションが動いているかを確かめる。キャッシュ (`.state/tokens/<name>.*`) は手で消してもよい |
+| `peek` / `send` / `result` / `ssh` / `shell` / `top` などが「<name> は終了しています」「サスペンド中です」「起動の途中です」 | VM が操作を受け付けない状態。案内のとおり、終了していれば `mvm up <name>` (保存した時点の続きから始まる)、サスペンド中なら `mvm resume <name>`、起動中なら `mvm wait <name>` |
+| `mvm send` が「終了した状態なので送りません」 | エージェントが終了してシェルに戻っている (`exited`)。送ると文字がシェルに入る。`mvm renew <name>` で作り直す (シェルに送るなら `--window shell`) |
+| `mvm result` が「まだ作業中です」(終了コード 2) | エージェントが作業中。`mvm wait <name>` で終わるまで待つ |
+| エージェントが認証エラー (`authentication_failed`) で止まった | `mvm secret set <種類>` で登録し直し、`mvm renew <name>` で作り直す (保存してから起動し直す)。`--claude-auth interactive` で起動したセッションは作り直すとログインが切れるので、続けて `mvm login <name>` |
 | `mvm ssh` で「SSH 公開鍵なしで起動されています」 | `ssh-keygen -t ed25519` で鍵を作り、`mvm renew <name>` で起動し直す (それまでは `mvm shell` で入れる) |
 | SSH が `Broken pipe` で切れる | 途中の通信経路 (社内プロキシなど) が長い接続を切ることがある。`mvm ssh <name>` (コマンドなし) は自動で再接続し、作業は tmux の中で続いている |
 | VS Code の初回接続が `Connecting with SSH timed out` | もう一度開き直す。`mvm ssh-config --install` を最後に実行した後で VM を作り直したなら、もう一度実行する |

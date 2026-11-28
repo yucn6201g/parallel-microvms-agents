@@ -717,6 +717,16 @@ class WatchBoardTest(unittest.TestCase):
         self.assertEqual(row["notes"], ["a2 (claude): 許可・入力待ち: Bash の実行の許可を求めています"])
         self.assertEqual(mvm.watch_level(row), "yellow")
 
+    def test_auth_error_hint_recommends_renew_and_login_for_interactive(self):
+        with mock.patch.object(mvm, "session_path", return_value=Path("/nonexistent/x.json")):
+            hint = mvm.agent_error_hint("nosuch", "authentication_failed")
+        self.assertIn("mvm renew nosuch", hint)
+        self.assertNotIn("--no-save", hint)
+        self.assertNotIn("mvm login", hint)
+        with mock.patch.object(mvm, "session_path", return_value=Path(__file__)), \
+                mock.patch.object(mvm, "load_session", return_value={"payload": {"claudeAuth": "interactive"}}):
+            self.assertIn("mvm login i1", mvm.agent_error_hint("i1", "authentication_failed"))
+
     def test_error_agent_gets_note_with_hint(self):
         self.fleet({"a3": "RUNNING"}, {"a3": self.status({"claude": {
             "state": "error", "since": self.NOW - 5, "error": "authentication_failed", "message": "401"}})})
@@ -1796,6 +1806,45 @@ class CliTest(unittest.TestCase):
         self.assertIn("HTTP 403", err)
         self.assertEqual(len(tokens()), 3)
 
+    def test_vm_commands_on_terminated_vm_point_to_up(self):
+        self.mvm("up", "t1")
+        self.mvm("stop", "t1", "--no-save")
+        env = dict(self.env, PMVA_STUB_TOKEN_NEEDS_RUNNING="1")
+        for cmd in ("peek", "send", "result", "shell"):
+            rc, _, err = self.mvm(cmd, "t1", *(["x"] if cmd == "send" else []), env=env, check=False)
+            self.assertNotEqual(rc, 0, cmd)
+            self.assertIn("t1 は終了しています。mvm up t1", err, cmd)
+            self.assertNotIn("に失敗しました", err, cmd)
+
+    def test_vm_commands_on_suspended_vm_point_to_resume(self):
+        self.mvm("up", "t2")
+        (Path(self.env["PMVA_STUB_DIR"]) / "microvm-0000.suspended").touch()
+        env = dict(self.env, PMVA_STUB_TOKEN_NEEDS_RUNNING="1")
+        rc, _, err = self.mvm("peek", "t2", env=env, check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("mvm resume t2", err)
+
+    def test_send_refuses_agent_that_is_not_running_but_not_explicit_window(self):
+        api = StatusApi()
+        try:
+            self.mvm("up", "a1")
+            env = dict(self.env, PMVA_API_BASE_URL=f"http://127.0.0.1:{api.server_address[1]}")
+            for state, hint in (("exited", "mvm renew a1"), ("failed", "mvm peek a1"), ("starting", "mvm wait a1")):
+                api.statuses = [self.status(claude=state)]
+                api.received.clear()
+                rc, _, err = self.mvm("send", "a1", "続けて", env=env, check=False)
+                self.assertNotEqual(rc, 0, state)
+                self.assertIn(hint, err, state)
+                self.assertEqual(api.received, [], "断ったときは送らない")
+            api.statuses = [self.status(claude="exited")]
+            self.mvm("send", "a1", "--window", "shell", "ls", env=env)
+            self.assertEqual(api.received[-1][1]["window"], "shell")
+            api.statuses = [self.status(claude="working")]
+            self.mvm("send", "a1", "続けて", env=env)
+            self.assertEqual(api.received[-1][1]["window"], "claude")
+        finally:
+            api.shutdown()
+
     def start_ui(self, env):
         """mvm ui を起動し、(プロセス, ベース URL, 合言葉) を返す。"""
         proc = subprocess.Popen([sys.executable, str(MVM), "ui", "--no-open"], env=env, cwd=self.tmp.name,
@@ -2053,9 +2102,17 @@ class CliTest(unittest.TestCase):
                            "codex": {"agent": "codex", "state": "working", "text": None}}
             rc, out, _ = self.mvm("result", "a1", "--agent", "claude", env=env)
             self.assertEqual(out.strip(), "PR を作りました: #12")
-            rc, out, _ = self.mvm("result", "a1", env=env, check=False)
-            self.assertEqual(rc, 1, "応答がまだないエージェントがあれば 1")
+            rc, out, err = self.mvm("result", "a1", env=env, check=False)
+            self.assertEqual(rc, 2, "作業中のエージェントがあれば 2 (mvm wait のタイムアウトと同じ)")
             self.assertIn("--- claude (done) ---\nPR を作りました: #12", out.replace("\r\n", "\n"))  # Windows は改行が CRLF
+            self.assertIn("a1 (codex) はまだ作業中です。mvm wait a1", err)
+            self.assertNotIn("まだ codex の応答がありません", out)
+            rc, out, err = self.mvm("result", "a1", "--agent", "codex", "--json", env=env, check=False)
+            self.assertEqual((rc, json.loads(out)["state"]), (2, "working"), "--json は中身をそのまま出し、終了コードだけ 2")
+            self.assertIn("mvm wait a1", err)
+            api.results["codex"] = {"agent": "codex", "state": "done", "text": None}
+            rc, out, _ = self.mvm("result", "a1", env=env, check=False)
+            self.assertEqual(rc, 1, "応答がまだないだけなら 1")
             self.assertIn("(まだ codex の応答がありません)", out)
             _, out, _ = self.mvm("result", "a1", "--json", "--agent", "claude", env=env)
             self.assertEqual(json.loads(out)["text"], "PR を作りました: #12")
@@ -3020,6 +3077,94 @@ class CliTest(unittest.TestCase):
         rc, _, err = self.mvm("setup", env=self.setup_env(PMVA_STUB_ERROR="Unable to locate credentials"), check=False)
         self.assertNotEqual(rc, 0)
         self.assertIn("mvm setup --profile", err)
+
+    SSO_ARN = "arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_Admin_abc123/me@example.com"
+
+    def test_setup_sso_admin_is_pointed_to_permission_set(self):
+        """SSO の管理者には、Enter だけで長期のアクセスキーを作る質問をせず、権限セットを案内する (docs/setup.md)。"""
+        env = self.setup_env(PMVA_STUB_IAM="admin", PMVA_STUB_ARN=self.SSO_ARN)
+        self.stub_dir.mkdir()
+        for kind in ("claude-oauth-token", "github-token"):
+            (self.stub_dir / f"secret-pmva_{kind}").write_text("x", encoding="utf-8")
+        _, _, err = self.mvm("setup", input=b"", env=env)   # 質問が出れば、答えを読めずに止まる
+        self.assertNotIn(["iam", "create-access-key"], [c[:2] for c in self.calls()])
+        self.assertIn("権限セット", err.split("残っている")[-1])
+        self.assertNotIn("準備ができました", err)
+
+    def test_setup_stops_when_lambda_microvms_is_unavailable(self):
+        env = self.setup_env(PMVA_STUB_ERROR="aws: error: argument operation: Invalid choice, valid choices are:",
+                             PMVA_STUB_ERROR_CMDS="lambda-microvms list-managed-microvm-images")
+        rc, _, err = self.mvm("setup", env=env, check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("aws --version", err)
+        self.assertIn("AWS_REGION", err)
+        self.assertNotIn(["cloudformation", "describe-stacks"], [c[:2] for c in self.calls()])
+
+    def test_setup_stale_stack_shows_deploy_command_with_admin_profile(self):
+        self.mvm("infra", "deploy")
+        self.stub_dir.mkdir(exist_ok=True)
+        for kind in ("claude-oauth-token", "github-token"):
+            (self.stub_dir / f"secret-pmva_{kind}").write_text("x", encoding="utf-8")
+        env = self.setup_env(PMVA_STUB_STACK_STATUS="UPDATE_ROLLBACK_COMPLETE")
+        _, _, err = self.mvm("setup", input=b"", env=env)
+        self.assertIn("mvm infra deploy --admin-profile <管理者のプロファイル>", err.split("残っている")[-1])
+        _, _, err = self.mvm("setup", "--profile", "admin", input=b"", env=env)
+        self.assertIn("mvm infra deploy --admin-profile admin", err.split("残っている")[-1])
+
+    def test_infra_admin_profile_applies_only_to_that_command(self):
+        """deploy / operator は --admin-profile のプロファイルで AWS CLI を呼ぶ。config.env は書き換えない。
+        --profile は operator の「作るプロファイル名」なので、deploy では受け付けずに --admin-profile を案内する。"""
+        env = self.setup_env()
+        cfg = Path(self.env["PMVA_CONFIG"])
+        before = cfg.read_text(encoding="utf-8")
+        self.mvm("infra", "deploy", "--admin-profile", "admin", env=env)
+        profiles = [json.loads(x) for x in (self.stub_dir / "profiles.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertIn(["admin", ["cloudformation", "deploy"]], profiles)
+        self.assertEqual({p[0] for p in profiles}, {"admin"})
+        self.mvm("infra", "operator", "--admin-profile", "admin", "--profile", "ops", env=env)
+        self.assertIn(["admin", ["iam", "create-user"]], [json.loads(x) for x in (
+            self.stub_dir / "profiles.jsonl").read_text(encoding="utf-8").splitlines()])
+        self.assertIn("[ops]", (Path(self.tmp.name) / "creds").read_text(encoding="utf-8"))
+        self.assertEqual(cfg.read_text(encoding="utf-8").replace("AWS_PROFILE=ops\n", ""), before)
+        rc, _, err = self.mvm("infra", "deploy", "--profile", "admin", env=env, check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("--admin-profile", err)
+        rc, _, err = self.mvm("infra", "deploy", "--admin-profile", "nope", env=env, check=False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("aws configure sso --profile nope", err)
+
+    def test_setup_asks_auth_and_budget_only_on_a_terminal(self):
+        """認証方式と予算は、端末で、かつ既定のままのときだけ聞いて config.env に書く。"""
+        cfg = Path(self.tmp.name) / "inproc.env"
+
+        def run(fn, answers, tty=True, **conf):
+            cfg.write_text("AWS_REGION=ap-northeast-1\n", encoding="utf-8")
+            with mock.patch.dict(mvm.C, dict(mvm.DEFAULTS, **conf)), mock.patch.object(mvm, "CONFIG_FILE", cfg), \
+                    mock.patch.object(mvm, "aws", return_value=None), \
+                    mock.patch.object(mvm.sys, "stdin") as stdin, mock.patch("builtins.input", side_effect=answers) as inp:
+                stdin.isatty.return_value = tty
+                fn()
+                return mvm.parse_env_file(cfg), inp.call_count
+
+        written, asked = run(mvm.setup_auth_choice, ["2"])
+        self.assertEqual((written["DEFAULT_CLAUDE_AUTH"], asked), ("api-key", 1))
+        written, _ = run(mvm.setup_auth_choice, ["3"])
+        self.assertEqual(written["DEFAULT_CLAUDE_AUTH"], "bedrock")
+        written, _ = run(mvm.setup_auth_choice, ["4"])
+        self.assertEqual((written["DEFAULT_AGENT"], written["DEFAULT_CODEX_AUTH"]), ("codex", "chatgpt"))
+        written, _ = run(mvm.setup_auth_choice, [""])
+        self.assertNotIn("DEFAULT_CLAUDE_AUTH", written, "Enter は既定 (Pro/Max) のまま")
+        for kw in ({"tty": False}, {"DEFAULT_CLAUDE_AUTH": "api-key"}, {"DEFAULT_AGENT": "codex"}):
+            written, asked = run(mvm.setup_auth_choice, [], **kw)
+            self.assertEqual((asked, written), (0, {"AWS_REGION": "ap-northeast-1"}), kw)
+        written, asked = run(mvm.setup_budget, ["50", "me@example.com"])
+        self.assertEqual((written["BUDGET_MONTHLY_USD"], written["BUDGET_EMAIL"], asked), ("50", "me@example.com", 2))
+        for answers in ([""], ["abc"], ["50", "not-an-address"]):
+            written, _ = run(mvm.setup_budget, answers)
+            self.assertNotIn("BUDGET_MONTHLY_USD", written, answers)
+        for kw in ({"tty": False}, {"BUDGET_MONTHLY_USD": "30"}, {"INFRA_TEMPLATE": "minimal"}):
+            written, asked = run(mvm.setup_budget, [], **kw)
+            self.assertEqual(asked, 0, kw)
 
     SSO_EXPIRED = ("Error when retrieving token from sso: Token has expired and refresh failed\n")
 
